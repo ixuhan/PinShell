@@ -78,6 +78,14 @@ pub fn decide(kind: TransportKind, state: TerminalState, ovr: Override) -> Decis
 /// 静默多久之后允许出现「猜测」。
 pub const PROMPT_GUESS_AFTER_MS: u64 = 1200;
 
+/// 这次写入是不是「用户在提交一行」。
+///
+/// 输入条和直通模式最后都走同一个写入接口，所以判定只能看字节：
+/// 以回车（`\r`）或换行（`\n`）结尾就是提交。方向键、Ctrl+C 之类的控制串不算。
+pub fn is_submit(data: &str) -> bool {
+    data.ends_with('\r') || data.ends_with('\n')
+}
+
 /// 把标记流推进成状态。纯状态机：没有时钟、没有 IO，时间以参数传入。
 #[derive(Debug, Clone)]
 pub struct PromptTracker {
@@ -128,7 +136,13 @@ impl PromptTracker {
     }
 
     /// 用户按了回车。立刻视为运行中（比「等 N 毫秒」更保守，且不会误抢键）。
+    ///
+    /// 备用屏例外：全屏程序（vim/less）自己消费回车，状态不能被拽回 Running，
+    /// 否则退出全屏时状态机的起点就错了。
     pub fn on_submit(&mut self) {
+        if self.base == TerminalState::AltScreen {
+            return;
+        }
         self.guess = false;
         self.base = TerminalState::Running;
     }
@@ -291,6 +305,29 @@ mod tests {
             decide(TransportKind::Terminal, t.view(), Override::None).owner,
             Owner::Channel
         );
+    }
+
+    #[test]
+    fn submit_in_alt_screen_stays_alt_screen() {
+        // 全屏程序里的回车属于程序自己，不能把状态拽回 Running
+        let mut t = PromptTracker::new();
+        t.on_event(&OscEvent::AltScreen { entered: true });
+        t.on_submit();
+        assert_eq!(t.view(), TerminalState::AltScreen);
+    }
+
+    #[test]
+    fn only_line_ending_counts_as_submit() {
+        assert!(is_submit("\r"));
+        assert!(is_submit("echo hi\r"));
+        assert!(is_submit("echo hi\n"));
+        // 空写入、方向键、Ctrl+C 都不是提交
+        assert!(!is_submit(""));
+        assert!(!is_submit("\x1b[A"));
+        assert!(!is_submit("\x03"));
+        assert!(!is_submit("echo hi"));
+        // 行中间的回车也算（粘贴多行时最后一行会执行）
+        assert!(is_submit("a\r\nb\r"));
     }
 
     #[test]

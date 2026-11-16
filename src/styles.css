@@ -7,8 +7,14 @@ body,
   background: #0b0e14;
 }
 
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
 #term-host {
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 8px 10px 6px;
   box-sizing: border-box;
 }
@@ -17,10 +23,94 @@ body,
   height: 100%;
 }
 
+/* 输入条：常驻可见，状态点说明此刻按键归谁 */
+#inputbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 8px;
+  padding: 6px 10px;
+  border: 1px solid #24303f;
+  border-radius: 9px;
+  background: linear-gradient(#141b26, #101720);
+  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  color: #8a9ab0;
+}
+
+#inputbar.pass {
+  border-color: #1d2735;
+}
+
+#own-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3c4a5c;
+  flex: none;
+}
+
+#own-dot.ok {
+  background: #46d19a;
+  box-shadow: 0 0 7px -1px #46d19a;
+}
+
+#own-dot.guess {
+  background: #d6a34a;
+  box-shadow: 0 0 7px -1px #d6a34a;
+}
+
+#own-label {
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  color: #65758c;
+  white-space: nowrap;
+}
+
+#inputbar.ok #own-label {
+  color: #46d19a;
+}
+
+#inputbar.guess #own-label {
+  color: #d6a34a;
+}
+
+#ib-prompt {
+  color: #46d19a;
+  flex: none;
+}
+
+#inputbar.pass #ib-prompt,
+#inputbar.pass #ib-input {
+  opacity: 0.45;
+}
+
+#ib-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: #e8eef7;
+  font: inherit;
+  caret-color: #46d19a;
+}
+
+#ib-input:disabled {
+  color: #5b6a7f;
+}
+
+#ib-hint {
+  flex: none;
+  font-size: 10.5px;
+  color: #3f4c60;
+  white-space: nowrap;
+}
+
 #hud {
   position: fixed;
   right: 10px;
-  bottom: 8px;
+  bottom: 46px;
   font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
   color: #4a5a70;
   pointer-events: none;

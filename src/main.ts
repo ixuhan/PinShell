@@ -8,6 +8,10 @@ import "./styles.css";
 
 const t0 = performance.now();
 const hud = document.getElementById("hud") as HTMLDivElement;
+const bar = document.getElementById("inputbar") as HTMLDivElement;
+const dot = document.getElementById("own-dot") as HTMLSpanElement;
+const ownLabel = document.getElementById("own-label") as HTMLSpanElement;
+const ib = document.getElementById("ib-input") as HTMLInputElement;
 
 function log(msg: string) {
   hud.textContent = msg;
@@ -52,6 +56,8 @@ async function boot() {
   sessionId = await invoke<string>("spawn_session", { cols, rows, shell: null, cwd: null });
   tSpawnReturn = performance.now();
   term.focus();
+  // 首帧判定可能在订阅生效前就发出去了，这里补一帧
+  applyOwnership(await invoke<Ownership>("pty_ownership", { id: sessionId }));
   log(
     `bench: 前端就绪 ${Math.round(tSpawnStart - t0)}ms · spawn 调用 ${Math.round(tSpawnReturn - tSpawnStart)}ms`
   );
@@ -72,6 +78,109 @@ function syncSize() {
   }, 60);
 }
 window.addEventListener("resize", syncSize);
+
+// ---------- 输入所有权：裁定在 Rust，前端只按结果切换焦点 ----------
+type Owner = "input_bar" | "channel";
+type Confidence = "certain" | "guess";
+type TermState = "unknown" | "prompt_guess" | "prompt_ready" | "running" | "alt_screen";
+type OverrideMode = "none" | "input_bar" | "passthrough";
+
+interface Ownership {
+  id: string;
+  owner: Owner;
+  confidence: Confidence;
+  state: TermState;
+  override: OverrideMode;
+}
+
+const STATE_TEXT: Record<TermState, string> = {
+  unknown: "未知 · 直通",
+  prompt_guess: "猜测 · 直通",
+  prompt_ready: "提示符就绪 · 可接管",
+  running: "运行中 · 直通",
+  alt_screen: "备用屏 · 直通"
+};
+
+let own: Ownership | null = null;
+
+function applyOwnership(next: Ownership) {
+  const changed =
+    !own ||
+    own.owner !== next.owner ||
+    own.state !== next.state ||
+    own.override !== next.override;
+  own = next;
+  const takes = next.owner === "input_bar";
+  const guess = next.confidence === "guess";
+
+  dot.className = guess ? "guess" : takes ? "ok" : "";
+  bar.className = takes ? "ok" : guess ? "guess" : "pass";
+  ownLabel.textContent =
+    next.override === "passthrough"
+      ? "已锁直通 · 按键全给终端"
+      : next.override === "input_bar"
+        ? "已锁输入条 · 按键不回终端"
+        : STATE_TEXT[next.state];
+
+  ib.disabled = !takes;
+  // 只在本应用的两个焦点之间搬动，别抢别的控件
+  const active = document.activeElement;
+  if (active === ib || active === document.body || active === term.textarea) {
+    if (takes) ib.focus();
+    else term.focus();
+  }
+  if (changed) {
+    console.log(`[own] ${next.state}/${next.owner}/${next.confidence} override=${next.override}`);
+  }
+}
+
+function setOverride(mode: OverrideMode) {
+  if (!sessionId) return;
+  void invoke("pty_set_override", { id: sessionId, mode });
+}
+
+function toggleOverride(mode: Exclude<OverrideMode, "none">) {
+  setOverride(own?.override === mode ? "none" : mode);
+}
+
+// 快捷键放在捕获阶段，避免 xterm 先吃掉按键
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!e.ctrlKey || !e.shiftKey) return;
+    if (e.code === "KeyP") {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleOverride("passthrough");
+    } else if (e.code === "KeyL") {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleOverride("input_bar");
+    }
+  },
+  true
+);
+
+// 输入条是命令的唯一入口：只发「文本 + 回车」，状态推进仍由后端负责
+function sendLine(line: string) {
+  if (!sessionId) return;
+  void invoke("pty_write", { id: sessionId, data: line + "\r" });
+}
+
+ib.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const line = ib.value;
+    ib.value = "";
+    sendLine(line);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    ib.value = "";
+  } else if (e.key === "Tab") {
+    // 还没有补全，先把 Tab 占住，别让它把焦点送出输入条
+    e.preventDefault();
+  }
+});
 
 // 输出按帧聚合：来一块就画一块会在 vim 全屏重绘时掉帧（见 docs/bench-m0.md）
 const OUT_FLUSH_MS = 16;
@@ -102,7 +211,7 @@ function queueOut(data: string) {
   }
 }
 
-listen<{ id: string; data: string }>("pty:out", (event) => {
+const listenOut = listen<{ id: string; data: string }>("pty:out", (event) => {
   if (event.payload.id !== sessionId) return;
   if (!firstOutputAt) {
     firstOutputAt = performance.now();
@@ -116,10 +225,15 @@ listen<{ id: string; data: string }>("pty:out", (event) => {
   queueOut(event.payload.data);
 });
 
-listen<{ id: string }>("pty:exit", (event) => {
+const listenExit = listen<{ id: string }>("pty:exit", (event) => {
   if (event.payload.id !== sessionId) return;
   flushOut();
   term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
+});
+
+const listenOwn = listen<Ownership>("pty:ownership", (event) => {
+  if (event.payload.id !== sessionId) return;
+  applyOwnership(event.payload);
 });
 
 // 页面重载 / 关闭窗口时结束会话，避免留下孤儿进程
@@ -198,4 +312,4 @@ async function runBench() {
   }
 }
 
-void boot();
+void Promise.all([listenOut, listenExit, listenOwn]).then(boot);

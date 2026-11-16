@@ -161,6 +161,9 @@
 | OSC 解析（A/B/C/D、CWD、备用屏） | `src-tauri/core-domain/src/osc.rs` | 13 个用例，含逐字节喂入与任意切分 |
 | L1-06/07 真 pwsh 标记链路 | `src-tauri/core-domain/tests/pwsh_markers.rs` | 2 个用例，无窗口、缺 pwsh 自动 skip |
 | 输出按帧聚合（M0 未达标项） | `src/main.ts` | 已改，等一次真实运行复测 |
+| 输入所有权事件 | `src-tauri/src/main.rs` → `pty:ownership` | 判定只在变化时推送；前端只搬焦点，不复制规则 |
+| 输入条最小版 | `index.html`、`src/main.ts`、`src/styles.css` | 三色状态点、回车发送、`Ctrl+Shift+P` 直通、`Ctrl+Shift+L` 锁定 |
+| 集成脚本注入 | `spawn_session` | pwsh/powershell 用 `-NoExit -Command ". <script>"`；不写用户 profile |
 | 本地门禁 | `scripts/test-guard.ps1`（接入 `scripts/push.ps1`） | dev 在跑时自动只跑 L0 并说明原因；已验证「锁住 exe 时拒绝 L1」 |
 | 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
 
