@@ -41,14 +41,20 @@ let firstOutputAt = 0;
 let bytes = 0;
 let benchTerm: Terminal | null = null;
 let benchScheduled = false;
+let tSpawnStart = 0;
+let tSpawnReturn = 0;
 
 async function boot() {
   term.writeln("\x1b[38;5;245m启动会话…\x1b[0m");
   const cols = term.cols;
   const rows = term.rows;
+  tSpawnStart = performance.now();
   sessionId = await invoke<string>("spawn_session", { cols, rows, shell: null, cwd: null });
+  tSpawnReturn = performance.now();
   term.focus();
-  log(`session ${sessionId.slice(0, 8)} · ${cols}x${rows} · webgl ${webgl ? "on" : "off"}`);
+  log(
+    `bench: 前端就绪 ${Math.round(tSpawnStart - t0)}ms · spawn 调用 ${Math.round(tSpawnReturn - tSpawnStart)}ms`
+  );
 }
 
 term.onData((data) => {
@@ -84,6 +90,11 @@ listen<{ id: string; data: string }>("pty:out", (event) => {
 listen<{ id: string }>("pty:exit", (event) => {
   if (event.payload.id !== sessionId) return;
   term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
+});
+
+// 页面重载 / 关闭窗口时结束会话，避免留下孤儿进程
+window.addEventListener("beforeunload", () => {
+  if (sessionId) void invoke("pty_close", { id: sessionId });
 });
 
 // ---------- 基准（M0 验收用） ----------
@@ -146,10 +157,10 @@ async function runBench() {
   try {
     const ping = await bench.ping(300);
     const flood = await bench.flood(1);
-    const start = Math.round(firstOutputAt - t0);
     const text =
-      `启动 ${start}ms · IPC p50 ${ping.p50}ms / p99 ${ping.p99}ms · ` +
-      `1MB 渲染 ${flood.ms}ms (${flood.mbs} MB/s) · webgl ${webgl ? "on" : "off"}`;
+      `前端 ${Math.round(tSpawnStart - t0)}ms + spawn ${Math.round(tSpawnReturn - tSpawnStart)}ms + ` +
+      `首字节 ${Math.round(firstOutputAt - tSpawnReturn)}ms · IPC p50 ${ping.p50}ms/p99 ${ping.p99}ms · ` +
+      `1MB ${flood.ms}ms (${flood.mbs} MB/s) · webgl ${webgl ? "on" : "off"}`;
     log(text);
     void invoke("bench_report", { text });
   } catch (err) {
