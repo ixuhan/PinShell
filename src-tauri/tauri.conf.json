@@ -28,7 +28,8 @@
     "targets": "all",
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "resources": {
-      "../scripts/integration/pinshell.ps1": "integration/pinshell.ps1"
+      "../scripts/integration/pinshell.ps1": "integration/pinshell.ps1",
+      "../scripts/integration/pinshell.bash": "integration/pinshell.bash"
     }
   }
 }

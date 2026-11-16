@@ -32,7 +32,9 @@ Unknown ──133;A──► Prompt ──133;C──► Running ──133;D─�
 
 ### 三、集成脚本的注入方式
 
-默认只对**我们自己启动的进程**注入（PowerShell 用 `-NoExit -Command ". <path>"`，bash 用 `BASH_ENV`），**不写用户 profile、不写注册表 AutoRun**。设置页提供一个可选按钮把一行 `source` 追加到用户 profile（默认关闭）。
+默认只对**我们自己启动的进程**注入（PowerShell 用 `-NoExit -Command ". <path>"`，bash 用 `--init-file <path> -i`），**不写用户 profile、不写注册表 AutoRun**。设置页提供一个可选按钮把一行 `source` 追加到用户 profile（默认关闭）。
+
+bash 不用 `BASH_ENV`：它只对非交互 shell 生效，交互 shell 看不到。`--init-file` 会顶掉默认启动文件，所以脚本自己先读 `/etc/profile` 与 `~/.bashrc`，再把标记包进 `PS1`/`PS0`（用 `\[ \]` 保证 readline 不把标记算进宽度）。
 
 理由：默认零侵入；一旦改用户 dotfiles，卸载后残留会让用户困惑，而且与「便携目录拷走即迁移」冲突。
 

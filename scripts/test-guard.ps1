@@ -95,7 +95,7 @@ if ($Layer -eq 'l0' -or $Layer -eq 'all') {
 if ($Layer -eq 'it' -or $Layer -eq 'all') {
   $reasons = Get-DevBusyReasons
   if ($reasons.Count -gt 0 -and -not $Force) {
-    Write-Output ('[guard] L1 pwsh markers     skipped ({0})' -f ($reasons -join '; '))
+    Write-Output ('[guard] L1 shell markers    skipped ({0})' -f ($reasons -join '; '))
     if ($Layer -eq 'it') {
       # 明确要求跑 L1 却没跑，不能算通过
       Write-Output '[guard] stop the dev instance, or pass -Force to run anyway'
@@ -103,11 +103,11 @@ if ($Layer -eq 'it' -or $Layer -eq 'all') {
       exit 1
     }
   } else {
-    $r = Invoke-CargoTest @('test', '--test', 'pwsh_markers', '--offline', '--manifest-path', $manifest)
+    $r = Invoke-CargoTest @('test', '--test', 'pwsh_markers', '--test', 'bash_markers', '--offline', '--manifest-path', $manifest)
     if ($r.Code -eq 0) {
-      Write-Output ("[guard] L1 pwsh markers     ok      {0}s" -f $r.Seconds)
+      Write-Output ("[guard] L1 shell markers    ok      {0}s" -f $r.Seconds)
     } else {
-      Write-Output ("[guard] L1 pwsh markers     FAILED  {0}s" -f $r.Seconds)
+      Write-Output ("[guard] L1 shell markers    FAILED  {0}s" -f $r.Seconds)
       $failed = $true
     }
   }

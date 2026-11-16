@@ -185,6 +185,8 @@ fn on_path(name: &str) -> bool {
 }
 
 fn resolve_shell(preferred: Option<String>) -> String {
+    // 开发期临时换 shell：PINSHELL_SHELL=... 不改代码也不动设置
+    let preferred = preferred.or_else(|| std::env::var("PINSHELL_SHELL").ok());
     if let Some(s) = preferred.filter(|s| !s.trim().is_empty()) {
         return s;
     }
@@ -202,13 +204,25 @@ fn is_powershell(shell: &str) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or(shell)
         .to_ascii_lowercase();
-    matches!(name.as_str(), "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe")
+    matches!(
+        name.as_str(),
+        "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+    )
+}
+
+fn is_bash(shell: &str) -> bool {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    matches!(name.as_str(), "bash" | "bash.exe")
 }
 
 /// 集成脚本的位置：安装版取资源目录，开发版回退到仓库里的脚本。
-fn integration_script(app: &AppHandle) -> Option<PathBuf> {
+fn integration_script(app: &AppHandle, name: &str) -> Option<PathBuf> {
     if let Ok(dir) = app.path().resource_dir() {
-        let packaged = dir.join("integration").join("pinshell.ps1");
+        let packaged = dir.join("integration").join(name);
         if packaged.is_file() {
             return Some(packaged);
         }
@@ -219,7 +233,7 @@ fn integration_script(app: &AppHandle) -> Option<PathBuf> {
             .join("..")
             .join("scripts")
             .join("integration")
-            .join("pinshell.ps1");
+            .join(name);
         if dev.is_file() {
             return Some(dev);
         }
@@ -260,11 +274,18 @@ fn spawn_session(
 
     // 集成脚本只注入我们自己启动的进程：不写用户 profile、不写注册表（ADR 0003）
     if is_powershell(&shell) {
-        if let Some(script) = integration_script(&app) {
+        if let Some(script) = integration_script(&app, "pinshell.ps1") {
             cmd.arg("-NoLogo");
             cmd.arg("-NoExit");
             cmd.arg("-Command");
             cmd.arg(ps_literal(&script));
+        }
+    } else if is_bash(&shell) {
+        // --init-file 会顶掉默认启动文件，所以脚本自己先读 /etc/profile 与 ~/.bashrc
+        if let Some(script) = integration_script(&app, "pinshell.bash") {
+            cmd.arg("--init-file");
+            cmd.arg(script);
+            cmd.arg("-i");
         }
     }
 
