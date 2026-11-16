@@ -12,3 +12,4 @@
 | 2026-11-16T21:46:53+08:00 | l0 | L0 core-domain: ok 1.4s (54 passed, 0 failed) | PASS | - |
 | 2026-11-16T21:49:17+08:00 | all | L0 core-domain: ok 0.4s (54 passed, 0 failed)<br>L1 shell markers: ok 5.1s (3 passed, 0 failed)<br>L1 persistence: ok 0.8s (11 passed, 0 failed) | PASS | - |
 | 2026-11-16T21:50:15+08:00 | all | L0 core-domain: ok 0.2s (54 passed, 0 failed)<br>L1 shell markers: ok 2.6s (3 passed, 0 failed)<br>L1 persistence: ok 0.7s (11 passed, 0 failed) | PASS | - |
+| 2026-11-16T21:51:36+08:00 | all | L0 core-domain: ok 0.3s (54 passed, 0 failed)<br>L1 shell markers: skipped (target\debug\pinshell.exe is locked by a running app) | PASS | - |

@@ -216,7 +216,6 @@ pub enum WorkspaceLoad {
     Unreadable(String),
 }
 
-#[allow(dead_code)] // M2 接线：会话树落地后由启动流程调用
 pub fn load_workspace(dir: &Path) -> WorkspaceLoad {
     match read_with_backup::<WorkspaceFile>(&dir.join(WORKSPACE_FILE)) {
         Load::Missing => WorkspaceLoad::Missing,

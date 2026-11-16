@@ -622,7 +622,24 @@ fn main() {
     // 数据目录只在启动时解析一次：便携优先，不可写才回退 %APPDATA%。
     // 解析失败不挡启动（本版还没有必需落盘的状态），只把原因记到 stdout。
     match persistence::data_dir() {
-        Ok(dir) => println!("[data] {}", dir.display()),
+        Ok(dir) => {
+            println!("[data] {}", dir.display());
+            match persistence::load_workspace(&dir) {
+                persistence::WorkspaceLoad::Loaded(ws) => println!(
+                    "[data] workspace: {} window(s), {} session(s)",
+                    ws.windows.len(),
+                    ws.sessions.len()
+                ),
+                persistence::WorkspaceLoad::Recovered(ws) => println!(
+                    "[data] workspace recovered from .bak: {} session(s)",
+                    ws.sessions.len()
+                ),
+                persistence::WorkspaceLoad::Missing => println!("[data] workspace: first run"),
+                persistence::WorkspaceLoad::Unreadable(err) => {
+                    eprintln!("[data] workspace unreadable: {err}")
+                }
+            }
+        }
         Err(err) => eprintln!("[data] {err}"),
     }
 
