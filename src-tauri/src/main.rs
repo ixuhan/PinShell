@@ -8,7 +8,7 @@ use core_domain::utf8_stream::Utf8Stream;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -22,7 +22,12 @@ struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     input: Mutex<InputState>,
+    /// 输入条提交过的行，内存里最近 200 条。落盘与掩码是 M3 的事。
+    history: Mutex<VecDeque<String>>,
 }
+
+/// 输入条历史的上限：只服务 ↑↓ 的即时手感，不做持久化。
+const HISTORY_CAP: usize = 200;
 
 /// 输入判定状态：状态机 + 用户显式覆盖 + 去重用的上一帧。
 struct InputState {
@@ -316,6 +321,7 @@ fn spawn_session(
             last_output_ms: now_ms(),
             at_line_start: true,
         }),
+        history: Mutex::new(VecDeque::new()),
     });
     state.sessions.lock().insert(id.clone(), session.clone());
 
@@ -392,24 +398,28 @@ fn spawn_session(
     Ok(id)
 }
 
-#[tauri::command]
-fn pty_write(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    data: String,
+/// 写入会话的公共路径。`from_bar` 决定这条命令要不要进输入条历史。
+fn write_session(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    id: &str,
+    data: &str,
+    from_bar: bool,
 ) -> Result<(), String> {
     let session = state
         .sessions
         .lock()
-        .get(&id)
+        .get(id)
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
 
     // 提交意图先于字节生效：回车一按就停止接管，比等标记回来更保守
-    if is_submit(&data) {
+    if is_submit(data) {
         session.input.lock().tracker.on_submit();
-        push_ownership(&app, &session, &id);
+        push_ownership(app, &session, id);
+        if from_bar {
+            remember(&session, data);
+        }
     }
 
     let mut writer = session.writer.lock();
@@ -417,6 +427,45 @@ fn pty_write(
         .write_all(data.as_bytes())
         .and_then(|_| writer.flush())
         .map_err(|e| format!("write: {e}"))
+}
+
+#[tauri::command]
+fn pty_write(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
+    write_session(&app, &state, &id, &data, false)
+}
+
+/// 输入条提交一行：与逐键写入走同一条路径，额外记历史。
+#[tauri::command]
+fn pty_send_line(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    line: String,
+) -> Result<(), String> {
+    write_session(&app, &state, &id, &format!("{line}\r"), true)
+}
+
+/// 记下输入条提交的一行。只进内存，不落盘；规则在 `core_domain::history`。
+fn remember(session: &Session, data: &str) {
+    core_domain::history::remember(&mut session.history.lock(), data, HISTORY_CAP);
+}
+
+/// 输入条历史，按时间顺序（最后一条是最近的）。
+#[tauri::command]
+fn pty_history(state: State<'_, AppState>, id: String) -> Result<Vec<String>, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    let items: Vec<String> = session.history.lock().iter().cloned().collect();
+    Ok(items)
 }
 
 #[tauri::command]
@@ -494,8 +543,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             spawn_session,
             pty_write,
+            pty_send_line,
             pty_set_override,
             pty_ownership,
+            pty_history,
             pty_resize,
             pty_close,
             bench_ping,

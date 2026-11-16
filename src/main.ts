@@ -58,6 +58,7 @@ async function boot() {
   term.focus();
   // 首帧判定可能在订阅生效前就发出去了，这里补一帧
   applyOwnership(await invoke<Ownership>("pty_ownership", { id: sessionId }));
+  void refreshHistory();
   log(
     `bench: 前端就绪 ${Math.round(tSpawnStart - t0)}ms · spawn 调用 ${Math.round(tSpawnReturn - tSpawnStart)}ms`
   );
@@ -102,6 +103,22 @@ const STATE_TEXT: Record<TermState, string> = {
 };
 
 let own: Ownership | null = null;
+
+// 输入条历史：后端保存，前端只在内存里做 ↑↓ 导航
+let hist: string[] = [];
+let histIdx = -1;
+let histDraft = "";
+
+async function refreshHistory() {
+  if (!sessionId) return;
+  try {
+    hist = await invoke<string[]>("pty_history", { id: sessionId });
+  } catch {
+    hist = [];
+  }
+  histIdx = -1;
+  histDraft = "";
+}
 
 function applyOwnership(next: Ownership) {
   const changed =
@@ -164,7 +181,7 @@ window.addEventListener(
 // 输入条是命令的唯一入口：只发「文本 + 回车」，状态推进仍由后端负责
 function sendLine(line: string) {
   if (!sessionId) return;
-  void invoke("pty_write", { id: sessionId, data: line + "\r" });
+  void invoke("pty_send_line", { id: sessionId, line }).then(refreshHistory);
 }
 
 ib.addEventListener("keydown", (e) => {
@@ -173,9 +190,34 @@ ib.addEventListener("keydown", (e) => {
     const line = ib.value;
     ib.value = "";
     sendLine(line);
+  } else if (e.key === "ArrowUp") {
+    if (!hist.length) return;
+    e.preventDefault();
+    if (histIdx === -1) {
+      histDraft = ib.value;
+      histIdx = hist.length - 1;
+    } else if (histIdx > 0) {
+      histIdx--;
+    }
+    ib.value = hist[histIdx] ?? "";
+    ib.setSelectionRange(ib.value.length, ib.value.length);
+  } else if (e.key === "ArrowDown") {
+    if (histIdx === -1) return;
+    e.preventDefault();
+    if (histIdx < hist.length - 1) {
+      histIdx++;
+      ib.value = hist[histIdx] ?? "";
+    } else {
+      histIdx = -1;
+      ib.value = histDraft;
+      histDraft = "";
+    }
+    ib.setSelectionRange(ib.value.length, ib.value.length);
   } else if (e.key === "Escape") {
     e.preventDefault();
     ib.value = "";
+    histIdx = -1;
+    histDraft = "";
   } else if (e.key === "Tab") {
     // 还没有补全，先把 Tab 占住，别让它把焦点送出输入条
     e.preventDefault();
