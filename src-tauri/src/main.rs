@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use core_domain::osc::{OscEvent, OscParser};
+use core_domain::utf8_stream::Utf8Stream;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -32,45 +34,37 @@ struct ExitPayload {
     id: String,
 }
 
-/// 跨读取块保持 UTF-8 完整：不足一个字符的尾部留到下一次。
-struct Utf8Stream {
-    tail: Vec<u8>,
+/// 从输出流里摘出来的标记，前端只消费它，不再自己解析字节。
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MarkerPayload {
+    PromptStart,
+    PromptEnd,
+    CommandStart,
+    CommandEnd { code: Option<i32> },
+    Cwd { path: String },
+    Title { text: String },
+    AltScreen { entered: bool },
 }
 
-impl Utf8Stream {
-    fn new() -> Self {
-        Self { tail: Vec::new() }
-    }
+#[derive(Clone, Serialize)]
+struct MarkerEvent {
+    id: String,
+    marker: MarkerPayload,
+}
 
-    fn push(&mut self, chunk: &[u8]) -> String {
-        self.tail.extend_from_slice(chunk);
-        let mut out = String::new();
-        loop {
-            match std::str::from_utf8(&self.tail) {
-                Ok(s) => {
-                    out.push_str(s);
-                    self.tail.clear();
-                    break;
-                }
-                Err(err) => {
-                    let valid = err.valid_up_to();
-                    if valid > 0 {
-                        out.push_str(std::str::from_utf8(&self.tail[..valid]).unwrap_or(""));
-                        self.tail.drain(..valid);
-                    }
-                    match err.error_len() {
-                        Some(len) => {
-                            out.push('\u{FFFD}');
-                            self.tail.drain(..len);
-                        }
-                        // 尾部是不完整的多字节序列，等下一块
-                        None => break,
-                    }
-                }
-            }
-        }
-        out
-    }
+fn marker_of(ev: OscEvent) -> Option<MarkerPayload> {
+    Some(match ev {
+        OscEvent::PromptStart => MarkerPayload::PromptStart,
+        OscEvent::PromptEnd => MarkerPayload::PromptEnd,
+        OscEvent::CommandStart => MarkerPayload::CommandStart,
+        OscEvent::CommandEnd { code } => MarkerPayload::CommandEnd { code },
+        OscEvent::Cwd(path) => MarkerPayload::Cwd { path },
+        OscEvent::Title(text) => MarkerPayload::Title { text },
+        OscEvent::AltScreen { entered } => MarkerPayload::AltScreen { entered },
+        // 其它 OSC 只用于排查，没有消费方，不进事件流
+        OscEvent::Other(_) => return None,
+    })
 }
 
 fn on_path(name: &str) -> bool {
@@ -145,10 +139,23 @@ fn spawn_session(
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut stream = Utf8Stream::new();
+        let mut parser = OscParser::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // 先推进标记，再发字节：状态变化不晚于屏幕变化
+                    for ev in parser.feed(&buf[..n]) {
+                        if let Some(marker) = marker_of(ev) {
+                            let _ = app.emit(
+                                "pty:marker",
+                                MarkerEvent {
+                                    id: emit_id.clone(),
+                                    marker,
+                                },
+                            );
+                        }
+                    }
                     let text = stream.push(&buf[..n]);
                     if !text.is_empty() {
                         let _ = app.emit(

@@ -1,0 +1,14 @@
+[package]
+name = "core-domain"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "PinShell domain rules: pure data and rules, no IO, no platform, no Tauri"
+
+# 刻意保持零依赖、零平台代码：这样它的测试可以独立编译（自己的 target 目录），
+# 在 `tauri dev` 正在跑、主 target 被占用时依然能跑。
+[dependencies]
+
+# 只有集成测试用：真 pwsh + ConPTY。库本身仍然零依赖，应用构建不受影响。
+[dev-dependencies]
+portable-pty = "0.9"

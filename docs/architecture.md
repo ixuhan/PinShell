@@ -37,6 +37,8 @@
 
 依赖方向单向：`ui → session-runtime / input-engine / panels → transport / persistence → core-domain`。**禁止** UI 直接触 `transport`，也禁止 `transport` 反向依赖 `session-runtime`。
 
+已落成代码的边界：`src-tauri/core-domain/` 是独立 crate（零依赖、自带测试、可用独立 target 目录编译），终端集成脚本在 `scripts/integration/pinshell.ps1`。
+
 ## 2. 三个核心契约
 
 ### 2.1 Transport

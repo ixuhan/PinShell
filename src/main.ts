@@ -73,6 +73,35 @@ function syncSize() {
 }
 window.addEventListener("resize", syncSize);
 
+// 输出按帧聚合：来一块就画一块会在 vim 全屏重绘时掉帧（见 docs/bench-m0.md）
+const OUT_FLUSH_MS = 16;
+const OUT_MAX_PENDING = 512;
+let outQueue: string[] = [];
+let outTimer: number | undefined;
+
+function flushOut() {
+  if (outTimer !== undefined) {
+    window.clearTimeout(outTimer);
+    outTimer = undefined;
+  }
+  if (!outQueue.length) return;
+  const chunk = outQueue.join("");
+  outQueue.length = 0;
+  term.write(chunk);
+}
+
+function queueOut(data: string) {
+  outQueue.push(data);
+  // 异常爆发时不等帧：先画出来，别把内存堆掉
+  if (outQueue.length >= OUT_MAX_PENDING) {
+    flushOut();
+    return;
+  }
+  if (outTimer === undefined) {
+    outTimer = window.setTimeout(flushOut, OUT_FLUSH_MS);
+  }
+}
+
 listen<{ id: string; data: string }>("pty:out", (event) => {
   if (event.payload.id !== sessionId) return;
   if (!firstOutputAt) {
@@ -84,11 +113,12 @@ listen<{ id: string; data: string }>("pty:out", (event) => {
     window.setTimeout(() => void runBench(), 1500);
   }
   bytes += event.payload.data.length;
-  term.write(event.payload.data);
+  queueOut(event.payload.data);
 });
 
 listen<{ id: string }>("pty:exit", (event) => {
   if (event.payload.id !== sessionId) return;
+  flushOut();
   term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
 });
 
