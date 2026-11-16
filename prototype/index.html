@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>PinShell · 功能原型</title>
+<style>
+  :root{
+    --bg:#070a10; --panel:#0d1219; --panel2:#111823; --panel3:#151d2a;
+    --line:#1c2534; --text:#c8d3e0; --muted:#6b7a8f; --dim:#3f4c60;
+    --green:#4ec9a0; --amber:#e0af68; --blue:#7aa2f7; --red:#f7768e;
+    --purple:#bb9af7; --cyan:#7dcfff;
+    --mono:"Cascadia Mono","JetBrains Mono",Consolas,"Courier New",monospace;
+    --ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(900px 500px at 20% -10%,#132030 0%,#070a10 55%),#070a10;
+    color:var(--text);font-family:var(--ui);padding:26px;display:flex;
+    flex-direction:column;align-items:center;gap:14px;
+  }
+  .hint{
+    font-size:12px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap;
+    align-items:center;justify-content:center;
+  }
+  .hint b{color:var(--text);font-weight:600}
+  .kbd{
+    font-family:var(--mono);font-size:11px;padding:1px 5px;border-radius:4px;
+    background:#1b2433;border:1px solid #2a3648;color:#a9b8cc;
+  }
+  /* ---------- 窗口 ---------- */
+  .win{
+    width:min(1280px,100%);height:min(820px,82vh);min-height:600px;
+    background:var(--bg);border:1px solid var(--line);border-radius:10px;
+    overflow:hidden;display:grid;grid-template-columns:242px 1fr;
+    grid-template-rows:36px 1fr 26px;
+    box-shadow:0 30px 80px -20px #000,0 0 0 1px #0a0f17;
+    grid-template-areas:"title title" "side main" "status status";
+  }
+  /* ---------- 标题栏 ---------- */
+  .titlebar{
+    grid-area:title;display:flex;align-items:center;gap:10px;padding:0 12px;
+    background:linear-gradient(#0e141d,#0b1017);border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;letter-spacing:.3px}
+  .logo{
+    width:14px;height:14px;border-radius:4px;
+    background:linear-gradient(135deg,var(--green),var(--blue));
+    box-shadow:0 0 12px -2px var(--green);
+  }
+  .brand span{color:var(--muted);font-weight:400}
+  .titlebar .spacer{flex:1}
+  .tbtn{
+    width:26px;height:22px;display:grid;place-items:center;border-radius:4px;
+    color:var(--muted);font-size:12px;cursor:pointer;user-select:none;
+  }
+  .tbtn:hover{background:#1a2331;color:var(--text)}
+  .tbtn.close:hover{background:#3a1a22;color:#ff8f9f}
+  /* ---------- 左栏 ---------- */
+  .sidebar{
+    grid-area:side;background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;min-height:0;
+  }
+  .sb-search{
+    margin:8px;padding:5px 8px;border-radius:6px;background:#0a0f16;
+    border:1px solid var(--line);color:var(--muted);font-size:12px;
+    display:flex;align-items:center;gap:6px;
+  }
+  .sb-scroll{overflow:auto;padding:0 6px 8px;flex:1}
+  .sb-group{margin-top:8px}
+  .sb-group-head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:4px 6px;font-size:10.5px;letter-spacing:.9px;color:var(--dim);
+    text-transform:uppercase;
+  }
+  .sb-group-head .add{color:var(--dim);cursor:pointer;font-size:13px;line-height:1}
+  .sb-group-head .add:hover{color:var(--green)}
+  .row{
+    height:28px;display:flex;align-items:center;gap:7px;padding:0 7px;
+    border-radius:5px;font-size:12.5px;color:#aebccd;cursor:pointer;
+    white-space:nowrap;overflow:hidden;
+  }
+  .row:hover{background:#151d29}
+  .row.active{background:#182232;color:#e6eef8;box-shadow:inset 2px 0 0 var(--green)}
+  .row .ico{width:13px;text-align:center;font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .row .name{flex:1;overflow:hidden;text-overflow:ellipsis}
+  .row .tag{font-size:9.5px;color:var(--dim);letter-spacing:.4px}
+  .dot{width:6px;height:6px;border-radius:50%;background:#2b3a4d;flex:none}
+  .dot.hot{background:var(--green);box-shadow:0 0 7px -1px var(--green)}
+  .dot.cold{background:#33404f}
+  .dot.ser{background:var(--amber);box-shadow:0 0 7px -1px var(--amber)}
+  /* ---------- 主区 ---------- */
+  .main{grid-area:main;display:grid;grid-template-rows:1fr 258px;min-height:0;background:var(--bg)}
+  .main > #single,.main > #tiled{grid-row:1;grid-column:1}
+  .main > .bottom{grid-row:2;grid-column:1}
+  /* ---------- 拼接分格 ---------- */
+  #tiled{display:none;min-height:0;background:#0a0f16;gap:1px}
+  #tiled.show{display:grid;grid-template-columns:1fr 1fr}
+  .pane{background:var(--bg);display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .pane.on{box-shadow:inset 0 0 0 1px #2c4a6b}
+  .pane-bar{
+    height:27px;flex:none;display:flex;align-items:center;gap:7px;padding:0 9px;
+    font-size:11px;color:#8fa0b6;background:#0b1017;border-bottom:1px solid #141c27;
+  }
+  .pane-bar .nm{color:#c8d3e0;font-weight:500}
+  .pane-bar .ty{font-size:9px;color:#4a5a70;border:1px solid #22303f;border-radius:3px;padding:0 4px;font-family:var(--mono)}
+  .pane-bar .sp{flex:1}
+  .pane-bar .pb{color:#3f4c60;cursor:pointer;font-size:11px;padding:0 3px;border-radius:3px}
+  .pane-bar .pb:hover{color:#c8d3e0;background:#1a2331}
+  .pane .term{flex:1;padding:7px 10px;font-size:12px;line-height:1.5}
+  .ib-mini{
+    flex:none;display:flex;align-items:center;gap:7px;padding:5px 9px;
+    border-top:1px solid #18212d;background:#0f151e;
+    font-family:var(--mono);font-size:11.5px;color:#c8d3e0;
+  }
+  .ib-mini .gh{color:#4c5b70}
+  .ib-mini .tm{margin-left:auto;font-family:var(--ui);font-size:9.5px;color:#3f4c60}
+  .sbtn.on{color:var(--green)}
+  .term{position:relative;padding:10px 12px 0;font-family:var(--mono);font-size:12.5px;line-height:1.55;overflow:auto;min-height:0}
+  .term .ln{white-space:pre-wrap;world-break:break-word}
+  .ts{color:#4a5a70;user-select:none}
+  .date-anchor{
+    color:var(--dim);font-size:11px;display:flex;align-items:center;gap:8px;margin:6px 0 4px;
+  }
+  .date-anchor:before,.date-anchor:after{content:"";height:1px;background:#1a2331;flex:1}
+  .p{color:var(--green)}
+  .p .path{color:var(--blue)}
+  .cmd{color:#e8eef7}
+  .ok{color:var(--green)}
+  .warn{color:var(--amber)}
+  .err{color:var(--red)}
+  .mut{color:#5b6a7f}
+  .sep-line{height:1px;background:linear-gradient(90deg,#1d2735,transparent);margin:8px 0}
+  .replay-tag{color:#8a7f5c;font-size:11px;letter-spacing:.4px}
+  /* 输入条 */
+  .inputbar-wrap{padding:0 12px 10px}
+  .inputbar{
+    border:1px solid #24303f;border-radius:9px;background:linear-gradient(#141b26,#101720);
+    box-shadow:0 -8px 24px -14px #000;
+    transition:opacity .15s,transform .15s,height .15s;
+    overflow:hidden;
+  }
+  .ib-head{
+    display:flex;align-items:center;gap:8px;padding:6px 10px 0;font-size:10.5px;
+    color:var(--dim);letter-spacing:.5px;
+  }
+  .state{display:flex;align-items:center;gap:5px;color:var(--green)}
+  .state .led{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px -1px var(--green)}
+  .state.guess{color:var(--amber)}
+  .state.guess .led{background:var(--amber);box-shadow:0 0 7px -1px var(--amber)}
+  .state.pass{color:var(--muted)}
+  .state.pass .led{background:#3c4a5c;box-shadow:none}
+  .state.ser{color:var(--amber)}
+  .state.ser .led{background:var(--amber);box-shadow:0 0 7px -1px var(--amber)}
+  .toast{
+    position:fixed;left:50%;bottom:46px;transform:translate(-50%,10px);
+    background:#16202c;border:1px solid #2b3a4f;border-radius:7px;
+    padding:7px 14px;font-size:11.5px;color:#c8d3e0;opacity:0;
+    transition:.18s;pointer-events:none;z-index:80;font-family:var(--mono);
+  }
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .ib-head .spacer{flex:1}
+  .ib-edit{
+    display:flex;align-items:flex-start;gap:8px;padding:7px 10px 8px;
+    font-family:var(--mono);font-size:13px;
+  }
+  .ib-caret{color:var(--green);user-select:none;padding-top:1px}
+  .ib-text{white-space:pre-wrap;word-break:break-word;color:#e8eef7;min-height:19px;flex:1}
+  .ghost{color:#4c5b70}
+  .cursor{
+    display:inline-block;width:7px;height:15px;background:var(--green);
+    vertical-align:-2px;animation:blink 1.1s steps(1) infinite;border-radius:1px;
+  }
+  @keyframes blink{50%{opacity:0}}
+  .ib-actions{display:flex;gap:2px;align-items:center;padding-top:1px}
+  .ib-actions .b{
+    width:24px;height:22px;border-radius:5px;display:grid;place-items:center;
+    color:var(--muted);cursor:pointer;font-size:12px;user-select:none;
+  }
+  .ib-actions .b:hover{background:#1c2534;color:var(--text)}
+  .ib-actions .b.on{background:#1d2d2a;color:var(--green)}
+  .ib-foot{
+    display:flex;gap:12px;align-items:center;padding:0 10px 7px;
+    font-size:10.5px;color:var(--dim);
+  }
+  .ib-foot .k{font-family:var(--mono);color:#7b8ca3;background:#151d2a;border:1px solid #22303f;border-radius:3px;padding:0 4px}
+  .ib-foot .spacer{flex:1}
+  .passbanner{
+    display:none;align-items:center;gap:10px;padding:9px 12px;font-size:11.5px;
+    color:var(--muted);background:linear-gradient(#121924,#0f151e);
+  }
+  .passbanner.show{display:flex}
+  .passbanner .k{font-family:var(--mono);color:#9fb0c6;background:#1b2433;border:1px solid #2a3648;border-radius:3px;padding:0 5px}
+  .inputbar.passthrough .ib-body{display:none}
+  .inputbar.passthrough{border-color:#2a3341}
+  /* ---------- 快捷标签条 ---------- */
+  .snipbar{
+    display:flex;align-items:center;gap:5px;padding:0 2px 6px;overflow:hidden;
+  }
+  .snipbar .lb{
+    font-size:9.5px;color:#3f4c60;letter-spacing:.6px;margin-right:2px;flex:none;
+  }
+  .schip{
+    display:flex;align-items:center;gap:5px;flex:none;max-width:210px;
+    padding:2px 8px;border-radius:6px;font-family:var(--mono);font-size:11px;
+    color:#9db0c8;background:#111925;border:1px solid #1e2a3a;cursor:pointer;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .schip:hover{background:#182333;border-color:#2b3c52;color:#dbe6f2}
+  .schip .act{font-size:9px;color:#40506a;font-family:var(--ui)}
+  .schip.add{color:#42536b;font-size:12px;padding:1px 7px}
+  .schip.add:hover{color:var(--green)}
+  .snipbar .spacer{flex:1}
+  .snipbar .hint2{font-size:9.5px;color:#334155;flex:none;white-space:nowrap}
+  /* ---------- 下方面板 ---------- */
+  .bottom{
+    border-top:1px solid var(--line);background:var(--panel);
+    display:flex;flex-direction:column;min-height:0;
+  }
+  .pane-head{
+    display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;
+    border-bottom:1px solid var(--line);font-size:11.5px;color:var(--muted);
+  }
+  .crumbs{display:flex;align-items:center;gap:3px;font-family:var(--mono);font-size:11.5px}
+  .crumbs span{padding:1px 4px;border-radius:3px;color:#8fa0b6}
+  .crumbs span:hover{background:#1a2331;color:var(--text)}
+  .crumbs .cm{color:#55657a}
+  .pane-head .spacer{flex:1}
+  .chip{
+    font-size:10.5px;padding:1px 7px;border-radius:10px;border:1px solid #27354a;
+    color:#8fa0b6;cursor:pointer;user-select:none;
+  }
+  .chip.on{background:#16241f;border-color:#2c4a3f;color:var(--green)}
+  .cols{
+    display:grid;grid-template-columns:1fr 132px 84px 78px;gap:0;
+    padding:0 10px;height:24px;align-items:center;font-size:10.5px;
+    color:var(--dim);border-bottom:1px solid #141c27;
+  }
+  .cols div{cursor:pointer;display:flex;align-items:center;gap:4px}
+  .cols div:hover{color:#9fb0c6}
+  .cols .sorted{color:var(--text)}
+  .files{overflow:auto;flex:1;padding:2px 6px 6px}
+  .frow{
+    display:grid;grid-template-columns:1fr 132px 84px 78px;gap:0;
+    align-items:center;height:23px;padding:0 4px;border-radius:4px;
+    font-size:11.5px;color:#a7b6c8;cursor:default;
+  }
+  .frow:hover{background:#141d29}
+  .frow.sel{background:#1a2434;box-shadow:inset 0 0 0 1px #2b3a4f}
+  .fname{display:flex;align-items:center;gap:7px;overflow:hidden;white-space:nowrap}
+  .fname .fi{font-family:var(--mono);font-size:10px;width:14px;text-align:center;color:var(--dim)}
+  .fname .fi.dir{color:var(--blue)}
+  .fname .lock{font-size:9.5px;color:var(--amber);border:1px solid #3a3323;border-radius:3px;padding:0 3px}
+  .fm{color:#5e6d81;font-family:var(--mono);font-size:10.5px}
+  .pane-foot{
+    height:22px;display:flex;align-items:center;gap:10px;padding:0 10px;
+    border-top:1px solid #141c27;font-size:10.5px;color:var(--dim);background:#0b1017;
+  }
+  /* ---------- 状态栏 ---------- */
+  .statusbar{
+    grid-area:status;background:#080c12;border-top:1px solid #131b26;
+    display:flex;align-items:center;gap:14px;padding:0 10px;font-size:10.5px;color:#63728a;
+  }
+  .statusbar .seg{display:flex;align-items:center;gap:5px}
+  .statusbar .spacer{flex:1}
+  .statusbar .hi{color:#9db0c8}
+  .sbtn{
+    display:flex;align-items:center;gap:4px;padding:1px 6px;border-radius:4px;
+    cursor:pointer;color:#7d8ca1;
+  }
+  .sbtn:hover{background:#131b26;color:var(--text)}
+  /* ---------- 浮层 ---------- */
+  .overlay{
+    position:fixed;inset:0;background:#04070bcc;backdrop-filter:blur(2px);
+    display:none;align-items:center;justify-content:center;z-index:50;
+  }
+  .overlay.show{display:flex}
+  .modal{
+    width:min(720px,90vw);background:var(--panel2);border:1px solid #263346;
+    border-radius:10px;box-shadow:0 40px 90px -20px #000;overflow:hidden;
+  }
+  .modal-head{
+    display:flex;align-items:center;gap:9px;padding:10px 14px;
+    border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);
+  }
+  .modal-head .q{font-family:var(--mono);color:#8fa0b6}
+  .modal-head .q input{
+    background:transparent;border:0;outline:0;color:#e6eef8;font-family:var(--mono);
+    font-size:13px;width:100%;
+  }
+  .modal-body{padding:8px;max-height:52vh;overflow:auto}
+  .hitem{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:6px;font-family:var(--mono);font-size:12px;color:#b6c4d6;cursor:pointer}
+  .hitem.sel{background:#1a2434;box-shadow:inset 2px 0 0 var(--green);color:#e8eef7}
+  .hitem .sn{font-size:10px;color:var(--dim);font-family:var(--ui);min-width:26px}
+  .hitem .hl{color:var(--amber)}
+  .hitem .at{font-size:10px;color:var(--dim);margin-left:auto;font-family:var(--ui)}
+  .masked{color:#5c6b80;letter-spacing:1px}
+  .modal-foot{
+    display:flex;gap:14px;padding:7px 14px;border-top:1px solid var(--line);
+    font-size:10.5px;color:var(--dim);background:#0c1219;
+  }
+  .modal-foot .k{font-family:var(--mono);color:#8298b0}
+  /* 设置 */
+  .setgrid{display:grid;grid-template-columns:150px 1fr;gap:2px 10px;padding:8px 12px}
+  .setgrid .k{font-size:11.5px;color:var(--muted);padding:7px 0}
+  .setgrid .v{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:11.5px;color:#b6c4d6}
+  .tg{
+    width:30px;height:16px;border-radius:9px;background:#26313f;position:relative;cursor:pointer;flex:none;
+  }
+  .tg:after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#7d8ca1;transition:.15s}
+  .tg.on{background:#1e3b32}
+  .tg.on:after{left:16px;background:var(--green)}
+  .num{
+    width:62px;background:#0a0f16;border:1px solid var(--line);border-radius:5px;
+    color:#c8d3e0;font-family:var(--mono);font-size:11px;padding:2px 6px;outline:0;
+  }
+  .segbtn{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  .segbtn span{padding:2px 8px;font-size:10.5px;color:var(--muted);cursor:pointer}
+  .segbtn span.on{background:#1a2434;color:var(--text)}
+  .setsec{padding:8px 14px 2px;font-size:10.5px;letter-spacing:.8px;color:var(--dim);text-transform:uppercase}
+  /* 片段面板 */
+  .snic{position:absolute;right:12px;bottom:96px;width:330px;background:var(--panel2);border:1px solid #263346;border-radius:9px;box-shadow:0 24px 50px -18px #000;display:none;overflow:hidden;z-index:20}
+  .snic.show{display:block}
+  .snic .h{padding:8px 11px;border-bottom:1px solid var(--line);font-size:10.5px;color:var(--dim);display:flex;align-items:center;gap:6px}
+  .snic .h .spacer{flex:1}
+  .srow{padding:7px 11px;display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;color:#b6c4d6;cursor:pointer}
+  .srow:hover{background:#182130}
+  .srow .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .srow .mini{font-family:var(--ui);font-size:9.5px;color:var(--dim);border:1px solid #26313f;border-radius:3px;padding:0 4px}
+  .srow:hover .mini{color:#9fb0c6;border-color:#34435a}
+  /* 串口 */
+  .serial-cfg{display:none;align-items:center;gap:6px;padding:6px 12px 8px;flex-wrap:wrap}
+  .serial-cfg.show{display:flex}
+  .pill{border:1px solid #2b3a4f;border-radius:12px;padding:2px 9px;font-size:10.5px;color:#8fa0b6;cursor:pointer;font-family:var(--mono)}
+  .pill:hover{border-color:#3c5070;color:#c8d3e0}
+  .pill.act{background:#2a2418;border-color:#4a3f22;color:var(--amber)}
+  .hexcol{color:#6f8fb5}
+</style>
+</head>
+<body>
+
+<div class="hint">
+  <span>功能原型（静态）</span>
+  <span><b>点左栏的行</b> 切换终端会话 / 串口会话</span>
+  <span><b>点 ⌨</b> 切直通模式</span>
+  <span><b>点 ⚡</b> 看命令片段</span>
+  <span><b>点 ⌗ / 按 Ctrl+R</b> 看历史浮层</span>
+  <span><b>点 ⚙</b> 看设置</span>
+  <span><b>点 🧹</b> 一键清窗口</span>
+</div>
+
+<div class="win">
+  <!-- 标题栏 -->
+  <div class="titlebar">
+    <div class="brand"><div class="logo"></div>PinShell <span>· 工作区</span></div>
+    <div class="spacer"></div>
+    <div class="tbtn" title="最小化">—</div>
+    <div class="tbtn" title="最大化">□</div>
+    <div class="tbtn close" title="关闭">✕</div>
+  </div>
+
+  <!-- 左栏 -->
+  <aside class="sidebar">
+    <div class="sb-search">⌕ 搜索会话 / 片段<span style="margin-left:auto;color:#3f4c60">Ctrl+Shift+F</span></div>
+    <div class="sb-scroll">
+      <div class="sb-group">
+        <div class="sb-group-head"><span>终端 · 3</span><span class="add" title="新建会话">+</span></div>
+        <div class="row active" data-view="term" onclick="pick(this)">
+          <span class="ico">›_</span><span class="name">PinShell 源码</span><span class="dot hot"></span>
+        </div>
+        <div class="row" data-view="term2" onclick="pick(this)">
+          <span class="ico">›_</span><span class="name">构建机 · wsl</span><span class="dot cold"></span>
+        </div>
+        <div class="row" data-view="term3" onclick="pick(this)">
+          <span class="ico">›_</span><span class="name">旧版脚本 · cmd</span><span class="dot cold"></span>
+        </div>
+      </div>
+
+      <div class="sb-group">
+        <div class="sb-group-head"><span>串口 · 2</span><span class="add" title="刷新端口列表">⟳</span></div>
+        <div class="row" data-view="serial" onclick="pick(this)">
+          <span class="ico">⇄</span><span class="name">ESP32 · COM7</span><span class="dot ser"></span>
+        </div>
+        <div class="row" data-view="serial2" onclick="pick(this)">
+          <span class="ico">⇄</span><span class="name">PLC 网关 · COM3</span><span class="dot cold"></span>
+        </div>
+        <div class="sb-group-head" style="padding-left:6px;margin-top:6px">
+          <span style="text-transform:none;letter-spacing:0">未使用端口</span>
+          <span class="add" title="1 秒自动刷新">⟳1s</span>
+        </div>
+        <div class="row" style="opacity:.55;cursor:default">
+          <span class="ico">⇄</span><span class="name">USB-SERIAL CH340 · COM5</span><span class="tag">USB</span>
+        </div>
+        <div class="row" style="opacity:.55;cursor:default">
+          <span class="ico">⇄</span><span class="name">Standard Serial · COM1</span><span class="tag">PCI</span>
+        </div>
+        <div class="row" style="opacity:.4;cursor:default">
+          <span class="ico">⇄</span><span class="name">Bluetooth 链接 · COM9</span><span class="tag">BT</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <div id="single" style="display:flex;flex-direction:column;min-height:0">
+      <!-- 终端 -->
+      <div class="term" id="term">
+        <div class="ln"><span class="replay-tag">──── 上次会话回放 · 11 月 16 日 16:42 ────</span></div>
+        <div class="ln"><span class="ts">[16:42:07]</span> <span class="p">PS <span class="path">F:\PinShell</span>&gt;</span> <span class="cmd">cargo build --release</span></div>
+        <div class="ln"><span class="ts">[16:42:41]</span> <span class="ok">Finished</span> `release` profile [optimized] target(s) in 34.02s</div>
+        <div class="sep-line"></div>
+        <div class="date-anchor">11 月 16 日</div>
+        <div class="ln"><span class="ts">[17:47:55]</span> <span class="p">PS <span class="path">F:\PinShell</span>&gt;</span> <span class="cmd">git status --short</span></div>
+        <div class="ln"><span class="ts">[17:47:56]</span>  M src/session/runtime.rs</div>
+        <div class="ln"><span class="ts">[17:47:56]</span> ?? docs/research/</div>
+        <div class="ln"><span class="ts">[17:48:02]</span> <span class="p">PS <span class="path">F:\PinShell</span>&gt;</span> <span class="cmd">git add -A && git commit -m "会话快照改为原子写"</span></div>
+        <div class="ln"><span class="ts">[17:48:03]</span> <span class="ok">[main 4f2c1ab]</span> 会话快照改为原子写</div>
+        <div class="ln"><span class="ts">[17:48:03]</span>  7 files changed, 214 insertions(+), 31 deletions(-)</div>
+        <div class="ln"><span class="ts">[17:50:11]</span> <span class="p">PS <span class="path">F:\PinShell</span>&gt;</span> <span class="cursor"></span></div>
+      </div>
+
+      <!-- 输入条 -->
+      <div class="inputbar-wrap">
+        <!-- 常驻快捷标签条（命令片段） -->
+        <div class="snipbar" id="snipbar">
+          <span class="lb">片段</span>
+          <span class="spacer"></span>
+          <span class="hint2">单击按默认动作 · Ctrl+单击反向</span>
+        </div>
+
+        <div class="inputbar" id="ib">
+          <div class="ib-head">
+            <span class="state" id="state"><span class="led"></span>提示符就绪 · 可接管</span>
+            <span class="spacer"></span>
+            <span id="modehint" style="color:#3f4c60">Ctrl+Shift+P 切直通</span>
+          </div>
+          <div class="ib-body">
+            <div class="ib-edit">
+              <span class="ib-caret" id="ibcaret">❯</span>
+              <div class="ib-text" id="ibtext">git status<span class="ghost"> --short</span><span class="cursor"></span></div>
+              <div class="ib-actions">
+                <div class="b" id="bsnip" title="命令片段 (Ctrl+Shift+S)">⚡</div>
+                <div class="b" id="bhist" title="历史检索 (Ctrl+R)">⌗</div>
+                <div class="b" id="bclear" title="一键清窗口 (Ctrl+Shift+K)">🧹</div>
+                <div class="b" id="bpass" title="切换直通模式 (Ctrl+Shift+P)">⌨</div>
+              </div>
+            </div>
+            <div class="ib-foot" id="ibfoot">
+              <span><span class="k">Tab</span> 采纳</span>
+              <span><span class="k">↑↓</span> 历史</span>
+              <span><span class="k">Shift+Enter</span> 换行</span>
+              <span class="spacer"></span>
+              <span>Enter 执行</span>
+            </div>
+          </div>
+          <div class="passbanner" id="passbanner">
+            <span>直通模式：按键已全部交给终端，输入条暂不接管。</span>
+            <span class="spacer" style="flex:1"></span>
+            <span><span class="k">Ctrl+Shift+P</span> 回到输入条</span>
+          </div>
+        </div>
+
+        <!-- 串口配置行 -->
+        <div class="serial-cfg" id="serialcfg">
+          <span class="pill act" title="点击切换波特率，会自动重开端口">115200</span>
+          <span class="pill act" title="逐键直发：每敲一个键立刻写出；切行缓冲则攒满一行再发">直发</span>
+          <span class="pill">8-N-1</span>
+          <span class="pill">无流控</span>
+          <span class="pill">DTR 低</span>
+          <span class="pill">RTS 低</span>
+          <span class="pill act">HEX 收</span>
+          <span class="pill">CRLF</span>
+          <span class="pill">日志 ●</span>
+          <span style="margin-left:auto;color:#3f4c60;font-size:10.5px">暂停 = 释放端口</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 拼接视图：终端 + 串口同窗并排 -->
+    <div id="tiled">
+      <section class="pane on" onclick="focusPane(this)">
+        <div class="pane-bar">
+          <span class="dot hot"></span><span class="nm">PinShell 源码</span><span class="ty">pwsh</span>
+          <span class="sp"></span>
+          <span class="pb" title="拖出成独立窗口">⇱</span>
+          <span class="pb" title="向右拆分格">◫</span>
+          <span class="pb" title="关闭分格">✕</span>
+        </div>
+        <div class="term">
+          <div class="ln"><span class="ts">[17:58:02]</span> <span class="p">PS <span class="path">F:\PinShell</span>&gt;</span> <span class="cmd">cargo run -- --session com7</span></div>
+          <div class="ln"><span class="ts">[17:58:03]</span> <span class="ok">Compiling</span> pinshell v0.1.0</div>
+          <div class="ln"><span class="ts">[17:58:09]</span> <span class="ok">Finished</span> dev profile in 6.1s</div>
+          <div class="ln"><span class="ts">[17:58:09]</span> <span class="ok">Running</span> `target\debug\pinshell.exe`</div>
+          <div class="ln"><span class="ts">[17:58:09]</span> <span class="mut">[串口 COM7 已打开，等待握手…]</span></div>
+          <div class="ln"><span class="ts">[17:58:14]</span> <span class="p">PS <span class="path">F:\PinShell</span>&gt;</span> <span class="cursor"></span></div>
+        </div>
+        <div class="ib-mini">
+          <span style="color:#4ec9a0">❯</span><span>git ad</span><span class="gh">d -A</span><span class="cursor"></span>
+          <span class="tm">Enter 执行 · Tab 采纳</span>
+        </div>
+      </section>
+
+      <section class="pane" onclick="focusPane(this)">
+        <div class="pane-bar">
+          <span class="dot ser"></span><span class="nm">ESP32 · COM7</span><span class="ty">serial</span>
+          <span class="sp"></span>
+          <span class="pb" title="拖出成独立窗口">⇱</span>
+          <span class="pb" title="向右拆分格">◫</span>
+          <span class="pb" title="关闭分格">✕</span>
+        </div>
+        <div class="term">
+          <div class="ln"><span class="ts">[17:58:03]</span> <span class="mut">端口已打开 COM7 @115200</span></div>
+          <div class="ln"><span class="ts">[17:58:10]</span> AT+GMR</div>
+          <div class="ln"><span class="ts">[17:58:10]</span> AT version:1.7.4.0</div>
+          <div class="ln"><span class="ts">[17:58:11]</span> <span class="hexcol">RX 48 65 6C 6C 6F</span></div>
+          <div class="ln"><span class="ts">[17:58:11]</span> Hello</div>
+          <div class="ln"><span class="ts">[17:58:16]</span> <span class="warn">! 校验失败 · 期望 0x5A 收到 0x5B</span></div>
+        </div>
+        <div class="ib-mini">
+          <span style="color:#e0af68">»</span><span class="hexcol">AT+</span><span class="cursor"></span>
+          <span class="tm">直发 · 37 ms 前收到</span>
+        </div>
+      </section>
+    </div>
+
+    <!-- 文件面板 -->
+    <div class="bottom">
+      <div class="pane-head">
+        <span style="font-size:11px;color:#55657a">▤</span>
+        <div class="crumbs">
+          <span>F:</span><span class="cm">›</span><span>PinShell</span><span class="cm">›</span><span>src</span><span class="cm">›</span><span style="color:#dbe6f2">session</span>
+        </div>
+        <span class="spacer"></span>
+        <span class="chip on" id="chipFollow" title="跟随当前会话 CWD">跟随</span>
+        <span class="chip" id="chipFixed" title="固定在某个路径">固定</span>
+        <span style="color:#3f4c60">|</span>
+        <span class="chip" title="手动刷新">⟳</span>
+      </div>
+      <div class="cols">
+        <div class="sorted" onclick="sortBy(this)">名称 ▲</div>
+        <div onclick="sortBy(this)">修改时间</div>
+        <div onclick="sortBy(this)">大小</div>
+        <div onclick="sortBy(this)">类型</div>
+      </div>
+      <div class="files">
+        <div class="frow"><div class="fname"><span class="fi dir">▸</span>..</div><div class="fm">11-16 16:02</div><div class="fm">—</div><div class="fm">文件夹</div></div>
+        <div class="frow"><div class="fname"><span class="fi dir">▸</span>com2<span class="lock" title="Windows 保留设备名，需 \\?\ 前缀访问">保留名</span></div><div class="fm">11-16 15:40</div><div class="fm">—</div><div class="fm">文件夹</div></div>
+        <div class="frow"><div class="fname"><span class="fi dir">▸</span>integration</div><div class="fm">11-16 15:12</div><div class="fm">—</div><div class="fm">文件夹</div></div>
+        <div class="frow sel"><div class="fname"><span class="fi">·</span>mod.rs</div><div class="fm">11-16 17:31</div><div class="fm">3.4 KB</div><div class="fm">Rust</div></div>
+        <div class="frow"><div class="fname"><span class="fi">·</span>runtime.rs</div><div class="fm">11-16 17:47</div><div class="fm">12.8 KB</div><div class="fm">Rust</div></div>
+        <div class="frow"><div class="fname"><span class="fi">·</span>snapshot.rs</div><div class="fm">11-16 16:58</div><div class="fm">6.1 KB</div><div class="fm">Rust</div></div>
+        <div class="frow"><div class="fname"><span class="fi">·</span>transport.rs</div><div class="fm">11-15 22:03</div><div class="fm">9.2 KB</div><div class="fm">Rust</div></div>
+      </div>
+      <div class="pane-foot">
+        <span>跟随会话 CWD</span><span>·</span><span>4 项 · 1 选中</span>
+        <span style="flex:1"></span>
+        <span>最近读取 17:51:03</span><span>·</span><span>每秒刷新</span>
+      </div>
+    </div>
+  </main>
+
+  <!-- 状态栏 -->
+  <div class="statusbar">
+    <span class="seg"><span style="color:#4ec9a0">●</span> <span class="hi" id="sbName">PinShell 源码</span> <span id="sbShell">· PowerShell 7.5</span></span>
+    <span class="seg">F:\PinShell</span>
+    <span class="seg">UTF-8</span>
+    <span class="seg">80×24</span>
+    <span class="spacer"></span>
+    <span class="sbtn" id="sTile" title="把终端与串口拼到同一窗口">⇹ 拼接</span>
+    <span class="sbtn" id="sClear" title="清窗口 + 卷轴 + 回放缓冲，不动命令历史">🧹 清窗口</span>
+    <span class="sbtn" title="检查更新">↑ 已是最新</span>
+    <span class="sbtn" id="sSet" title="设置">⚙</span>
+  </div>
+</div>
+
+<!-- 命令片段 -->
+<div class="snic" id="snip">
+  <div class="h">⚡ 本会话命令片段 <span class="spacer"></span><span style="color:#3f4c60">Enter 发送 · Shift+Enter 填充</span></div>
+  <div class="srow"><span class="t">cargo test --all</span><span class="mini">填入</span><span class="mini">发送</span></div>
+  <div class="srow"><span class="t">cargo fmt --all && git add -A</span><span class="mini">填入</span><span class="mini">发送</span></div>
+  <div class="srow"><span class="t">git push -u origin HEAD</span><span class="mini">填入</span><span class="mini">发送</span></div>
+  <div class="srow"><span class="t">cd \\wsl$\Ubuntu\home\dev</span><span class="mini">填入</span><span class="mini">发送</span></div>
+</div>
+
+<!-- 历史浮层 -->
+<div class="overlay" id="histOv">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="q">⌕</span>
+      <span class="q" style="flex:1"><input value="git" spellcheck="false" /></span>
+      <span style="color:#3f4c60">本会话 · 1 842 条</span>
+    </div>
+    <div class="modal-body">
+      <div class="hitem sel"><span class="sn">1</span>git add -A &amp;&amp; git commit -m "会话快照改为原子写"<span class="at">17:48</span></div>
+      <div class="hitem"><span class="sn">2</span>git status <span class="hl">--short</span><span class="at">17:47</span></div>
+      <div class="hitem"><span class="sn">3</span>git log --oneline -12<span class="at">16:31</span></div>
+      <div class="hitem"><span class="sn">4</span>git diff --stat HEAD~1<span class="at">16:18</span></div>
+      <div class="hitem"><span class="sn">5</span>git config --global core.autocrlf false<span class="at">15:52</span></div>
+      <div class="hitem"><span class="sn">6</span>git remote -v<span class="at">昨天</span></div>
+      <div class="hitem"><span class="sn">7</span>mysql -u root -p<span class="masked">********</span> -h 10.0.0.7<span class="at">昨天</span></div>
+    </div>
+    <div class="modal-foot">
+      <span><span class="k">↑↓</span> 选择</span><span><span class="k">Enter</span> 执行</span>
+      <span><span class="k">Tab</span> 填回输入框</span><span><span class="k">Esc</span> 还原原文</span>
+      <span style="margin-left:auto">打码条目不可检索原文</span>
+    </div>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="overlay" id="setOv">
+  <div class="modal" style="width:min(680px,92vw)">
+    <div class="modal-head">⚙ 设置 <span style="margin-left:auto;color:#3f4c60">即时生效 · data/settings.json</span></div>
+    <div class="setsec">输入</div>
+    <div class="setgrid">
+      <div class="k">Ghost Text 预测</div><div class="v"><div class="tg on" onclick="this.classList.toggle('on')"></div><span style="color:#5e6d81">40ms 防抖 · 丢弃过期请求</span></div>
+      <div class="k">采纳键</div><div class="v"><div class="segbtn"><span class="on">Tab</span><span>→</span><span>Ctrl+→</span><span>↑</span></div><span style="color:#5e6d81">可多选</span></div>
+      <div class="k">退出全屏后</div><div class="v"><div class="segbtn"><span class="on">回输入框</span><span>留直通</span></div></div>
+      <div class="k">点击终端</div><div class="v"><div class="segbtn"><span>无动作</span><span class="on">进直通</span></div></div>
+    </div>
+    <div class="setsec">历史</div>
+    <div class="setgrid">
+      <div class="k">每会话上限</div><div class="v"><input class="num" value="20000" /><span style="color:#5e6d81">条</span></div>
+      <div class="k">敏感词掩码</div><div class="v"><div class="tg on" onclick="this.classList.toggle('on')"></div><span style="color:#5e6d81">password, token, -p, secret</span></div>
+    </div>
+    <div class="setsec">显示</div>
+    <div class="setgrid">
+      <div class="k">行首时间戳</div><div class="v"><div class="tg on" onclick="this.classList.toggle('on')"></div><span style="color:#5e6d81">跨天自动插日期锚点</span></div>
+      <div class="k">回滚行数</div><div class="v"><input class="num" value="10000" /></div>
+      <div class="k">内容恢复</div><div class="v"><div class="tg on" onclick="this.classList.toggle('on')"></div><span style="color:#5e6d81">空闲 3 秒落盘</span></div>
+      <div class="k">WebGL 渲染</div><div class="v"><div class="tg" onclick="this.classList.toggle('on')"></div><span style="color:#5e6d81">大输出更快，老 GPU 关掉</span></div>
+    </div>
+    <div class="setsec">数据</div>
+    <div class="setgrid">
+      <div class="k">数据目录</div><div class="v"><span style="font-family:var(--mono);font-size:11px;color:#9fb0c6">F:\PinShell\data\</span><span style="color:#5e6d81">便携 · 只读则回退 APPDATA</span></div>
+    </div>
+    <div class="modal-foot"><span><span class="k">Esc</span> 关闭</span><span style="margin-left:auto">设置改动立即写入，无需重启</span></div>
+  </div>
+</div>
+
+<script>
+  const $ = (s) => document.querySelector(s);
+  const termDefault = $('#term').innerHTML;
+
+  // 直通模式
+  let passthrough = false;
+  function togglePass() {
+    passthrough = !passthrough;
+    const ib = $('#ib');
+    ib.classList.toggle('passthrough', passthrough);
+    $('#passbanner').classList.toggle('show', passthrough);
+    const st = $('#state');
+    if (passthrough) {
+      st.className = 'state pass';
+      st.innerHTML = '<span class="led"></span>直通模式 · 按键全透传';
+      $('#modehint').textContent = 'Ctrl+Shift+P 恢复输入条';
+    } else {
+      st.className = 'state';
+      st.innerHTML = '<span class="led"></span>提示符就绪 · 可接管';
+      $('#modehint').textContent = 'Ctrl+Shift+P 切直通';
+    }
+    $('#bpass').classList.toggle('on', passthrough);
+  }
+  $('#bpass').onclick = togglePass;
+
+  // 浮层
+  function showOv(id) { $(id).classList.add('show'); }
+  function hideOv(id) { $(id).classList.remove('show'); }
+  $('#bhist').onclick = () => showOv('#histOv');
+  $('#sSet').onclick = () => showOv('#setOv');
+  $('#histOv').onclick = (e) => { if (e.target.id === 'histOv') hideOv('#histOv'); };
+  $('#setOv').onclick = (e) => { if (e.target.id === 'setOv') hideOv('#setOv'); };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { hideOv('#histOv'); hideOv('#setOv'); $('#snip').classList.remove('show'); }
+    if (e.ctrlKey && e.key.toLowerCase() === 'r') { e.preventDefault(); showOv('#histOv'); }
+  });
+
+  // 片段
+  $('#bsnip').onclick = (e) => { e.stopPropagation(); $('#snip').classList.toggle('show'); };
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#snip') && !e.target.closest('#bsnip')) $('#snip').classList.remove('show');
+  });
+
+  // 清窗口
+  function clearAll() {
+    const t = $('#term');
+    t.innerHTML = '<div class="ln mut">[已清空窗口 · 命令历史保留]</div><div class="ln"><span class="p">PS <span class="path">F:\\PinShell</span>&gt;</span> <span class="cursor"></span></div>';
+  }
+  $('#bclear').onclick = clearAll;
+  $('#sClear').onclick = clearAll;
+
+  // ---------- 快捷标签（命令片段） ----------
+  const esc = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const SNIPS = {
+    term: [
+      {t:'cargo test --all', mode:'fill'},
+      {t:'cargo fmt --all && git add -A', mode:'send'},
+      {t:'git push -u origin HEAD', mode:'send'},
+      {t:'cd \\\\wsl$\\Ubuntu\\home\\dev', mode:'fill'},
+    ],
+    term2: [
+      {t:'./scripts/bench.sh', mode:'send'},
+      {t:'cargo build --release', mode:'send'},
+      {t:'tmux attach -t build', mode:'fill'},
+    ],
+    term3: [
+      {t:'legacy.bat --import', mode:'send'},
+      {t:'set PATH=F:\\tools;%PATH%', mode:'fill'},
+    ],
+    serial: [
+      {label:'AT', t:'AT', mode:'send'},
+      {label:'AT+GMR', t:'AT+GMR', mode:'send'},
+      {label:'AT+RST', t:'AT+RST', mode:'send'},
+      {label:'HEX 41 42 0A', t:'41 42 0A', mode:'hex'},
+    ],
+    serial2: [
+      {label:'读寄存器', t:'01 03 00 00 00 0A C5 CD', mode:'hex'},
+      {label:'重启', t:'AT+RST', mode:'send'},
+    ],
+  };
+
+  function toast(msg) {
+    let t = $('#toast');
+    if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; document.body.appendChild(t); }
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(t._h);
+    t._h = setTimeout(() => t.classList.remove('show'), 1200);
+  }
+
+  function renderSnip(view) {
+    const bar = $('#snipbar');
+    bar.innerHTML = '<span class="lb">片段</span>';
+    (SNIPS[view] || []).forEach((s) => {
+      const el = document.createElement('span');
+      el.className = 'schip';
+      const icon = s.mode === 'send' ? '↵' : s.mode === 'hex' ? '0x' : '⌄';
+      el.innerHTML = '<span>' + esc(s.label || s.t) + '</span><span class="act">' + icon + '</span>';
+      el.title = (s.mode === 'send' ? '默认发送' : s.mode === 'hex' ? '默认填为 HEX 字节' : '默认填入输入框')
+        + ' · Ctrl+单击反向动作';
+      el.onclick = (e) => {
+        const act = e.ctrlKey ? (s.mode === 'send' ? 'fill' : 'send') : s.mode;
+        if (act === 'fill' || act === 'hex') {
+          $('#ibtext').innerHTML = (act === 'hex' ? '<span class="hexcol">' + esc(s.t) + '</span>' : esc(s.t)) + '<span class="cursor"></span>';
+          toast('已填入输入框：' + s.t);
+        } else {
+          toast('已发送：' + s.t);
+        }
+      };
+      bar.appendChild(el);
+    });
+    const add = document.createElement('span');
+    add.className = 'schip add';
+    add.textContent = '+';
+    add.title = '把当前输入框内容存为片段';
+    add.onclick = () => toast('把当前输入框内容存为片段');
+    bar.appendChild(add);
+    const sp = document.createElement('span'); sp.className = 'spacer'; bar.appendChild(sp);
+    const hint = document.createElement('span');
+    hint.className = 'hint2';
+    hint.textContent = view.startsWith('serial') ? '串口片段同样可填可发' : '单击按默认动作 · Ctrl+单击反向';
+    bar.appendChild(hint);
+  }
+
+  function setTerminalInput() {
+    const st = $('#state');
+    st.className = 'state';
+    st.innerHTML = '<span class="led"></span>提示符就绪 · 可接管';
+    $('#modehint').textContent = 'Ctrl+Shift+P 切直通';
+    $('#ibcaret').textContent = '❯';
+    $('#ibtext').innerHTML = 'git status<span class="ghost"> --short</span><span class="cursor"></span>';
+    $('#ibfoot').innerHTML = '<span><span class="k">Tab</span> 采纳</span>'
+      + '<span><span class="k">↑↓</span> 历史</span>'
+      + '<span><span class="k">Shift+Enter</span> 换行</span>'
+      + '<span class="spacer"></span><span>Enter 执行</span>';
+  }
+
+  function setSerialInput() {
+    if (passthrough) togglePass();
+    const st = $('#state');
+    st.className = 'state ser';
+    st.innerHTML = '<span class="led"></span>串口 · 无提示符概念，输入条常驻';
+    $('#modehint').textContent = '直发 / 行缓冲 可切';
+    $('#ibcaret').textContent = '»';
+    $('#ibtext').innerHTML = '<span class="hexcol">AT+</span><span class="cursor"></span>';
+    $('#ibfoot').innerHTML = '<span><span class="k">Enter</span> 发送</span>'
+      + '<span><span class="k">Ctrl+Enter</span> 追加 CR</span>'
+      + '<span><span class="k">↑↓</span> 发送历史</span>'
+      + '<span class="spacer"></span><span>HEX 输入：41 42 0A</span>';
+  }
+
+  // 会话切换
+  function pick(el) {
+    document.querySelectorAll('.row').forEach(r => r.classList.remove('active'));
+    el.classList.add('active');
+    const view = el.dataset.view;
+    const term = $('#term');
+    const serial = $('#serialcfg');
+    if (view.startsWith('serial')) {
+      serial.classList.add('show');
+      setSerialInput();
+      term.innerHTML = `
+        <div class="date-anchor">11 月 16 日</div>
+        <div class="ln"><span class="ts">[17:50:02]</span> <span class="mut">端口已打开 COM7 @115200 · DTR 未拉高</span></div>
+        <div class="ln"><span class="ts">[17:50:11]</span> AT+GMR</div>
+        <div class="ln"><span class="ts">[17:50:11]</span> AT version:1.7.4.0(May 11 2024)</div>
+        <div class="ln"><span class="ts">[17:50:11]</span> SDK version:v3.4.2</div>
+        <div class="ln"><span class="ts">[17:50:12]</span> <span class="hexcol">RX 48 65 6C 6C 6F 20 45 53 50 33 32 0D 0A</span></div>
+        <div class="ln"><span class="ts">[17:50:12]</span> Hello ESP32</div>
+        <div class="ln"><span class="ts">[17:51:03]</span> <span class="warn">! 校验失败 · 期望 0x5A 收到 0x5B</span></div>
+        <div class="ln"><span class="ts">[17:51:04]</span> <span class="cursor"></span></div>`;
+    } else {
+      serial.classList.remove('show');
+      setTerminalInput();
+      if (view === 'term') {
+        term.innerHTML = termDefault.replace(
+          'git status<span class="ghost"> --short</span>',
+          'git status<span class="ghost"> --short</span>'
+        );
+      } else if (view === 'term2') {
+        term.innerHTML = `
+          <div class="sep-line"></div>
+          <div class="date-anchor">11 月 16 日</div>
+          <div class="ln"><span class="ts">[17:49:10]</span> <span class="p" style="color:#7dcfff">dev@build</span><span class="p">:<span class="path">~/src/pinshell</span>$</span> <span class="cmd">./scripts/bench.sh</span></div>
+          <div class="ln"><span class="ts">[17:49:12]</span> cold start  &nbsp; p50 612ms &nbsp; p95 980ms</div>
+          <div class="ln"><span class="ts">[17:49:12]</span> key rtt     &nbsp; p50 0.18ms &nbsp; p99 0.4ms</div>
+          <div class="ln"><span class="ts">[17:49:13]</span> 1MB flood   &nbsp; 58 fps (DOM)</div>
+          <div class="ln"><span class="ts">[17:49:20]</span> <span class="p" style="color:#7dcfff">dev@build</span><span class="p">:<span class="path">~/src/pinshell</span>$</span> <span class="cursor"></span></div>`;
+      } else {
+        term.innerHTML = `
+          <div class="date-anchor">11 月 16 日</div>
+          <div class="ln"><span class="ts">[17:20:33]</span> <span class="p">C:\\tools&gt;</span> <span class="cmd">legacy.bat --import</span></div>
+          <div class="ln"><span class="ts">[17:20:34]</span> <span class="warn">未检测到集成脚本：输入条为猜测模式（按键仍透传）</span></div>
+          <div class="ln"><span class="ts">[17:20:34]</span> 正在导入 3 个配置…</div>
+          <div class="ln"><span class="ts">[17:20:36]</span> <span class="ok">完成</span></div>
+          <div class="ln"><span class="ts">[17:20:41]</span> <span class="p">C:\\tools&gt;</span> <span class="cursor"></span></div>`;
+        const st = $('#state');
+        st.className = 'state guess';
+        st.innerHTML = '<span class="led"></span>提示符猜测 · 不接管按键';
+        $('#modehint').textContent = '安装集成脚本后转为确知';
+      }
+      if (view !== 'term3') {
+        const st = $('#state');
+        st.className = 'state';
+        st.innerHTML = '<span class="led"></span>提示符就绪 · 可接管';
+        $('#modehint').textContent = 'Ctrl+Shift+P 切直通';
+      }
+    }
+    document.querySelectorAll('.row').forEach(r => {
+      if (r === el) return;
+      r.querySelector('.dot')?.classList.remove('active');
+    });
+    renderSnip(view);
+  }
+
+  // 拼接分格
+  let tiledOn = false;
+  function toggleTiled() {
+    tiledOn = !tiledOn;
+    $('#single').style.display = tiledOn ? 'none' : '';
+    $('#tiled').classList.toggle('show', tiledOn);
+    $('#sTile').classList.toggle('on', tiledOn);
+    $('#sTile').textContent = tiledOn ? '⇹ 拆分视图' : '⇹ 拼接';
+    toast(tiledOn ? '已拼接：终端 + 串口同窗 · 分格可拖出成独立窗口' : '已回到单会话视图');
+  }
+  $('#sTile').onclick = toggleTiled;
+
+  function focusPane(el) {
+    document.querySelectorAll('.pane').forEach(p => p.classList.remove('on'));
+    el.classList.add('on');
+    const nm = el.querySelector('.nm').textContent;
+    const ty = el.querySelector('.ty').textContent;
+    $('#sbName').textContent = nm;
+    $('#sbShell').textContent = '· ' + (ty === 'serial' ? '串口 115200' : 'PowerShell 7.5');
+    document.querySelectorAll('.row').forEach(r => {
+      r.classList.toggle('active', (r.querySelector('.name')?.textContent || '') === nm);
+    });
+  }
+
+  renderSnip('term');
+</script>
+</body>
+</html>

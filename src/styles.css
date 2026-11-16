@@ -1,0 +1,29 @@
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0e14;
+}
+
+#term-host {
+  height: 100%;
+  padding: 8px 10px 6px;
+  box-sizing: border-box;
+}
+
+#term-host .xterm {
+  height: 100%;
+}
+
+#hud {
+  position: fixed;
+  right: 10px;
+  bottom: 8px;
+  font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
+  color: #4a5a70;
+  pointer-events: none;
+  white-space: pre;
+  text-align: right;
+}
