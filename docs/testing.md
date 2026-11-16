@@ -46,6 +46,7 @@
 | L0-11 | 片段标题截断 | 按字符（非字节）截断，含 emoji 不裂 |
 | L0-12 | 行结束符取值 | 终端固定 `\r`；串口按 CRLF / CR / LF |
 | L0-13 | 会话状态机不变量 I1–I5 | 纯模型测试：冷会话无进程、关闭保留历史、退出不保活、同串口单热会话、清窗口不动历史 |
+| L0-14 | 回放缓冲 | 序号从 1 递增、空块不占号、超上限按整块丢最旧、超大单块仍保留、清空后序号继续 |
 
 ### L1 集成
 
@@ -85,7 +86,7 @@
 |---|---|---|
 | M0（已完成） | UTF-8 分块、spawn/resize/close、渲染吞吐、IPC 往返 | L0-01/02、L1-01~05、L3-03 |
 | M1 | 输入所有权状态机、集成脚本、可输入时刻 | L0-03~06、L1-06/07、L3-01/02/04 |
-| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L1-08、L3-05 |
+| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L1-08、L3-05 |
 | M3 | 历史库、Ghost Text、Ctrl+R、掩码 | L0-07~12 |
 | M4 | 文件面板跟随 CWD、原生菜单 | L1、L3-06 |
 | M5 | 串口（假 Transport 优先，真串口靠虚拟串口对） | L0-12、L1 |
@@ -164,6 +165,8 @@
 | 集成脚本注入 | `spawn_session` | pwsh/powershell 用 `-NoExit -Command ". <script>"`；bash 用 `--init-file`；都不写用户 profile |
 | L1 bash 标记链路 | `src-tauri/core-domain/tests/bash_markers.rs` | A/C/D/退出码/CWD；找不到 Git Bash 自动 skip |
 | 输入条历史 | `pty_send_line` / `pty_history` | 内存最近 200 条，连续重复不记；落盘与掩码留给 M3 |
+| 回放缓冲 | `core-domain/src/replay.rs` | 6 个用例（L0-14）：序号、整块裁剪、超大单块保留、清空后序号继续 |
+| 页面重载挂回 | `pty_list` / `pty_replay` / `pty:out.seq` | 启动时挂回存活会话，回放 + seq 去重补画；窗口关闭才结束全部进程 |
 | 「可输入」时刻 | `src/main.ts` → `applyOwnership` | 首个 `prompt_ready` 打 `[bench] input-ready`，口径为模块求值 → OSC 133 A；数字待下次手工运行采集 |
 | 测试报告 | `scripts/test-guard.ps1` | 每次运行写 `tests/report/latest.json` 并追加 `docs/test-report.md`（留最近 10 次） |
 | 本地门禁 | `scripts/test-guard.ps1`（接入 `scripts/push.ps1`） | dev 在跑时自动只跑 L0 并说明原因；已验证「锁住 exe 时拒绝 L1」 |

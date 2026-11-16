@@ -4,6 +4,7 @@ use core_domain::osc::{OscEvent, OscParser};
 use core_domain::ownership::{
     decide, is_submit, Confidence, Override, Owner, PromptTracker, TerminalState, TransportKind,
 };
+use core_domain::replay::ReplayBuffer;
 use core_domain::utf8_stream::Utf8Stream;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -18,13 +19,21 @@ use uuid::Uuid;
 
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
 struct Session {
+    /// 会话树里显示的名字：M2 先用 Shell 文件名，重命名留给会话树
+    title: String,
+    created_ms: u64,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     input: Mutex<InputState>,
     /// 输入条提交过的行，内存里最近 200 条。落盘与掩码是 M3 的事。
     history: Mutex<VecDeque<String>>,
+    /// 最近输出的副本：前端晚附着、切走或页面重载后从这里补上一段
+    replay: Mutex<ReplayBuffer>,
 }
+
+/// 每个会话保留多少回放字节。够覆盖一次重载与切会话的空档，又不至于长住内存。
+const REPLAY_CAP_BYTES: usize = 256 * 1024;
 
 /// 输入条历史的上限：只服务 ↑↓ 的即时手感，不做持久化。
 const HISTORY_CAP: usize = 200;
@@ -48,12 +57,32 @@ struct AppState {
 #[derive(Clone, Serialize)]
 struct OutPayload {
     id: String,
+    /// 会话内递增，前端用它与回放快照去重
+    seq: u64,
     data: String,
 }
 
 #[derive(Clone, Serialize)]
 struct ExitPayload {
     id: String,
+}
+
+/// 附着时拿到的回放快照：`data` 覆盖到 `seq` 为止。
+#[derive(Serialize)]
+struct ReplayPayload {
+    id: String,
+    seq: u64,
+    data: String,
+    dropped_bytes: u64,
+}
+
+/// 会话列表的一行。冷会话与重命名是 M2 后半段的事，这里只有活着的会话。
+#[derive(Serialize)]
+struct SessionInfo {
+    id: String,
+    title: String,
+    state: &'static str,
+    created_ms: u64,
 }
 
 /// 从输出流里摘出来的标记，前端只消费它，不再自己解析字节。
@@ -310,7 +339,14 @@ fn spawn_session(
         .map_err(|e| format!("take writer: {e}"))?;
 
     let id = Uuid::new_v4().to_string();
+    let title = Path::new(&shell)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell.as_str())
+        .to_string();
     let session = Arc::new(Session {
+        title,
+        created_ms: now_ms(),
         writer: Mutex::new(writer),
         master: Mutex::new(pair.master),
         child: Mutex::new(child),
@@ -322,6 +358,7 @@ fn spawn_session(
             at_line_start: true,
         }),
         history: Mutex::new(VecDeque::new()),
+        replay: Mutex::new(ReplayBuffer::new(REPLAY_CAP_BYTES)),
     });
     state.sessions.lock().insert(id.clone(), session.clone());
 
@@ -363,10 +400,17 @@ fn spawn_session(
                     }
                     let text = stream.push(&buf[..n]);
                     if !text.is_empty() {
+                        // 先记回放再发事件：凡是被前端看到过的块，一定也能被回放到
+                        let seq = session_for_read
+                            .replay
+                            .lock()
+                            .push(&text)
+                            .unwrap_or_default();
                         let _ = app_for_read.emit(
                             "pty:out",
                             OutPayload {
                                 id: emit_id.clone(),
+                                seq,
                                 data: text,
                             },
                         );
@@ -468,6 +512,41 @@ fn pty_history(state: State<'_, AppState>, id: String) -> Result<Vec<String>, St
     Ok(items)
 }
 
+/// 附着时补画：`data` 覆盖到 `seq` 为止，之后只渲染 `seq` 更大的实时块。
+#[tauri::command]
+fn pty_replay(state: State<'_, AppState>, id: String) -> Result<ReplayPayload, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    let snapshot = session.replay.lock().snapshot();
+    Ok(ReplayPayload {
+        id,
+        seq: snapshot.seq,
+        data: snapshot.text,
+        dropped_bytes: snapshot.dropped_bytes,
+    })
+}
+
+/// 活着的会话列表，按创建顺序。页面重载后靠它决定「挂回」还是「新开」。
+#[tauri::command]
+fn pty_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
+    let sessions = state.sessions.lock();
+    let mut list: Vec<SessionInfo> = sessions
+        .iter()
+        .map(|(id, session)| SessionInfo {
+            id: id.clone(),
+            title: session.title.clone(),
+            state: state_name(session.input.lock().tracker.view()),
+            created_ms: session.created_ms,
+        })
+        .collect();
+    list.sort_by_key(|info| info.created_ms);
+    list
+}
+
 #[tauri::command]
 fn pty_set_override(
     app: AppHandle,
@@ -547,11 +626,22 @@ fn main() {
             pty_set_override,
             pty_ownership,
             pty_history,
+            pty_replay,
+            pty_list,
             pty_resize,
             pty_close,
             bench_ping,
             bench_report
         ])
+        // 退出应用 = 结束全部进程（I3）。页面重载不是退出，会话要留着等前端挂回。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let state = window.state::<AppState>();
+                for (_, session) in state.sessions.lock().drain() {
+                    let _ = session.child.lock().kill();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running PinShell");
 }

@@ -49,21 +49,98 @@ let benchTerm: Terminal | null = null;
 let benchScheduled = false;
 let tSpawnStart = 0;
 let tSpawnReturn = 0;
+/// 只有真正新开会话时才量「启动到可输入」；页面重载挂回旧会话不算冷启动
+let measureStartup = false;
+
+interface SessionInfo {
+  id: string;
+  title: string;
+  state: TermState;
+  created_ms: number;
+}
+
+interface ReplayPayload {
+  id: string;
+  seq: number;
+  data: string;
+  dropped_bytes: number;
+}
+
+// 附着协议：先拿回放快照，再把「附着期间到达的实时块」按 seq 去重补上。
+// seq 由后端会话内递增，前端只比大小，不做任何业务判断。
+let attachToken = 0;
+let attaching = false;
+let pending: { seq: number; data: string }[] = [];
+let lastSeq = 0;
+
+function fitTerm() {
+  fit.fit();
+}
+
+async function attach(id: string) {
+  const token = ++attachToken;
+  sessionId = id;
+  lastSeq = 0;
+  pending = [];
+  attaching = true;
+  // 切会话/重载都从回放重建，避免旧屏幕残留
+  term.reset();
+
+  let snap: ReplayPayload;
+  try {
+    snap = await invoke<ReplayPayload>("pty_replay", { id });
+  } catch (err) {
+    attaching = false;
+    log(`挂回失败: ${String(err)}`);
+    return;
+  }
+  if (token !== attachToken) return; // 附着途中又切走了
+
+  lastSeq = snap.seq;
+  if (snap.data) term.write(snap.data);
+  if (snap.dropped_bytes > 0) {
+    console.warn(`[replay] 超出上限丢掉了 ${snap.dropped_bytes} 字节`);
+  }
+
+  attaching = false;
+  const queued = pending;
+  pending = [];
+  for (const chunk of queued) {
+    if (chunk.seq > lastSeq) {
+      lastSeq = chunk.seq;
+      noteFirstOutput();
+      queueOut(chunk.data);
+    }
+  }
+
+  fitTerm();
+  void invoke("pty_resize", { id, cols: term.cols, rows: term.rows });
+  applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
+  void refreshHistory();
+}
 
 async function boot() {
+  const existing = await invoke<SessionInfo[]>("pty_list");
+  if (existing.length) {
+    const last = existing[existing.length - 1];
+    await attach(last.id);
+    log(`已挂回会话 ${last.title} · ${existing.length} 个存活`);
+    return;
+  }
+
   term.writeln("\x1b[38;5;245m启动会话…\x1b[0m");
   const cols = term.cols;
   const rows = term.rows;
   tSpawnStart = performance.now();
   sessionId = await invoke<string>("spawn_session", { cols, rows, shell: null, cwd: null });
   tSpawnReturn = performance.now();
+  measureStartup = true;
   term.focus();
-  // 首帧判定可能在订阅生效前就发出去了，这里补一帧
-  applyOwnership(await invoke<Ownership>("pty_ownership", { id: sessionId }));
-  void refreshHistory();
   log(
     `bench: 前端就绪 ${Math.round(tSpawnStart - t0)}ms · spawn 调用 ${Math.round(tSpawnReturn - tSpawnStart)}ms`
   );
+  // 首帧判定可能在订阅生效前就发出去了，attach 里会补一帧；回放顺带补上启动输出
+  await attach(sessionId);
 }
 
 term.onData((data) => {
@@ -142,8 +219,8 @@ function applyOwnership(next: Ownership) {
         : STATE_TEXT[next.state];
 
   // 可输入的判定口径：OSC 133 A 推进到 prompt_ready 的那一刻。
-  // 只记第一次，后续提示符漂移不改写冷启动数字。
-  if (!inputReadyAt && next.state === "prompt_ready") {
+  // 只记第一次，后续提示符漂移不改写冷启动数字。挂回旧会话时不计量。
+  if (measureStartup && !inputReadyAt && next.state === "prompt_ready") {
     inputReadyAt = performance.now();
     const ms = Math.round(inputReadyAt - t0);
     log(`可输入 ${ms}ms · 提示符就绪（OSC 133 A）`);
@@ -266,19 +343,31 @@ function queueOut(data: string) {
   }
 }
 
-const listenOut = listen<{ id: string; data: string }>("pty:out", (event) => {
-  if (event.payload.id !== sessionId) return;
-  if (!firstOutputAt) {
-    firstOutputAt = performance.now();
-    log(`session ${sessionId.slice(0, 8)} · 首个字节 ${Math.round(firstOutputAt - t0)}ms`);
+const listenOut = listen<{ id: string; seq: number; data: string }>("pty:out", (event) => {
+  const payload = event.payload;
+  if (payload.id !== sessionId) return;
+  // 先在本地排队，等回放落地再按 seq 去重补上
+  if (attaching) {
+    pending.push({ seq: payload.seq, data: payload.data });
+    return;
   }
+  if (payload.seq <= lastSeq) return;
+  lastSeq = payload.seq;
+  noteFirstOutput();
+  bytes += payload.data.length;
+  queueOut(payload.data);
+});
+
+/// 冷启动计量只认第一次输出；挂回旧会话时 measureStartup 为假，只补画不计量。
+function noteFirstOutput() {
+  if (firstOutputAt || !measureStartup) return;
+  firstOutputAt = performance.now();
+  log(`session ${sessionId.slice(0, 8)} · 首个字节 ${Math.round(firstOutputAt - t0)}ms`);
   if (!benchScheduled) {
     benchScheduled = true;
     window.setTimeout(() => void runBench(), 1500);
   }
-  bytes += event.payload.data.length;
-  queueOut(event.payload.data);
-});
+}
 
 const listenExit = listen<{ id: string }>("pty:exit", (event) => {
   if (event.payload.id !== sessionId) return;
@@ -291,10 +380,8 @@ const listenOwn = listen<Ownership>("pty:ownership", (event) => {
   applyOwnership(event.payload);
 });
 
-// 页面重载 / 关闭窗口时结束会话，避免留下孤儿进程
-window.addEventListener("beforeunload", () => {
-  if (sessionId) void invoke("pty_close", { id: sessionId });
-});
+// 页面重载（F5 / HMR）故意不结束会话：靠回放缓冲挂回原样。
+// 退出应用时由后端在窗口关闭事件里结束全部进程（不变量 I3）。
 
 // ---------- 基准（M0 验收用） ----------
 function pct(sorted: number[], p: number) {

@@ -7,4 +7,5 @@
 pub mod history;
 pub mod osc;
 pub mod ownership;
+pub mod replay;
 pub mod utf8_stream;
