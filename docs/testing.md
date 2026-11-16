@@ -112,7 +112,7 @@
 
 - 门禁用 **release** 构建；debug 只记趋势，不判定。
 - 同一台机连跑 5 次取中位数；单次偏离中位数 > 20% 视为噪声样本，重跑一次再判。
-- 采集结果写成 JSON（`tests/report/latest.json`），不靠人读 HUD。现有 `[bench]` stdout 行保留作人工对照。
+- 采集结果写成 JSON（`tests/report/latest.json`），不靠人读 HUD。性能数字仍由 `[bench]` stdout 行提供（`input-ready` 一行给「可输入」），脚本化采集待补。
 
 ## 6. 运行手册
 
@@ -125,19 +125,17 @@
 
 前端单测与 L3 性能采集还没有对应脚本：前者等第一个纯函数模块出现时再引入 vitest（不预先空抽），后者靠 `npm run app:dev` 手工采集。
 
-## 7. 汇报
+## 7. 汇报（已落地）
 
-> 以下为设计目标，**尚未实现**：现在靠控制台输出看结果，报告文件随 M1 一起落。
-
-- 机器可读：`tests/report/latest.json`（含逐例耗时、skip 原因、性能数）。
-- 人可读：`docs/test-report.md` 只保留最近 10 次摘要（一行一次，红的用例点名）。
-- 常跑失败时的动作：不打断人，先在报告里写明「期望/实际/复现命令」，等人有空处理。
+- 机器可读：`tests/report/latest.json`，每次门禁运行覆盖重写。含各层状态与耗时、用例逐一状态、`skip_reason`、`forced`（是否 `-Force` 强跑）。**没有逐例耗时**：libtest 的耗时报告仍是 nightly 特性，不为此换工具链。
+- 人可读：`docs/test-report.md` 每次运行追加一行，只留最近 10 次；红的用例在最后一列点名（写作 `L0/模块::用例`）。
+- 被跳过的层也算一次记录：`status = skipped` 带上原因（如 `tauri dev is running`），不会被误读成「通过」。
+- 常跑失败时的动作：不打断人，报告里已有失败用例名与复现命令（`.\scripts\test-guard.ps1 -Layer l0`），等人有空处理。
 
 ## 8. 现在测不了的东西（诚实清单）
 
 | 项 | 原因 | 什么时候能测 |
 |---|---|---|
-| 「可输入」时刻 | 需要 M1 的 OSC 133 | M1（信号源已验证，见 `docs/research/04`） |
 | 真 GUI 自动化 | 未装 `tauri-driver` + 匹配 WebView2 的 `msedgedriver`，且会抢焦点 | 等确认是否值得装 |
 | 串口真设备 | 需要硬件或虚拟串口对驱动 | M5 |
 | 原生菜单 helper 隔离 | 依赖 M4 的 helper 进程 | M4 |
@@ -166,6 +164,8 @@
 | 集成脚本注入 | `spawn_session` | pwsh/powershell 用 `-NoExit -Command ". <script>"`；bash 用 `--init-file`；都不写用户 profile |
 | L1 bash 标记链路 | `src-tauri/core-domain/tests/bash_markers.rs` | A/C/D/退出码/CWD；找不到 Git Bash 自动 skip |
 | 输入条历史 | `pty_send_line` / `pty_history` | 内存最近 200 条，连续重复不记；落盘与掩码留给 M3 |
+| 「可输入」时刻 | `src/main.ts` → `applyOwnership` | 首个 `prompt_ready` 打 `[bench] input-ready`，口径为模块求值 → OSC 133 A；数字待下次手工运行采集 |
+| 测试报告 | `scripts/test-guard.ps1` | 每次运行写 `tests/report/latest.json` 并追加 `docs/test-report.md`（留最近 10 次） |
 | 本地门禁 | `scripts/test-guard.ps1`（接入 `scripts/push.ps1`） | dev 在跑时自动只跑 L0 并说明原因；已验证「锁住 exe 时拒绝 L1」 |
 | 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
 

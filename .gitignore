@@ -3,5 +3,6 @@ dist/
 src-tauri/target/
 src-tauri/core-domain/target/
 src-tauri/gen/
+tests/report/
 *.log
 .DS_Store

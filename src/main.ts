@@ -42,6 +42,8 @@ try {
 
 let sessionId = "";
 let firstOutputAt = 0;
+/// 提示符就绪（OSC 133 A）到达前端的时刻。「首字节」不是可输入时刻，见 docs/bench-m0.md
+let inputReadyAt = 0;
 let bytes = 0;
 let benchTerm: Terminal | null = null;
 let benchScheduled = false;
@@ -138,6 +140,17 @@ function applyOwnership(next: Ownership) {
       : next.override === "input_bar"
         ? "已锁输入条 · 按键不回终端"
         : STATE_TEXT[next.state];
+
+  // 可输入的判定口径：OSC 133 A 推进到 prompt_ready 的那一刻。
+  // 只记第一次，后续提示符漂移不改写冷启动数字。
+  if (!inputReadyAt && next.state === "prompt_ready") {
+    inputReadyAt = performance.now();
+    const ms = Math.round(inputReadyAt - t0);
+    log(`可输入 ${ms}ms · 提示符就绪（OSC 133 A）`);
+    void invoke("bench_report", {
+      text: `input-ready ${ms}ms (module eval -> OSC 133 A)`
+    });
+  }
 
   ib.disabled = !takes;
   // 只在本应用的两个焦点之间搬动，别抢别的控件
@@ -257,7 +270,7 @@ const listenOut = listen<{ id: string; data: string }>("pty:out", (event) => {
   if (event.payload.id !== sessionId) return;
   if (!firstOutputAt) {
     firstOutputAt = performance.now();
-    log(`session ${sessionId.slice(0, 8)} · 首个输出 ${Math.round(firstOutputAt - t0)}ms`);
+    log(`session ${sessionId.slice(0, 8)} · 首个字节 ${Math.round(firstOutputAt - t0)}ms`);
   }
   if (!benchScheduled) {
     benchScheduled = true;
@@ -325,9 +338,12 @@ const bench = {
     return { mb, ms: Math.round(ms), mbs: +(mb / (ms / 1000)).toFixed(2) };
   },
 
-  /** 冷启动：从模块求值到首个 PTY 输出 */
+  /** 冷启动：从模块求值到首个 PTY 输出（下限）与到提示符就绪（真正的可输入时刻） */
   coldStart() {
-    return { sinceModuleEvalMs: firstOutputAt ? Math.round(firstOutputAt - t0) : null };
+    return {
+      firstByteMs: firstOutputAt ? Math.round(firstOutputAt - t0) : null,
+      inputReadyMs: inputReadyAt ? Math.round(inputReadyAt - t0) : null
+    };
   }
 };
 
@@ -343,9 +359,12 @@ async function runBench() {
   try {
     const ping = await bench.ping(300);
     const flood = await bench.flood(1);
+    const ready = inputReadyAt
+      ? `可输入 ${Math.round(inputReadyAt - t0)}ms`
+      : "可输入 未就绪";
     const text =
       `前端 ${Math.round(tSpawnStart - t0)}ms + spawn ${Math.round(tSpawnReturn - tSpawnStart)}ms + ` +
-      `首字节 ${Math.round(firstOutputAt - tSpawnReturn)}ms · IPC p50 ${ping.p50}ms/p99 ${ping.p99}ms · ` +
+      `${ready}（首字节 ${Math.round(firstOutputAt - tSpawnReturn)}ms） · IPC p50 ${ping.p50}ms/p99 ${ping.p99}ms · ` +
       `1MB ${flood.ms}ms (${flood.mbs} MB/s) · webgl ${webgl ? "on" : "off"}`;
     log(text);
     void invoke("bench_report", { text });

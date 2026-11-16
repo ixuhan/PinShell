@@ -30,6 +30,8 @@ ConPTY 在创建后会立即吐一些控制序列（光标、屏幕状态），�
 
 正确的测法要等 M1 的集成脚本：收到 OSC 133 `A` 的那一刻才是提示符就绪。M0 暂用「首个字节」占位，会在 M1 替换掉。
 
+**M1 已替换**：`src/main.ts` 在首个 `prompt_ready` 时打一行 `[bench] input-ready <ms>ms (module eval -> OSC 133 A)`，HUD 同时显示「可输入 <ms>ms」。新的数字等下次 release 手工运行补进本文。
+
 ### 2. IPC 往返不是 0.1ms 量级
 
 此前估算「0.1–0.3ms」是错的，实测 p50 ≈ 1.8ms，p99 ≈ 4.3ms（WebView2 postMessage + Tauri 派发 + 序列化）。
