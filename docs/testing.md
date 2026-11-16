@@ -11,7 +11,7 @@
 1. **不共用构建目录**。`tauri dev` 正在跑时，`target\debug\pinshell.exe` 被进程占用（现状：每次跑 dev 都会占用），任何同目录的 `cargo build/test` 要么等构建锁、要么链接失败。→ 轻量层必须能独立编译；重量层在 dev 未运行时才跑。
 2. **不抢焦点**。会开真实窗口的用例只在「人离开时」或显式请求时跑，绝不进常跑路径。
 3. **不占端口**。1420 归 dev server；需要前端服务时另起端口或直接用 `dist/` 静态产物。
-4. **不碰真实数据**。测试一律把数据目录重定向到临时目录（`PINSHELL_DATA_DIR`），跑完即删；不写用户 profile、不写注册表 AutoRun（ADR 0003 已定「默认零侵入」，测试要验证它而不是破坏它）。环境变量随 M2 第一个落盘模块一起实现——现在还没有数据目录代码可隔离。
+4. **不碰真实数据**。测试一律把数据目录重定向到临时目录（`PINSHELL_DATA_DIR`），跑完即删；不写用户 profile、不写注册表 AutoRun（ADR 0003 已定「默认零侵入」，测试要验证它而不是破坏它）。`PINSHELL_DATA_DIR` 已随 M2 首个落盘模块实现（`src-tauri/src/persistence.rs`），优先级高于便携目录与 `%APPDATA%`。
 5. **不留孤儿进程**。每个用例 teardown 断言子进程已退出；失败也要回收。
 6. **不阻塞人**。结果落文件，不靠人看窗口；决策集中成一轮问题，不边跑边问。
 
@@ -47,6 +47,7 @@
 | L0-12 | 行结束符取值 | 终端固定 `\r`；串口按 CRLF / CR / LF |
 | L0-13 | 会话状态机不变量 I1–I5 | 纯模型测试：冷会话无进程、关闭保留历史、退出不保活、同串口单热会话、清窗口不动历史 |
 | L0-14 | 回放缓冲 | 序号从 1 递增、空块不占号、超上限按整块丢最旧、超大单块仍保留、清空后序号继续 |
+| L0-15 | 工作区分格树 | 会话最多出现在一格、嵌套 ≤3 层、切开落在目标右侧/下方、关闭折叠父切割、最后一个分格关闭即窗口消失、跨窗口交换被拒 |
 
 ### L1 集成
 
@@ -86,7 +87,7 @@
 |---|---|---|
 | M0（已完成） | UTF-8 分块、spawn/resize/close、渲染吞吐、IPC 往返 | L0-01/02、L1-01~05、L3-03 |
 | M1 | 输入所有权状态机、集成脚本、可输入时刻 | L0-03~06、L1-06/07、L3-01/02/04 |
-| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L1-08、L3-05 |
+| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L0-15、L1-08、L3-05 |
 | M3 | 历史库、Ghost Text、Ctrl+R、掩码 | L0-07~12 |
 | M4 | 文件面板跟随 CWD、原生菜单 | L1、L3-06 |
 | M5 | 串口（假 Transport 优先，真串口靠虚拟串口对） | L0-12、L1 |
@@ -120,7 +121,7 @@
 | 命令 | 内容 | 实测耗时 | 前置条件 |
 |---|---|---|---|
 | `.\scripts\test-guard.ps1 -Layer l0` | 常跑集：core-domain 纯逻辑（独立 target、子进程降优先级） | 0.2–0.5 s | 无 |
-| `.\scripts\test-guard.ps1 -Layer it` | L1：真 pwsh 标记链路 | ~1 s | dev 未运行；否则拒绝执行并返回 1 |
+| `.\scripts\test-guard.ps1 -Layer it` | L1：真 pwsh/bash 标记链路 + 主 crate 单元测试（持久化） | ~2–6 s | dev 未运行；否则拒绝执行并返回 1 |
 | `.\scripts\test-guard.ps1 -Layer all` | 两层；dev 在跑时只跑 L0 并打印原因 | ~1 s | 无 |
 | `.\scripts\push.ps1` | 先跑 L0 门禁再推；`-SkipTests` 可跳过 | +0.5 s | 无 |
 
@@ -166,6 +167,8 @@
 | L1 bash 标记链路 | `src-tauri/core-domain/tests/bash_markers.rs` | A/C/D/退出码/CWD；找不到 Git Bash 自动 skip |
 | 输入条历史 | `pty_send_line` / `pty_history` | 内存最近 200 条，连续重复不记；落盘与掩码留给 M3 |
 | 回放缓冲 | `core-domain/src/replay.rs` | 6 个用例（L0-14）：序号、整块裁剪、超大单块保留、清空后序号继续 |
+| 工作区分格模型 | `core-domain/src/workspace.rs` | 14 个用例（L0-15）：开窗/切开/关闭折叠/交换、深度与唯一性校验 |
+| 数据目录与原子写 | `src-tauri/src/persistence.rs` | 11 个用例（L1-08）：便携→APPDATA 回退、`PINSHELL_DATA_DIR` 优先、`.bak` 救回、双坏上报、工作区 JSON 往返 |
 | 页面重载挂回 | `pty_list` / `pty_replay` / `pty:out.seq` | 启动时挂回存活会话，回放 + seq 去重补画；窗口关闭才结束全部进程 |
 | 「可输入」时刻 | `src/main.ts` → `applyOwnership` | 首个 `prompt_ready` 打 `[bench] input-ready`，口径为模块求值 → OSC 133 A；数字待下次手工运行采集 |
 | 测试报告 | `scripts/test-guard.ps1` | 每次运行写 `tests/report/latest.json` 并追加 `docs/test-report.md`（留最近 10 次） |

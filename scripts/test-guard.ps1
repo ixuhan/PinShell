@@ -242,6 +242,18 @@ if ($Layer -eq 'it' -or $Layer -eq 'all') {
         skip_reason = $null; forced = [bool]$Force;
         passed = $r.Passed; failed = $r.Failed; ignored = $r.Ignored; cases = @($r.Cases)
       })
+
+    # 主 crate 的单元测试：目前是持久化（原子写、.bak 回退、数据目录选择）
+    $appManifest = Join-Path $root 'src-tauri\Cargo.toml'
+    $p = Invoke-CargoTest @('test', '--bin', 'pinshell', '--offline', '--manifest-path', $appManifest)
+    $pStatus = if ($p.Code -eq 0) { 'ok' } else { 'failed' }
+    if ($p.Code -ne 0) { $failedRun = $true }
+    Write-Output ("[guard] L1 persistence      {0,-7} {1}s" -f $pStatus, $p.Seconds)
+    [void]$layers.Add([ordered]@{
+        id = 'L1'; label = 'persistence'; status = $pStatus; seconds = $p.Seconds;
+        skip_reason = $null; forced = [bool]$Force;
+        passed = $p.Passed; failed = $p.Failed; ignored = $p.Ignored; cases = @($p.Cases)
+      })
   }
 }
 

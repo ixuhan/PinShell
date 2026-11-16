@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+mod persistence;
+
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
 struct Session {
     /// 会话树里显示的名字：M2 先用 Shell 文件名，重命名留给会话树
@@ -617,6 +619,13 @@ fn bench_report(text: String) {
 }
 
 fn main() {
+    // 数据目录只在启动时解析一次：便携优先，不可写才回退 %APPDATA%。
+    // 解析失败不挡启动（本版还没有必需落盘的状态），只把原因记到 stdout。
+    match persistence::data_dir() {
+        Ok(dir) => println!("[data] {}", dir.display()),
+        Err(err) => eprintln!("[data] {err}"),
+    }
+
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![

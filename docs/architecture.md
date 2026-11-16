@@ -37,7 +37,7 @@
 
 依赖方向单向：`ui → session-runtime / input-engine / panels → transport / persistence → core-domain`。**禁止** UI 直接触 `transport`，也禁止 `transport` 反向依赖 `session-runtime`。
 
-已落成代码的边界：`src-tauri/core-domain/` 是独立 crate（零依赖、自带测试、可用独立 target 目录编译），终端集成脚本在 `scripts/integration/pinshell.ps1`。
+已落成代码的边界：`src-tauri/core-domain/` 是独立 crate（零依赖、自带测试、可用独立 target 目录编译），终端集成脚本在 `scripts/integration/pinshell.ps1`。工作区分格模型在 `core-domain/workspace.rs`（窗口、二叉分格树、会话元数据与结构校验）；数据目录与原子写在 `src-tauri/src/persistence.rs`，JSON DTO 留在这一层，core-domain 保持零依赖。
 
 ## 2. 三个核心契约
 
@@ -115,6 +115,8 @@ data/                     ← 便携：exe 同级；不可写则回退 %APPDATA%
 ```
 
 原子写：同目录 tmp → `FlushFileBuffers` → `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`，失败退避重试；保留上一版 `.bak`。Windows 无目录 fsync，不照搬 POSIX。
+
+已落地（M2）：目录解析顺序 `PINSHELL_DATA_DIR`（明确指定却不可写就报错，不悄悄换地方）→ exe 同级 `data\` → `%APPDATA%\PinShell\`；`workspace.json` 带 `version`（当前 1），读回后一律按冷会话处理。写入失败不会留下半截主文件，读取时主文件坏了自动退 `.bak`，两份都坏返回 `Unreadable` 而不是静默重置。其余文件（`history.db`、卷轴、日志）随各自模块落地。
 
 ## 6. 前端职责边界
 
