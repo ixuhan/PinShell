@@ -13,6 +13,17 @@ pub enum TransportKind {
     Serial,
 }
 
+impl TransportKind {
+    /// 前端与 IPC 用的稳定字符串。序列化在 `persistence` 里另有一套 DTO，
+    /// 但「叫什么」只在这里定义一次。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransportKind::Terminal => "terminal",
+            TransportKind::Serial => "serial",
+        }
+    }
+}
+
 /// 终端通道的状态。`PromptGuess` 只驱动提示，永不接管按键。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalState {

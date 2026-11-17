@@ -80,11 +80,38 @@ impl ReplayBuffer {
         }
     }
 
+    /// 附着快照：`answered_seq` 是「前端已经画到过的最大序号」。
+    ///
+    /// 以它为界，回放分两半，规矩不一样：
+    /// - **已画过的块**（`seq <= answered_seq`）：终端查询当时已经应答过了。再画一遍会让终端
+    ///   再答一次，答案顺着输入通道回到 Shell 就是它没问过的乱码。所以只留能画的东西。
+    /// - **没画过的块**（`seq > answered_seq`）：包括「会话已启动、前端还没附着」这段输出。
+    ///   没人答过这些查询，而 Shell 很可能正卡在那儿等应答（pwsh 启动第一条就是 `CSI 6 n`）。
+    ///   必须原样交给终端——删掉它，Shell 会一直停在「直通模式」不动。
+    pub fn snapshot_for_attach(&self, answered_seq: u64) -> Snapshot {
+        let mut snapshot = self.snapshot();
+        if answered_seq > 0 {
+            let mut text = String::with_capacity(snapshot.text.len());
+            for chunk in &self.chunks {
+                if chunk.seq <= answered_seq {
+                    text.push_str(&crate::scrollback::without_host_queries(&chunk.text));
+                } else {
+                    text.push_str(&chunk.text);
+                }
+            }
+            snapshot.text = text;
+        }
+        snapshot
+    }
+
     /// 一键清窗口用：丢掉回放内容，但序号继续往前走，
     /// 免得前端把「清空前的实时块」当成新内容补画回来。
-    pub fn clear(&mut self) {
+    /// 返回清空前的最后序号：前端拿它把还在路上的旧块一起丢掉。
+    pub fn clear(&mut self) -> u64 {
+        let seq = self.next_seq.saturating_sub(1);
         self.chunks.clear();
         self.bytes = 0;
+        seq
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -157,11 +184,41 @@ mod tests {
     fn clear_drops_text_but_sequences_keep_moving() {
         let mut buf = ReplayBuffer::new(1024);
         buf.push("old");
-        buf.clear();
+        // 清空前的最末序号交回给调用方：前端用它丢掉在途的旧块
+        assert_eq!(buf.clear(), 1);
         assert!(buf.is_empty());
         assert_eq!(buf.snapshot().seq, 0);
         assert_eq!(buf.push("new"), Some(2));
         assert_eq!(buf.snapshot().seq, 2);
         assert_eq!(buf.snapshot().text, "new");
+        assert_eq!(buf.clear(), 2);
+    }
+
+    #[test]
+    fn first_attach_keeps_queries_the_shell_may_be_waiting_for() {
+        // 冷启动：前端还没画过任何东西（answered_seq = 0），pwsh 的第一条 `CSI 6 n`
+        // 没人答过，删掉它 Shell 就停在提示符前不动了。
+        let mut buf = ReplayBuffer::new(1024);
+        buf.push("\x1b[6n");
+        assert_eq!(buf.snapshot_for_attach(0).text, "\x1b[6n");
+    }
+
+    #[test]
+    fn re_attach_strips_queries_that_were_already_answered() {
+        let mut buf = ReplayBuffer::new(1024);
+        buf.push("\x1b[6nPS> ");
+        let snap = buf.snapshot_for_attach(1);
+        assert_eq!(snap.text, "PS> ");
+        assert_eq!(snap.seq, 1);
+    }
+
+    #[test]
+    fn chunks_after_the_answered_point_keep_their_queries() {
+        // 断线期间 Shell 自己问的：没人答过，重连时必须交给终端
+        let mut buf = ReplayBuffer::new(1024);
+        buf.push("\x1b[6n"); // seq 1：已经画过
+        buf.push("PS> \x1b[5n"); // seq 2：断线期间来的
+        let snap = buf.snapshot_for_attach(1);
+        assert_eq!(snap.text, "PS> \x1b[5n");
     }
 }

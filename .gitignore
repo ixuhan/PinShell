@@ -6,3 +6,7 @@ src-tauri/gen/
 tests/report/
 *.log
 .DS_Store
+
+# 手工探针脚本、截图与一次性复现文件（保留在本地，不进仓库）
+.probe/
+.review_main.diff

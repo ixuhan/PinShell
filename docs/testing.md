@@ -39,17 +39,18 @@
 | L0-04 | 显式锁定 | 锁定后状态机说 Running 也不交还，直到再次切换 |
 | L0-05 | 密码提示启发式 | Prompt 后首块无 `C` 且命中密码类提示 → 转 Running |
 | L0-06 | 回车后 N 毫秒无 `A` | 判定为 Running（N 可配，测试注入时钟） |
-| L0-07 | Ghost Text 前缀匹配 | 最近优先、大小写策略、去重、掩码条目不出现；5000 条内 p99 < 1ms |
-| L0-08 | 掩码规则 | 写入即掩码；落盘文本为掩码后；「可找回」开关两态 |
-| L0-09 | 时间戳锚点 | 跨天插一行、同日不插、时区变化 |
+| L0-07 | Ghost Text 前缀匹配 | 最近优先、大小写不敏感、去重、仅行尾单行非空白时出现；5000 条内 p99 < 1ms，同步计算不走 IPC |
+| L0-09 | 时间戳锚点 | 跨天插一行、同日不插、按当前本地时区判断 |
 | L0-10 | HEX 解析/格式化 | 空格、大写、奇数位、非法字符各有明确拒绝原因；往返一致 |
 | L0-11 | 片段标题截断 | 按字符（非字节）截断，含 emoji 不裂 |
 | L0-12 | 行结束符取值 | 终端固定 `\r`；串口按 CRLF / CR / LF |
 | L0-13 | 会话状态机不变量 I1–I5 | 纯模型测试：冷会话无进程、关闭保留历史、退出不保活、同串口单热会话、清窗口不动历史 |
 | L0-14 | 回放缓冲 | 序号从 1 递增、空块不占号、超上限按整块丢最旧、超大单块仍保留、清空后序号继续 |
 | L0-15 | 工作区分格树 | 会话最多出现在一格、嵌套 ≤3 层、切开落在目标右侧/下方、关闭折叠父切割、最后一个分格关闭即窗口消失、跨窗口交换被拒、CWD 只在真变更时才算变更 |
-| L0-16 | 卷轴快照组装 | 空快照不画分隔线、半行先补换行、重复重开各带一条分隔线、分隔线不含 `133`/`7` 标记（不会被状态机误认成提示符） |
+| L0-16 | 卷轴快照组装 | 空快照不画分隔线、半行先补换行、重复重开各带一条分隔线、回放前丢掉备用屏与隐藏光标开关、末尾复位 SGR 并放出光标、分隔线不含 `133`/`7` 标记（不会被状态机误认成提示符） |
 | L0-17 | 会话标题 | 去首尾空白、按字符截断到 40（中文/emoji 不切半）、全空白拒绝、未变更返回「没变」 |
+| L0-18 | 历史库存储语义 | 去重挪到最新并累加次数、10k 封顶、会话隔离、清空只作用当前会话、删除节点销毁历史、时间戳 UTC 往返 |
+| L0-19 | 清屏后的输出过滤 | 序号 ≤ 下限的块全部丢掉（哪怕清屏之后才到达）、其余按到达顺序拼、没有保留块时序号归零、下限为 0 时一块不丢 |
 
 ### L1 集成
 
@@ -64,13 +65,14 @@
 | L1-07 | 零侵入断言 | 跑完后用户 `$PROFILE` 哈希不变、注册表 AutoRun 不变 |
 | L1-08 | 原子写 | 写入中途杀进程后，`workspace.json` 与 `.bak` 至少一个可解析 |
 | L1-09 | 未知 session id | 返回明确错误，不 panic、不崩进程 |
+| L1-10 | 历史库损坏 | 主库改名为 `history.db.corrupt-<时间>` 并重建空库，启动不阻塞 |
 
 ### L2 契约
 
 | 编号 | 用例 | 断言 |
 |---|---|---|
 | L2-01 | 事件形状 `pty:out{id,data}` / `pty:exit{id}` | Rust 序列化结果与 TS 类型一致（同源生成或显式校验） |
-| L2-02 | 前端只读热缓存与库不一致 | 以库为准，重连即重建 |
+| L2-02 | 历史缓存契约 | `history_snapshot` 带 `upto_id`；`history:append` 的 `id` 单调；检测到缺口或重连整份重建；切会话丢弃缓存 |
 
 ### L3 端到端 / 性能（仅人离开时）
 
@@ -88,9 +90,10 @@
 | 里程碑 | 首次可测的新东西 | 落在哪层 |
 |---|---|---|
 | M0（已完成） | UTF-8 分块、spawn/resize/close、渲染吞吐、IPC 往返 | L0-01/02、L1-01~05、L3-03 |
-| M1 | 输入所有权状态机、集成脚本、可输入时刻 | L0-03~06、L1-06/07、L3-01/02/04 |
-| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L0-15、L0-16、L0-17、L1-08、L3-05 |
-| M3 | 历史库、Ghost Text、Ctrl+R、掩码 | L0-07~12 |
+| M1（已完成） | 输入所有权状态机、集成脚本、可输入时刻 | L0-03~06、L1-06/07、L3-01/02/04 |
+| M2（已完成） | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L0-15、L0-16、L0-17、L1-08、L3-05 |
+| M3（已完成） | 历史库、Ghost Text、Ctrl+R | L0-07、L0-09、L0-18、L1-10、L2-02 |
+| M3 打磨（已完成） | 暂停/继续、一键清窗口、卷轴行数上限、输入条按钮 | L0-19（+ 手工：暂停后继续还原、清屏不回填旧块） |
 | M4 | 文件面板跟随 CWD、原生菜单 | L1、L3-06 |
 | M5 | 串口（假 Transport 优先，真串口靠虚拟串口对） | L0-12、L1 |
 | M6 | 升级后恢复工作区 | L3 |
@@ -122,12 +125,13 @@
 
 | 命令 | 内容 | 实测耗时 | 前置条件 |
 |---|---|---|---|
-| `.\scripts\test-guard.ps1 -Layer l0` | 常跑集：core-domain 纯逻辑（独立 target、子进程降优先级） | 0.2–0.5 s | 无 |
+| `.\scripts\test-guard.ps1 -Layer l0` | 常跑集：core-domain 纯逻辑 + 前端纯逻辑（独立 target、子进程降优先级） | 1–2 s | 无 |
+| `npm test` | 只跑前端纯逻辑（Ghost Text / 检索 / 跨天锚点 / 历史缓存 / 清屏过滤），vitest、node 环境 | ~1 s | 无 |
 | `.\scripts\test-guard.ps1 -Layer it` | L1：真 pwsh/bash 标记链路 + 主 crate 单元测试（持久化） | ~2–6 s | dev 未运行；否则拒绝执行并返回 1 |
 | `.\scripts\test-guard.ps1 -Layer all` | 两层；dev 在跑时只跑 L0 并打印原因 | ~1 s | 无 |
 | `.\scripts\push.ps1` | 先跑 L0 门禁再推；`-SkipTests` 可跳过 | +0.5 s | 无 |
 
-前端单测与 L3 性能采集还没有对应脚本：前者等第一个纯函数模块出现时再引入 vitest（不预先空抽），后者靠 `npm run app:dev` 手工采集。
+前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）与 `src/outQueue.ts`（清屏后的输出过滤）都是值得测的纯函数模块，用 vitest（node 环境，不起窗口、不占 1420），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
 
 ## 7. 汇报（已落地）
 
@@ -165,13 +169,13 @@
 | 输出按帧聚合（M0 未达标项） | `src/main.ts` | 已改，等一次真实运行复测 |
 | 输入所有权事件 | `src-tauri/src/main.rs` → `pty:ownership` | 判定只在变化时推送；前端只搬焦点，不复制规则 |
 | 输入条最小版 | `index.html`、`src/main.ts`、`src/styles.css` | 三色状态点、回车发送、`Ctrl+Shift+P` 直通、`Ctrl+Shift+L` 锁定 |
-| 集成脚本注入 | `spawn_session` | pwsh/powershell 用 `-NoExit -Command ". <script>"`；bash 用 `--init-file`；都不写用户 profile |
+| 集成脚本注入 | `spawn_session` | pwsh/powershell 用 `-NoExit -EncodedCommand <base64>` 注入脚本正文；bash 用 `--init-file`；都不写用户 profile |
 | L1 bash 标记链路 | `src-tauri/core-domain/tests/bash_markers.rs` | A/C/D/退出码/CWD；找不到 Git Bash 自动 skip |
-| 输入条历史 | `pty_send_line` / `pty_history` | 内存最近 200 条，连续重复不记；落盘与掩码留给 M3 |
+| 输入条历史 | `pty_send_line` / `pty_history` / `history:append` | M3 起落 `history.db`；`pty_history` 只是快照的只读视图，供 ↑↓ 用 |
 | 回放缓冲 | `core-domain/src/replay.rs` | 6 个用例（L0-14）：序号、整块裁剪、超大单块保留、清空后序号继续 |
 | 工作区分格模型 | `core-domain/src/workspace.rs` | 16 个用例（L0-15）：开窗/切开/关闭折叠/交换、深度与唯一性校验、`set_cwd` 只报真变更、`rename_session` 的截断与拒绝 |
-| 数据目录与原子写 | `src-tauri/src/persistence.rs` | 16 个用例（L1-08）：便携→APPDATA 回退、`PINSHELL_DATA_DIR` 优先、`.bak` 救回、双坏上报、工作区 JSON 往返、卷轴快照往返/覆盖/删除/文件名不许越界 |
-| 卷轴快照组装 | `core-domain/src/scrollback.rs` | 5 个用例（L0-16）：分隔线位置与去 OSC 标记 |
+| 数据目录与原子写 | `src-tauri/src/persistence.rs` | 17 个用例（L1-08）：便携→APPDATA 回退、`PINSHELL_DATA_DIR` 优先、`.bak` 救回、双坏上报、工作区 JSON 往返、卷轴快照往返/覆盖/删除/文件名不许越界、覆盖写中途崩溃可从 `.old` 恢复 |
+| 卷轴快照组装 | `core-domain/src/scrollback.rs` | 7 个用例（L0-16）：分隔线位置、去 OSC 标记、备用屏与隐藏光标开关被丢掉、末尾复位 |
 | 卷轴快照落盘与还原 | `save_scrollback` / `spawn_session` / `on_window_event` | 进程退出、应用退出、输出静默 3 秒三处各写一次；冷会话重开时接在新输出前面；关闭会话（I2）删除 |
 | 会话重命名 | `rename_session` + 侧栏双击 | 规则在 core-domain（L0-17），前端只送文本；冷会话重开不覆盖用户改过的名字 |
 | M2 验收链路（手工） | `PINSHELL_DATA_DIR` 临时目录 + `npm run app:dev` | 首跑记下 CWD → 关窗写快照并留 `hot: false` → 重启读回 1 个冷会话并按 CWD 拉起 → 再关一次快照正好多一条分隔线；提示符后约 3 秒快照自动落盘（不用关窗）；可输入 795–820 ms |
@@ -181,7 +185,21 @@
 | 页面重载挂回 | `pty_list` / `pty_replay` / `pty:out.seq` | 启动时挂回存活会话，回放 + seq 去重补画；窗口关闭才结束全部进程 |
 | 「可输入」时刻 | `src/main.ts` → `applyOwnership` | 首个 `prompt_ready` 打 `[bench] input-ready`，口径为模块求值 → OSC 133 A；数字待下次手工运行采集 |
 | 测试报告 | `scripts/test-guard.ps1` | 每次运行写 `tests/report/latest.json` 并追加 `docs/test-report.md`（留最近 10 次） |
+| L0-18 历史规则 | `src-tauri/core-domain/src/history.rs` | 11 个用例：去重挪到最新、次数累加、封顶丢最旧、会话隔离、清空只作用当前会话且号不回退、检索大小写规则与排序、UTC → 本地日期与跨天锚点 |
+| L1-10 历史库 | `src-tauri/src/history.rs` | 10 个用例：去重/次数/封顶跨重开、会话隔离、清空保留发号、删除节点销毁、快照窗口、全量检索、损坏库改名重建、未知会话空读、内存降级 |
+| 历史落盘与事件 | `history_snapshot` / `history_search` / `history_clear` / `history:append` | WAL + 单写线程；先发 PTY 再异步写库；`id` 是会话内单调提交号（缺口即整份重建）；库坏降级内存并只发一次 `history:degraded` |
+| L0-07 / L0-09 前端纯逻辑 | `src/history.ts` + `src/history.test.ts` | 11 个用例：Ghost Text 行尾/单行/非空白、最近优先、大小写、多行排除、5000 条 p99 < 1 ms（1000 次采样，单次 GC 停顿不翻红）；检索过滤；跨天/跨月/跨年锚点 |
+| L2-02 历史缓存契约 | `src/historyCache.ts` + `src/historyCache.test.ts` | 9 个用例：快照带 `upto_id` 且只留 5000 条、`id` 严格 +1 才追加、跳号整份重建、重复投递丢弃、非当前会话事件忽略、切会话丢弃整份缓存、同命令挪到最新、追加也按 5000 条挤掉最旧 |
+| Ghost Text | `src/main.ts` + `index.html` | 输入框后灰色建议，`→` 接受；建议不可选中，不改变输入直到被采纳 |
+| Ctrl+R 覆盖层 | `src/main.ts` + `index.html` + `src/styles.css` | `Esc` 恢复草稿、`Enter` 只填充不发送、40 ms 防抖后查全量、日期分隔行、`更早` 标记、两段式「清空本会话」 |
+| 输入条交互边界（M3 打磨） | `src/main.ts` + `src/styles.css` | 输入法组合期间不发送、不画建议（`isComposing` + `composing` 双保险）；手动编辑后 `↑↓` 游标归位，不再从旧位置跳条；切会话清空草稿、关掉覆盖层并丢掉旧会话缓存；覆盖层按键（`Esc` / `↑↓` / `Enter` / `Tab`）统一挂在容器上，点过「清空」「关闭」之后仍生效；长按 `Ctrl+R` 与 `Ctrl+Shift+P/L` 只切一次；长命令的 Ghost 跟随横向滚动并在输入条边缘截断；空白回车不发送；按键热路径上的诊断 IPC 默认关闭（`#debug` 才开） |
 | 本地门禁 | `scripts/test-guard.ps1`（接入 `scripts/push.ps1`） | dev 在跑时自动只跑 L0 并说明原因；已验证「锁住 exe 时拒绝 L1」 |
+| L0-19 清屏过滤 | `src/outQueue.ts` + `src/outQueue.test.ts` | 4 个用例：下限之前的块全部丢掉、全丢时序号归零、下限为 0 一块不丢、乱序到达按到达顺序拼并取最大序号 |
+| 暂停 / 继续 | `pty_set_paused` / `pty_paused` + `src/main.ts` | 判定在后端读线程：暂停只掐 `pty:out` 事件，输出仍进回放缓冲（暂停多久都不会堆内存——攒着的合流块直接丢，回放自己按上限裁旧）；继续时整屏按回放重画，不把增量接在旧屏幕上；按钮状态按后端 `pty_paused` 复原，不靠前端记忆 |
+| 一键清窗口 | `pty_clear` + `src/main.ts` | 清回放缓冲 + 删磁盘卷轴快照 + `term.clear()`；返回清空前的最后序号，前端据此丢掉在途与已排队的旧块；不发 `Ctrl+L`、不动命令历史 |
+| 输入条按钮行 | `index.html` + `src/main.ts` + `src/styles.css` | 暂停 / 清屏 / 直通 / 接管四个按钮与快捷键同源；`mousedown` 阻止默认，按钮不抢焦点，点完可以接着敲键盘 |
+| 卷轴行数上限 | `src/main.ts` 的 `SCROLLBACK_LINES` | 取 5000 行（约 2 MB）；`scripts/bench-scrollback.mjs` 实测稳态吞吐与上限无关（52–57 MB/s）、内存约 0.4 KB/行，数字见 `docs/bench-m0.md` |
+| 切会话 / 窗口缩放（手工回归） | `.probe/probe_switch_resize.ps1` | 侧栏行按无障碍文本定位再点（行高随 DPI 变，写死 y 会点到标题栏，结论是假的）；两个会话各留一条标记命令，切走再切回后磁盘快照里只有各自的标记（`MARK-A` 只出现在 423c、`MARK-B` 只出现在 c387），回放尾巴完整、无重影；窗口宽度 −300 px 后 Shell 里的 `$Host.UI.RawUI.WindowSize.Width` 由 172 变成 129（探针把它写进 `w_before.txt` / `w_after.txt` 核对），说明 resize 真下到了 PTY |
 | 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
 
 跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过）。

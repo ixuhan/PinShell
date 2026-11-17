@@ -32,7 +32,9 @@ Unknown ──133;A──► Prompt ──133;C──► Running ──133;D─�
 
 ### 三、集成脚本的注入方式
 
-默认只对**我们自己启动的进程**注入（PowerShell 用 `-NoExit -Command ". <path>"`，bash 用 `--init-file <path> -i`），**不写用户 profile、不写注册表 AutoRun**。设置页提供一个可选按钮把一行 `source` 追加到用户 profile（默认关闭）。
+默认只对**我们自己启动的进程**注入（PowerShell 用 `-NoLogo -NoExit -EncodedCommand <base64>` 直接喂脚本正文，bash 用 `--init-file <path> -i`），**不写用户 profile、不写注册表 AutoRun**。设置页提供一个可选按钮把一行 `source` 追加到用户 profile（默认关闭）。
+
+PowerShell 不走「点源一个 `.ps1` 文件」：点源第一步要过 `AuthorizationManager` 授权检查，这个检查在部分机器上会直接失败（终端里只留下一行 `AuthorizationManager 检查失败。`），脚本整段没跑，会话于是永久停在「未知 · 直通」，输入条一直是禁用的。喂正文没有这一步。脚本仍随包分发（`integration/pinshell.ps1`），运行时优先读它、读不到用编译期内嵌副本，所以改脚本不用重编。
 
 bash 不用 `BASH_ENV`：它只对非交互 shell 生效，交互 shell 看不到。`--init-file` 会顶掉默认启动文件，所以脚本自己先读 `/etc/profile` 与 `~/.bashrc`，再把标记包进 `PS1`/`PS0`（用 `\[ \]` 保证 readline 不把标记算进宽度）。
 

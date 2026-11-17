@@ -13,26 +13,58 @@
           <button id="sess-new" title="新建会话">＋</button>
         </div>
         <div id="sess-list"></div>
-        <div id="sess-hint">点击切换 · ✕ 关闭</div>
+        <div id="sess-hint">双击名字改名 · ✕ 关闭</div>
       </aside>
 
       <main id="main">
         <div id="term-host"></div>
         <div id="hud"></div>
-        <div id="inputbar" class="pass">
-          <span id="own-dot"></span>
-          <span id="own-label">未知 · 直通</span>
-          <span id="ib-prompt">❯</span>
+
+        <!-- Ctrl+R：输入条上方的历史检索覆盖层。Enter 只填不送，Esc 恢复草稿。 -->
+        <div id="hist-overlay" hidden>
+          <div id="hist-head">
+            <span id="hist-title">命令历史</span>
+            <span id="hist-count"></span>
+            <button id="hist-clear" title="只清空当前会话的命令历史">清空本会话</button>
+            <button id="hist-close" title="关闭（Esc）">✕</button>
+          </div>
           <input
-            id="ib-input"
+            id="hist-query"
             type="text"
             spellcheck="false"
             autocomplete="off"
             autocapitalize="off"
-            placeholder="提示符就绪后在这里输入"
-            disabled
+            placeholder="检索（含大写则区分大小写）"
           />
-          <span id="ib-hint">↑ 历史 · Ctrl+Shift+P 直通 · Ctrl+Shift+L 锁定</span>
+          <div id="hist-list"></div>
+          <div id="hist-foot">↑↓ 选择 · Enter 填入输入条 · Esc / Ctrl+R 关闭</div>
+        </div>
+
+        <div id="inputbar" class="pass">
+          <span id="own-dot"></span>
+          <span id="own-label">未知 · 直通</span>
+          <span id="ib-prompt">❯</span>
+          <div id="ib-wrap">
+            <input
+              id="ib-input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              autocapitalize="off"
+              placeholder="提示符就绪后可在这里输入"
+              disabled
+            />
+            <!-- Ghost Text：光标后灰色建议，→ 接受；输入框本身保持真实文本与光标 -->
+            <span id="ib-ghost" aria-hidden="true"></span>
+          </div>
+          <span id="ib-paused" hidden>暂停中</span>
+          <div id="ib-actions">
+            <button id="ib-pause" title="暂停接收输出 · Ctrl+Shift+Space&#10;暂停期间不再刷新屏幕，输出仍记进回放缓冲（上限 256 KB）；继续时按回放整屏重画">暂停</button>
+            <button id="ib-clear" title="清空本会话屏幕与回放，不动命令历史 · Ctrl+Shift+K">清屏</button>
+            <button id="ib-pass" title="锁直通：按键全给终端 · Ctrl+Shift+P">直通</button>
+            <button id="ib-take" title="锁输入条：按键不回终端 · Ctrl+Shift+L">接管</button>
+          </div>
+          <span id="ib-hint">↑ 历史 · Ctrl+R 检索</span>
         </div>
       </main>
     </div>

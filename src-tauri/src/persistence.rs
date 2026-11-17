@@ -175,8 +175,9 @@ pub fn scrollback_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(SCROLLBACK_DIR).join(session_file_name(id))
 }
 
-/// 覆盖写：tmp → flush → 改名。不保留 `.bak`——卷轴快照只是显示层，
-/// 旧的一版没有救回价值，留一份只会白占磁盘。
+/// 覆盖写：tmp → flush → 旧版挪到 `.old` → tmp 改名就位 → 删掉 `.old`。
+/// 不保留 `.bak`：卷轴快照只是显示层，旧版没有长期救回价值。
+/// 但不能「先删旧版再改名」——改名失败时旧内容会一起丢；中间状态至少有完整的一份。
 fn write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
@@ -185,17 +186,35 @@ fn write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::create_dir_all(dir)?;
 
     let tmp = sibling(path, ".tmp");
+    let previous = sibling(path, ".old");
     let result = (|| -> io::Result<()> {
         {
             let mut file = File::create(&tmp)?;
             file.write_all(bytes)?;
             file.sync_all()?;
         }
+        // 上次恰好在两步之间崩了：主文件不在、只剩 `.old`，先把它放回去
+        if !path.exists() && previous.exists() {
+            fs::rename(&previous, path)?;
+        }
         // Windows 的 rename 不覆盖已存在的目标
         if path.exists() {
-            fs::remove_file(path)?;
+            if previous.exists() {
+                fs::remove_file(&previous)?;
+            }
+            fs::rename(path, &previous)?;
         }
-        fs::rename(&tmp, path)
+        match fs::rename(&tmp, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&previous);
+                Ok(())
+            }
+            Err(err) => {
+                // 新文件没就位：把旧版挪回去，至少屏幕还能还原到上一次
+                let _ = fs::rename(&previous, path);
+                Err(err)
+            }
+        }
     })();
 
     if result.is_err() {
@@ -291,6 +310,24 @@ enum TransportFile {
     Serial,
 }
 
+impl From<TransportKind> for TransportFile {
+    fn from(kind: TransportKind) -> Self {
+        match kind {
+            TransportKind::Terminal => TransportFile::Terminal,
+            TransportKind::Serial => TransportFile::Serial,
+        }
+    }
+}
+
+impl From<TransportFile> for TransportKind {
+    fn from(file: TransportFile) -> Self {
+        match file {
+            TransportFile::Terminal => TransportKind::Terminal,
+            TransportFile::Serial => TransportKind::Serial,
+        }
+    }
+}
+
 pub enum WorkspaceLoad {
     /// 主文件读到的
     Loaded(Workspace),
@@ -345,10 +382,7 @@ fn workspace_to_file(workspace: &Workspace) -> WorkspaceFile {
             .map(|session| SessionFile {
                 id: session.id.clone(),
                 title: session.title.clone(),
-                transport: match session.transport {
-                    TransportKind::Terminal => TransportFile::Terminal,
-                    TransportKind::Serial => TransportFile::Serial,
-                },
+                transport: session.transport.into(),
                 cwd: session.cwd.clone(),
                 shell: session.shell.clone(),
                 hot: session.hot,
@@ -403,10 +437,7 @@ fn workspace_from_file(file: WorkspaceFile) -> Result<Workspace, String> {
             .map(|session| SessionMeta {
                 id: session.id.clone(),
                 title: session.title.clone(),
-                transport: match session.transport {
-                    TransportFile::Terminal => TransportKind::Terminal,
-                    TransportFile::Serial => TransportKind::Serial,
-                },
+                transport: session.transport.into(),
                 cwd: session.cwd.clone(),
                 shell: session.shell.clone(),
                 hot: false,
@@ -660,6 +691,22 @@ mod tests {
         // 不保留 .bak：显示层不需要上一版
         assert!(!dir.join(SCROLLBACK_DIR).join("s1.ansi.bak").exists());
         assert!(!dir.join(SCROLLBACK_DIR).join("s1.ansi.tmp").exists());
+        // 中间那份 .old 也只是过渡，成功替换后必须清掉
+        assert!(!dir.join(SCROLLBACK_DIR).join("s1.ansi.old").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_old_snapshot_is_recovered_on_the_next_write() {
+        // 上次在「旧版挪到 .old」与「新文件就位」之间崩了：主文件不在，.old 还在
+        let dir = temp_dir("scrollbackstale");
+        let path = scrollback_path(&dir, "s1");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(sibling(&path, ".old"), "previous").unwrap();
+
+        save_scrollback(&dir, "s1", "next").unwrap();
+        assert_eq!(load_scrollback(&dir, "s1").as_deref(), Some("next"));
+        assert!(!sibling(&path, ".old").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

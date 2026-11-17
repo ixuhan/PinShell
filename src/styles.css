@@ -143,6 +143,7 @@ body,
   min-width: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 #term-host {
@@ -218,9 +219,21 @@ body,
   opacity: 0.45;
 }
 
+/* 输入框 + Ghost Text 叠在一起：输入框保持真实文本与光标，建议只画在光标后 */
+#ib-wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  /* 长建议到输入条右边缘就截住，别溢到外面的提示文案上 */
+  overflow: hidden;
+}
+
 #ib-input {
   flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
   background: transparent;
   border: 0;
   outline: 0;
@@ -233,11 +246,84 @@ body,
   color: #5b6a7f;
 }
 
+#ib-ghost {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #4b5b70;
+  white-space: pre;
+  pointer-events: none;
+  user-select: none;
+  font: inherit;
+}
+
 #ib-hint {
   flex: none;
   font-size: 10.5px;
   color: #3f4c60;
   white-space: nowrap;
+}
+
+/* 输入条右侧的动作组：暂停捕获 / 清屏 / 输入权归属。
+   按钮一律不抢焦点（mousedown 里 preventDefault），点完仍能用键盘继续干活。 */
+#ib-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#ib-actions button {
+  flex: none;
+  padding: 1px 7px;
+  background: transparent;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  color: #8a9ab0;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#ib-actions button:hover {
+  color: #e8eef7;
+  border-color: #31435a;
+}
+
+/* 直通 / 接管是互斥的锁定态：亮着表示当前锁定在哪一边 */
+#ib-pass.on,
+#ib-take.on {
+  background: #2b3b4f;
+  border-color: #3f5468;
+  color: #e8eef7;
+}
+
+/* 暂停是「正在丢弃输出」，与锁定态分开配色 */
+#ib-pause.on {
+  background: #3a2f1c;
+  border-color: #5b4520;
+  color: #d6a34a;
+}
+
+#ib-paused {
+  flex: none;
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  color: #d6a34a;
+  white-space: nowrap;
+}
+
+#inputbar.paused {
+  border-color: #4a3a22;
+}
+
+/* 窗口窄时先砍掉快捷键提示，把位置留给输入框 */
+@media (max-width: 1000px) {
+  #ib-hint {
+    display: none;
+  }
 }
 
 #hud {
@@ -249,4 +335,150 @@ body,
   pointer-events: none;
   white-space: pre;
   text-align: right;
+}
+
+/* ---------- Ctrl+R：输入条上方的历史检索覆盖层 ---------- */
+#hist-overlay {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 54px;
+  max-height: 58%;
+  display: flex;
+  flex-direction: column;
+  background: #0f1620;
+  border: 1px solid #2a3a4d;
+  border-radius: 10px;
+  box-shadow: 0 10px 32px -8px #000a;
+  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  overflow: hidden;
+  z-index: 20;
+}
+
+#hist-overlay[hidden] {
+  display: none;
+}
+
+#hist-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #1b2531;
+  color: #8a9ab0;
+}
+
+#hist-title {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+#hist-count {
+  flex: 1 1 auto;
+  color: #4a5a70;
+  font-size: 10.5px;
+}
+
+#hist-clear,
+#hist-close {
+  flex: none;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  color: #8a9ab0;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+#hist-clear:hover,
+#hist-close:hover {
+  color: #e8eef7;
+  border-color: #31435a;
+}
+
+#hist-clear.armed {
+  color: #e35d6a;
+  border-color: #5a2a30;
+}
+
+#hist-query {
+  border: 0;
+  border-bottom: 1px solid #1b2531;
+  outline: 0;
+  padding: 6px 10px;
+  background: #0b1017;
+  color: #e8eef7;
+  font: inherit;
+  caret-color: #46d19a;
+}
+
+#hist-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 6px 6px;
+}
+
+.hist-day {
+  padding: 6px 6px 2px;
+  color: #3f4c60;
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+}
+
+.hist-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  color: #c7d3e2;
+  cursor: pointer;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.hist-row.sel {
+  background: #1b2a3c;
+  color: #ffffff;
+}
+
+.hist-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hist-badge {
+  flex: none;
+  color: #4a5a70;
+  font-size: 10.5px;
+}
+
+.hist-older {
+  flex: none;
+  color: #d6a34a;
+  font-size: 10px;
+}
+
+.hist-time {
+  flex: none;
+  color: #4a5a70;
+  font-size: 10.5px;
+}
+
+.hist-empty {
+  padding: 14px;
+  color: #4a5a70;
+  text-align: center;
+}
+
+#hist-foot {
+  padding: 4px 10px 6px;
+  border-top: 1px solid #1b2531;
+  color: #3f4c60;
+  font-size: 10.5px;
 }

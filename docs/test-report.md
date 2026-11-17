@@ -5,13 +5,13 @@
 
 | 时间 | 层 | 明细 | 结论 | 失败用例 |
 |---|---|---|---|---|
-| 2026-11-16T21:50:15+08:00 | all | L0 core-domain: ok 0.2s (54 passed, 0 failed)<br>L1 shell markers: ok 2.6s (3 passed, 0 failed)<br>L1 persistence: ok 0.7s (11 passed, 0 failed) | PASS | - |
-| 2026-11-16T21:51:36+08:00 | all | L0 core-domain: ok 0.3s (54 passed, 0 failed)<br>L1 shell markers: skipped (target\debug\pinshell.exe is locked by a running app) | PASS | - |
-| 2026-11-16T22:05:24+08:00 | all | L0 core-domain: failed 2s (55 passed, 0 failed)<br>L1 shell markers: failed 4.9s (3 passed, 0 failed)<br>L1 persistence: failed 4.7s (11 passed, 0 failed) | FAIL | - |
-| 2026-11-16T22:06:02+08:00 | l0 | L0 core-domain: failed 0.3s (55 passed, 0 failed) | FAIL | - |
-| 2026-11-16T22:06:12+08:00 | l0 | L0 core-domain: failed 0.3s (55 passed, 0 failed) | FAIL | - |
-| 2026-11-16T22:06:38+08:00 | all | L0 core-domain: failed 0.3s (55 passed, 0 failed)<br>L1 shell markers: failed 2.6s (3 passed, 0 failed)<br>L1 persistence: failed 0.8s (11 passed, 0 failed) | FAIL | - |
-| 2026-11-16T22:07:53+08:00 | all | L0 core-domain: ok 2.9s (55 passed, 0 failed)<br>L1 shell markers: ok 5.7s (3 passed, 0 failed)<br>L1 persistence: ok 1.4s (11 passed, 0 failed) | PASS | - |
-| 2026-11-16T22:19:33+08:00 | all | L0 core-domain: ok 2.3s (60 passed, 0 failed)<br>L1 shell markers: ok 4.8s (3 passed, 0 failed)<br>L1 persistence: ok 4.9s (16 passed, 0 failed) | PASS | - |
-| 2026-11-16T22:24:36+08:00 | all | L0 core-domain: ok 0.3s (60 passed, 0 failed)<br>L1 shell markers: ok 2.5s (3 passed, 0 failed)<br>L1 persistence: ok 3.7s (16 passed, 0 failed) | PASS | - |
-| 2026-11-16T22:52:45+08:00 | all | L0 core-domain: ok 2s (61 passed, 0 failed)<br>L1 shell markers: ok 4.8s (3 passed, 0 failed)<br>L1 persistence: ok 4.7s (16 passed, 0 failed) | PASS | - |
+| 2026-11-17T11:37:58+08:00 | l0 | L0 core-domain: ok 1.3s (69 passed, 0 failed)<br>L0 frontend: ok 1.3s (11 passed, 0 failed) | PASS | - |
+| 2026-11-17T11:38:26+08:00 | it | L1 shell markers: ok 6.2s (3 passed, 0 failed)<br>L1 persistence: ok 0.7s (27 passed, 0 failed) | PASS | - |
+| 2026-11-17T11:42:51+08:00 | all | L0 core-domain: ok 0.4s (69 passed, 0 failed)<br>L0 frontend: ok 1.5s (20 passed, 0 failed)<br>L1 shell markers: ok 2.3s (3 passed, 0 failed)<br>L1 persistence: ok 0.8s (27 passed, 0 failed) | PASS | - |
+| 2026-11-17T15:35:36+08:00 | l0 | L0 core-domain: ok 0.5s (78 passed, 0 failed)<br>L0 frontend: ok 1.6s (26 passed, 0 failed) | PASS | - |
+| 2026-11-17T15:36:40+08:00 | all | L0 core-domain: ok 0.2s (78 passed, 0 failed)<br>L0 frontend: ok 1.5s (26 passed, 0 failed)<br>L1 shell markers: ok 2.5s (3 passed, 0 failed)<br>L1 persistence: ok 5.2s (29 passed, 0 failed) | PASS | - |
+| 2026-11-17T15:41:28+08:00 | all | L0 core-domain: ok 0.5s (78 passed, 0 failed)<br>L0 frontend: ok 1.8s (26 passed, 0 failed)<br>L1 shell markers: skipped (pinshell.exe is running; target\debug\pinshell.exe is locked by a running app; tauri dev is running) | PASS | - |
+| 2026-11-17T16:21:36+08:00 | l0 | L0 core-domain: ok 1.7s (82 passed, 0 failed)<br>L0 frontend: ok 1.6s (30 passed, 0 failed) | PASS | - |
+| 2026-11-17T16:28:53+08:00 | l0 | L0 core-domain: ok 0.5s (82 passed, 0 failed)<br>L0 frontend: ok 1.8s (30 passed, 0 failed) | PASS | - |
+| 2026-11-17T16:30:42+08:00 | l0 | L0 core-domain: ok 0.3s (82 passed, 0 failed)<br>L0 frontend: ok 1.6s (30 passed, 0 failed) | PASS | - |
+| 2026-11-17T18:53:29+08:00 | l0 | L0 core-domain: ok 2.7s (87 passed, 0 failed)<br>L0 frontend: ok 1.7s (30 passed, 0 failed) | PASS | - |

@@ -1,48 +1,65 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use core_domain::coalesce::Coalescer;
 use core_domain::osc::{OscEvent, OscParser};
 use core_domain::ownership::{
     decide, is_submit, Confidence, Override, Owner, PromptTracker, TerminalState, TransportKind,
 };
 use core_domain::replay::ReplayBuffer;
+use core_domain::resize::SentSize;
 use core_domain::utf8_stream::Utf8Stream;
 use core_domain::workspace::{SessionMeta, Workspace};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+mod history;
 mod persistence;
 
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
+/// 标题不在这里：唯一真源是工作区里的 `SessionMeta`，见 `pty_list`。
 struct Session {
-    /// 会话树里显示的名字：默认取 Shell 文件名，用户重命名后以用户为准
-    title: Mutex<String>,
     created_ms: u64,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     input: Mutex<InputState>,
-    /// 输入条提交过的行，内存里最近 200 条。落盘与掩码是 M3 的事。
-    history: Mutex<VecDeque<String>>,
     /// 最近输出的副本：前端晚附着、切走或页面重载后从这里补上一段
     replay: Mutex<ReplayBuffer>,
     /// 回放缓冲自上次落盘以来有没有新内容（空闲落盘用，见 `IDLE_FLUSH_MS`）
     dirty: AtomicBool,
+    /// 暂停接收输出：读线程照常解析、照常记回放，只是不再发 `pty:out`。
+    /// 继续时前端按回放整屏重画，所以暂停期间的输出不丢、也不会与 Shell 的屏幕错位。
+    paused: AtomicBool,
+    /// 最近一次生效的 PTY 尺寸。相同尺寸不再下发：ConPTY 每次 resize 都会整屏重绘，
+    /// 会把刚清掉的屏幕又画回来（见 `core_domain::resize`）。
+    size: Mutex<SentSize>,
+    /// 输出合流：读线程只往里追加，发送线程按帧把攒下的块发一次 `pty:out`。
+    /// 刷屏时读循环一秒能读到上千块，逐块发事件会把主线程和前端压满（见 `core_domain::coalesce`）。
+    outbox: Arc<OutMailbox>,
 }
+
+/// 合流缓冲 + 发送线程共享的运行标志。读线程结束时 `running` 置 false，
+/// 发送线程把最后一块发出去后自行退出。
+struct OutMailbox {
+    pending: Mutex<Coalescer>,
+    running: AtomicBool,
+}
+
+/// 发送线程的唤醒间隔（毫秒）。8 ms 比一帧（16.7 ms）短，屏幕不会因此变慢；
+/// 又足以把刷屏时的上千次读合成几十次事件。
+const OUT_COALESCE_MS: u64 = 8;
 
 /// 每个会话保留多少回放字节。够覆盖一次重载与切会话的空档，又不至于长住内存。
 const REPLAY_CAP_BYTES: usize = 256 * 1024;
-
-/// 输入条历史的上限：只服务 ↑↓ 的即时手感，不做持久化。
-const HISTORY_CAP: usize = 200;
 
 /// 输出静默多久之后才把卷轴快照落盘。太短会在持续刷屏时反复写文件，
 /// 太长则崩溃退出会丢更多屏幕内容。3 秒是「用户已经看完这段话」的量级。
@@ -65,6 +82,8 @@ struct AppState {
     workspace: Mutex<Workspace>,
     /// 解析失败时为 `None`：本版没有必需落盘的状态，不挡启动
     data_dir: Option<PathBuf>,
+    /// 历史库句柄。`setup` 里拿到 `AppHandle` 后才建（写库线程要发事件）。
+    history: OnceLock<Arc<history::History>>,
 }
 
 impl AppState {
@@ -73,7 +92,12 @@ impl AppState {
             sessions: Mutex::new(HashMap::new()),
             workspace: Mutex::new(workspace),
             data_dir,
+            history: OnceLock::new(),
         }
+    }
+
+    fn history(&self) -> Option<&Arc<history::History>> {
+        self.history.get()
     }
 }
 
@@ -99,6 +123,14 @@ struct ReplayPayload {
     dropped_bytes: u64,
 }
 
+/// 附着时拿到的历史快照（L2-02）：`items` 按 id 升序，`upto_id` 是快照时的最大 id。
+#[derive(Serialize)]
+struct HistorySnapshotPayload {
+    session_id: String,
+    upto_id: i64,
+    items: Vec<history::HistoryItem>,
+}
+
 /// 会话列表的一行。冷会话与重命名是 M2 后半段的事，这里只有活着的会话。
 #[derive(Serialize)]
 struct SessionInfo {
@@ -108,7 +140,8 @@ struct SessionInfo {
     created_ms: u64,
 }
 
-/// 会话树的一行：冷会话也在里面，`hot` 表示当前有没有进程。
+/// 会话树的一行：冷会话也在里面。热/冷由前端对照 `pty_list` 得出，
+/// 这里不重复给一份 `hot`（工作区里的 `hot` 只服务于退出时的落盘）。
 #[derive(Serialize)]
 struct TreeSession {
     id: String,
@@ -116,7 +149,6 @@ struct TreeSession {
     transport: &'static str,
     shell: Option<String>,
     cwd: Option<String>,
-    hot: bool,
 }
 
 /// 从输出流里摘出来的标记，前端只消费它，不再自己解析字节。
@@ -320,9 +352,52 @@ fn integration_script(app: &AppHandle, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// 把路径塞进 PowerShell 单引号字符串里。
-fn ps_literal(path: &Path) -> String {
-    format!(". '{}'", path.display().to_string().replace('\'', "''"))
+/// PowerShell 集成脚本的正文。优先读磁盘（改了脚本不用重编），读不到用编译期内嵌的副本。
+///
+/// 注入的是**正文**而不是「`.` 一个 .ps1 文件」：点源文件要先过 PowerShell 的授权检查，
+/// 该检查在部分机器上会直接失败（输出 `AuthorizationManager 检查失败。`），
+/// 脚本于是整段没跑、会话永远停在「未知 · 直通」。正文走 `-EncodedCommand`，不经那条路径。
+fn powershell_integration_text(app: &AppHandle) -> String {
+    if let Some(path) = integration_script(app, "pinshell.ps1") {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return text;
+        }
+    }
+    include_str!("../../scripts/integration/pinshell.ps1").to_string()
+}
+
+/// 标准 base64（RFC 4648，带 `=` 填充）。只服务 `-EncodedCommand`，不为它引依赖。
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) as usize & 0x3f] as char);
+        out.push(TABLE[(n >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// `-EncodedCommand` 要的形态：UTF-16LE 字节的 base64。
+fn powershell_encoded(script: &str) -> String {
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    base64_encode(&bytes)
 }
 
 #[tauri::command]
@@ -362,12 +437,10 @@ fn spawn_session(
 
     // 集成脚本只注入我们自己启动的进程：不写用户 profile、不写注册表（ADR 0003）
     if is_powershell(&shell) {
-        if let Some(script) = integration_script(&app, "pinshell.ps1") {
-            cmd.arg("-NoLogo");
-            cmd.arg("-NoExit");
-            cmd.arg("-Command");
-            cmd.arg(ps_literal(&script));
-        }
+        cmd.arg("-NoLogo");
+        cmd.arg("-NoExit");
+        cmd.arg("-EncodedCommand");
+        cmd.arg(powershell_encoded(&powershell_integration_text(&app)));
     } else if is_bash(&shell) {
         // --init-file 会顶掉默认启动文件，所以脚本自己先读 /etc/profile 与 ~/.bashrc
         if let Some(script) = integration_script(&app, "pinshell.bash") {
@@ -398,8 +471,11 @@ fn spawn_session(
         .and_then(|s| s.to_str())
         .unwrap_or(shell.as_str())
         .to_string();
+    let outbox = Arc::new(OutMailbox {
+        pending: Mutex::new(Coalescer::new()),
+        running: AtomicBool::new(true),
+    });
     let session = Arc::new(Session {
-        title: Mutex::new(title.clone()),
         created_ms: now_ms(),
         writer: Mutex::new(writer),
         master: Mutex::new(pair.master),
@@ -411,9 +487,11 @@ fn spawn_session(
             last_output_ms: now_ms(),
             at_line_start: true,
         }),
-        history: Mutex::new(VecDeque::new()),
         replay: Mutex::new(ReplayBuffer::new(REPLAY_CAP_BYTES)),
         dirty: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
+        size: Mutex::new(SentSize::seeded(cols.max(1), rows.max(1))),
+        outbox: outbox.clone(),
     });
 
     // 冷会话重开：把上次的屏幕接在新输出前面。必须在读线程启动前做，
@@ -452,6 +530,34 @@ fn spawn_session(
         }
     }
     persist_workspace(&state);
+
+    // 输出发送线程：每 OUT_COALESCE_MS 把合流缓冲攒下的块发一次 `pty:out`。
+    // 暂停期间直接丢掉攒下的块（内容在回放缓冲里，继续时整屏重画），
+    // 否则长时间暂停会让缓冲一直长。
+    {
+        let app_for_out = app.clone();
+        let session_for_out = session.clone();
+        let out_id = id.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(OUT_COALESCE_MS));
+            let running = session_for_out.outbox.running.load(Ordering::Relaxed);
+            if let Some((data, seq)) = session_for_out.outbox.pending.lock().take() {
+                if !session_for_out.paused.load(Ordering::Relaxed) {
+                    let _ = app_for_out.emit(
+                        "pty:out",
+                        OutPayload {
+                            id: out_id.clone(),
+                            seq,
+                            data,
+                        },
+                    );
+                }
+            }
+            if !running {
+                break;
+            }
+        });
+    }
 
     // 每个会话一个读线程（ConPTY 要求读写分离，否则死锁）
     let app_for_read = app.clone();
@@ -502,17 +608,31 @@ fn spawn_session(
                             .push(&text)
                             .unwrap_or_default();
                         session_for_read.dirty.store(true, Ordering::Relaxed);
-                        let _ = app_for_read.emit(
-                            "pty:out",
-                            OutPayload {
-                                id: emit_id.clone(),
-                                seq,
-                                data: text,
-                            },
-                        );
+                        // 暂停只掐事件，不掐回放：继续时前端按回放整屏重画，暂停期间的内容
+                        // 还在（受 REPLAY_CAP_BYTES 限制，超出部分按整块丢）。这样既省掉
+                        // 刷屏时的 IPC，又不会让暂停期间的终端查询（DSR 之类）永远丢答。
+                        //
+                        // 事件不在这里直接发：先攒进合流缓冲，由发送线程按帧发出去。
+                        // 刷屏时这里一秒会跑上千次，逐块发 IPC 的代价全落在主线程与前端。
+                        session_for_read.outbox.pending.lock().push(&text, seq);
                     }
                 }
                 Err(_) => break,
+            }
+        }
+        // 读循环结束：先停发送线程，再把最后一块发出去，最后才发退出事件。
+        // 顺序反了会让屏幕上的最后一段内容落在「[进程已退出]」之后。
+        session_for_read.outbox.running.store(false, Ordering::Relaxed);
+        if let Some((data, seq)) = session_for_read.outbox.pending.lock().take() {
+            if !session_for_read.paused.load(Ordering::Relaxed) {
+                let _ = app_for_read.emit(
+                    "pty:out",
+                    OutPayload {
+                        id: emit_id.clone(),
+                        seq,
+                        data,
+                    },
+                );
             }
         }
         // 通道结束（进程退出/被关）：先落卷轴快照、摘掉运行时、标记冷会话，再通知前端
@@ -522,7 +642,7 @@ fn spawn_session(
             // 单独取值：不能让 workspace 的锁活在条件里，下面还要再取一次。
             let still_known = state.workspace.lock().session(&emit_id).is_some();
             if still_known {
-                save_scrollback(&state, &session_for_read, &emit_id);
+                save_session_scrollback(&state, &session_for_read, &emit_id);
             }
             state.sessions.lock().remove(&emit_id);
             {
@@ -554,7 +674,7 @@ fn spawn_session(
         // 连续刷屏时不会反复写盘，崩溃时也只丢最后几秒
         if quiet >= IDLE_FLUSH_MS && session.dirty.swap(false, Ordering::Relaxed) {
             let state = app_for_tick.state::<AppState>();
-            if !save_scrollback(&state, &session, &tick_id) {
+            if !save_session_scrollback(&state, &session, &tick_id) {
                 // 没写成（没有数据目录/磁盘忙）：留到下一个滴答再试
                 session.dirty.store(true, Ordering::Relaxed);
             }
@@ -568,7 +688,7 @@ fn spawn_session(
 /// 把会话当前的可见内容落成卷轴快照。只在数据目录可用、且回放缓冲里确实有内容时才写。
 /// 返回是否真的写了文件：空闲落盘靠它决定还要不要再试一次。
 /// 快照只用于显示：冷会话重新拉起时接在新输出前面（见 `core_domain::scrollback`）。
-fn save_scrollback(state: &AppState, session: &Session, id: &str) -> bool {
+fn save_session_scrollback(state: &AppState, session: &Session, id: &str) -> bool {
     let Some(dir) = state.data_dir.as_deref() else {
         return false;
     };
@@ -617,16 +737,23 @@ fn write_session(
     if is_submit(data) {
         session.input.lock().tracker.on_submit();
         push_ownership(app, &session, id);
-        if from_bar {
-            remember(&session, data);
-        }
     }
 
-    let mut writer = session.writer.lock();
-    writer
-        .write_all(data.as_bytes())
-        .and_then(|_| writer.flush())
-        .map_err(|e| format!("write: {e}"))
+    {
+        let mut writer = session.writer.lock();
+        writer
+            .write_all(data.as_bytes())
+            .and_then(|_| writer.flush())
+            .map_err(|e| format!("write: {e}"))?;
+    }
+
+    // 先发 PTY、再排进历史库的单写线程：落盘失败不影响命令已经发出去（M3）
+    if from_bar {
+        if let Some(history) = state.history() {
+            history.record(id, data, now_ms());
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -650,34 +777,81 @@ fn pty_send_line(
     write_session(&app, &state, &id, &format!("{line}\r"), true)
 }
 
-/// 记下输入条提交的一行。只进内存，不落盘；规则在 `core_domain::history`。
-fn remember(session: &Session, data: &str) {
-    core_domain::history::remember(&mut session.history.lock(), data, HISTORY_CAP);
-}
-
-/// 输入条历史，按时间顺序（最后一条是最近的）。
+/// 输入条历史，按时间顺序（最后一条是最近的）。↑↓ 只用最近 5000 条。
 #[tauri::command]
 fn pty_history(state: State<'_, AppState>, id: String) -> Result<Vec<String>, String> {
-    let session = state
-        .sessions
-        .lock()
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| format!("no session {id}"))?;
-    let items: Vec<String> = session.history.lock().iter().cloned().collect();
-    Ok(items)
+    if !state.sessions.lock().contains_key(&id) {
+        return Err(format!("no session {id}"));
+    }
+    let Some(history) = state.history() else {
+        return Ok(Vec::new());
+    };
+    let (items, _) = history.snapshot(&id);
+    Ok(items.into_iter().map(|entry| entry.command).collect())
+}
+
+/// 历史缓存契约（L2-02）：附着时整份取最近 5000 条，之后靠 `history:append` 增量补齐。
+#[tauri::command]
+fn history_snapshot(state: State<'_, AppState>, id: String) -> HistorySnapshotPayload {
+    let (items, upto) = match state.history() {
+        Some(history) => history.snapshot(&id),
+        None => (Vec::new(), 0),
+    };
+    HistorySnapshotPayload {
+        session_id: id,
+        upto_id: upto,
+        items: items.into_iter().map(history::HistoryItem::from).collect(),
+    }
+}
+
+/// Ctrl+R 的全量检索（前端本地先过滤 5000 条，防抖后再来查这里）。
+#[tauri::command]
+fn history_search(
+    state: State<'_, AppState>,
+    id: String,
+    query: String,
+) -> Vec<history::HistoryItem> {
+    state
+        .history()
+        .map(|history| {
+            history
+                .search(&id, &query)
+                .into_iter()
+                .map(history::HistoryItem::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 清空本会话历史：不动别的会话，也不动工作区里的会话节点。
+#[tauri::command]
+fn history_clear(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if let Some(history) = state.history() {
+        history.clear(&id);
+    }
+    Ok(())
 }
 
 /// 附着时补画：`data` 覆盖到 `seq` 为止，之后只渲染 `seq` 更大的实时块。
+///
+/// `answered_seq` 是前端已经画到过的最大序号：以它为界，画过的块里的终端查询要删掉
+/// （答过的不再答），没画过的块原样交回（可能正等着终端应答，删了 Shell 会卡住）。
 #[tauri::command]
-fn pty_replay(state: State<'_, AppState>, id: String) -> Result<ReplayPayload, String> {
+fn pty_replay(
+    state: State<'_, AppState>,
+    id: String,
+    answered_seq: Option<u64>,
+) -> Result<ReplayPayload, String> {
     let session = state
         .sessions
         .lock()
         .get(&id)
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
-    let snapshot = session.replay.lock().snapshot();
+    let snapshot = session
+        .replay
+        .lock()
+        .snapshot_for_attach(answered_seq.unwrap_or(0));
     Ok(ReplayPayload {
         id,
         seq: snapshot.seq,
@@ -690,11 +864,16 @@ fn pty_replay(state: State<'_, AppState>, id: String) -> Result<ReplayPayload, S
 #[tauri::command]
 fn pty_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
     let sessions = state.sessions.lock();
+    let workspace = state.workspace.lock();
     let mut list: Vec<SessionInfo> = sessions
         .iter()
         .map(|(id, session)| SessionInfo {
             id: id.clone(),
-            title: session.title.lock().clone(),
+            // 标题的唯一真源是工作区：重命名与冷会话重开都读这一份
+            title: workspace
+                .session(id)
+                .map(|meta| meta.title.clone())
+                .unwrap_or_else(|| id.clone()),
             state: state_name(session.input.lock().tracker.view()),
             created_ms: session.created_ms,
         })
@@ -713,35 +892,25 @@ fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
         .map(|session| TreeSession {
             id: session.id.clone(),
             title: session.title.clone(),
-            transport: match session.transport {
-                TransportKind::Terminal => "terminal",
-                TransportKind::Serial => "serial",
-            },
+            transport: session.transport.as_str(),
             shell: session.shell.clone(),
             cwd: session.cwd.clone(),
-            hot: session.hot,
         })
         .collect()
 }
 
-/// 改会话标题。规则（去空白、按字符截断）在 core-domain；这里只负责落盘与同步运行时句柄。
+/// 改会话标题。规则（去空白、按字符截断）在 core-domain；这里只负责落盘。
+/// 标题的唯一真源是工作区，`pty_list` 也从那里读，不存在第二份要同步的名字。
 #[tauri::command]
 fn rename_session(state: State<'_, AppState>, id: String, title: String) -> Result<(), String> {
-    let stored = {
+    let changed = {
         let mut workspace = state.workspace.lock();
-        match workspace.rename_session(&id, &title) {
-            Ok(true) => workspace.session(&id).map(|meta| meta.title.clone()),
-            Ok(false) => None,
-            Err(err) => return Err(format!("rename: {err:?}")),
-        }
+        workspace
+            .rename_session(&id, &title)
+            .map_err(|err| format!("rename: {err:?}"))?
     };
-    let Some(stored) = stored else {
-        return Ok(());
-    };
-    persist_workspace(&state);
-    // 运行时句柄上的名字跟着改，免得 pty_list 与 sidebar 说法不一致
-    if let Some(session) = state.sessions.lock().get(&id).cloned() {
-        *session.title.lock() = stored;
+    if changed {
+        persist_workspace(&state);
     }
     Ok(())
 }
@@ -765,7 +934,60 @@ fn pty_set_override(
     Ok(())
 }
 
-/// 当前判定。订阅比会话晚一步时用它补一帧，避免前端停在默认值上。
+/// 暂停 / 继续接收输出。返回设置后的状态，前端不必再查一次。
+/// 判定在后端读线程：暂停期间不再发 `pty:out`（省掉刷屏时的 IPC），输出继续进回放缓冲。
+#[tauri::command]
+fn pty_set_paused(state: State<'_, AppState>, id: String, paused: bool) -> Result<bool, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    session.paused.store(paused, Ordering::Relaxed);
+    // 攒着的块：暂停时发出去也没人画，继续时前端按回放整屏重画（再发就等于画两遍）。
+    // 直接丢掉，省掉长时间暂停时的内存。
+    session.outbox.pending.lock().clear();
+    Ok(paused)
+}
+
+/// 当前是否暂停。切会话回来时要按后端状态复原按钮，不能凭前端记忆。
+#[tauri::command]
+fn pty_paused(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    Ok(session.paused.load(Ordering::Relaxed))
+}
+
+/// 清窗口：丢掉回放内容并删掉磁盘上的卷轴快照，屏幕由前端自己清。
+/// 序号继续往前走（见 `ReplayBuffer::clear`），所以清掉的块不会被当成新内容补画回来；
+/// 重载页面、重开应用也不会再把旧内容画回来。
+/// 返回清空前的最后序号：前端拿它把「已经发出去、还在路上」的旧块一起丢掉。
+#[tauri::command]
+fn pty_clear(state: State<'_, AppState>, id: String) -> Result<u64, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    let seq = session.replay.lock().clear();
+    // 合流缓冲里可能还压着清屏前读到的块。不清掉的话，它们会在下一次发送时
+    // 带着更大的 seq 落到刚清空的屏幕上（前端只比 seq，不会知道那是旧内容）。
+    session.outbox.pending.lock().clear();
+    // 清完立刻把「有未落盘内容」还回去：否则下一个空闲滴答会把空快照当成一次写盘
+    session.dirty.store(false, Ordering::Relaxed);
+    if let Some(dir) = state.data_dir.as_deref() {
+        if let Err(err) = persistence::remove_scrollback(dir, &id) {
+            eprintln!("[data] remove scrollback {id}: {err}");
+        }
+    }
+    Ok(seq)
+}
 #[tauri::command]
 fn pty_ownership(state: State<'_, AppState>, id: String) -> Result<OwnershipPayload, String> {
     let session = state
@@ -778,6 +1000,9 @@ fn pty_ownership(state: State<'_, AppState>, id: String) -> Result<OwnershipPayl
     Ok(ownership_of(&id, &input))
 }
 
+/// 改 PTY 尺寸。**相同尺寸不下发**：ConPTY 每收到一次 resize（哪怕没变）都会整屏重绘
+/// 自己的缓冲，把「清屏」清掉的内容重新吐回来（暂停 → 清屏 → 继续 就是这么复现的）。
+/// 重新附着与继续都不该顺手 resize，只有真实的窗口尺寸变化才下发，规则见 `core_domain::resize`。
 #[tauri::command]
 fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     let session = state
@@ -786,11 +1011,15 @@ fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> R
         .get(&id)
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
+    let want = (cols.max(1), rows.max(1));
+    let Some((cols, rows)) = session.size.lock().accept(want.0, want.1) else {
+        return Ok(());
+    };
     let master = session.master.lock();
     master
         .resize(PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -810,7 +1039,10 @@ fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
     if let Some(session) = state.sessions.lock().remove(&id) {
         let _ = session.child.lock().kill();
     }
-    // 历史与卷轴快照的保留由 M3 的历史库负责；当前版本按 I2 一并删除
+    // 关闭会话 = 节点删除：历史（M3）与卷轴快照一起销毁（I2）
+    if let Some(history) = state.history() {
+        history.delete_session(&id);
+    }
     if let Some(dir) = state.data_dir.as_deref() {
         if let Err(err) = persistence::remove_scrollback(dir, &id) {
             eprintln!("[data] remove scrollback {id}: {err}");
@@ -869,13 +1101,59 @@ fn main() {
 
     tauri::Builder::default()
         .manage(AppState::new(data_dir.ok(), workspace))
+        .setup(|app| {
+            // 历史库的单写线程要发 `history:append` 事件，所以等 AppHandle 就绪再建
+            let state = app.state::<AppState>();
+            let history = history::History::open(state.data_dir.as_deref(), app.handle().clone());
+            println!("[data] history: {}", history.path().display());
+            let _ = state.history.set(history);
+            // WebView2 默认把 Ctrl+R / F5 当成浏览器的「刷新页面」：按键先到页面（前端看得见、
+            // 也 preventDefault 得住），但 WebView2 照样执行刷新，结果是整页重载——窗口白闪一帧，
+            // 会话得重新挂回。终端要保持页面常驻，所以把浏览器加速键全部关掉，按键只走 DOM。
+            #[cfg(windows)]
+            {
+                use tauri::Manager;
+                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                use windows_core::Interface;
+                if let Some(window) = app.get_webview_window("main") {
+                    let applied = window.with_webview(|webview| unsafe {
+                        let controller = webview.controller();
+                        let Ok(core) = controller.CoreWebView2() else {
+                            return;
+                        };
+                        let Ok(settings) = core.Settings() else { return };
+                        let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() else {
+                            return;
+                        };
+                        if settings3.SetAreBrowserAcceleratorKeysEnabled(false).is_ok() {
+                            let mut on = windows_core::BOOL::default();
+                            let _ = settings3.AreBrowserAcceleratorKeysEnabled(&mut on);
+                            println!(
+                                "[webview] 浏览器加速键: {}",
+                                if on.as_bool() { "on（未生效）" } else { "off" }
+                            );
+                        }
+                    });
+                    if let Err(err) = applied {
+                        eprintln!("[webview] 关浏览器加速键失败: {err}");
+                    }
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             spawn_session,
             pty_write,
             pty_send_line,
             pty_set_override,
+            pty_set_paused,
+            pty_paused,
+            pty_clear,
             pty_ownership,
             pty_history,
+            history_snapshot,
+            history_search,
+            history_clear,
             pty_replay,
             pty_list,
             session_tree,
@@ -897,7 +1175,7 @@ fn main() {
                     .map(|(id, session)| (id.clone(), session.clone()))
                     .collect();
                 for (id, session) in &sessions {
-                    save_scrollback(&state, session, id);
+                    save_session_scrollback(&state, session, id);
                 }
                 // 退出后没有任何进程还在跑：落盘就写冷，别让下次启动读到一堆 hot
                 {
@@ -914,4 +1192,27 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running PinShell");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{base64_encode, powershell_encoded};
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// `-EncodedCommand` 的输入是 UTF-16LE 字节的 base64，不是 UTF-8。
+    #[test]
+    fn encoded_command_is_utf16le_base64() {
+        assert_eq!(powershell_encoded("A"), "QQA=");
+        assert_eq!(powershell_encoded("AB"), "QQBCAA==");
+    }
 }

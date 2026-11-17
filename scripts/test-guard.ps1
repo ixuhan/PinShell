@@ -105,10 +105,12 @@ function Invoke-CargoTest {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
 
     $proc = [Diagnostics.Process]::Start($psi)
     try { $proc.PriorityClass = 'BelowNormal' } catch { }
-    # 边跑边读，避免大输出把管道缓冲塞满后卡死
+    # Read while the process runs: a full pipe buffer would deadlock it
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
@@ -158,6 +160,84 @@ function Invoke-CargoTest {
   }
 }
 
+# L0 frontend: vitest pure functions only, no window, no dev server.
+# Returns $null when node/npm is missing, so the layer is skipped with a reason instead of
+# being reported as passed.
+#
+# NOTE: this file must stay ASCII-only (Windows PowerShell 5.1 reads .ps1 as ANSI without a
+# BOM). The vitest bullets are therefore detected by char code, not by literal glyphs.
+function Invoke-FrontendTests {
+  $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue)
+  if (-not $npm) { return $null }
+
+  $cases = New-Object System.Collections.ArrayList
+  $passed = 0
+  $failed = 0
+  $code = 1
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $npm.Source
+    $psi.Arguments = 'test -- --reporter=verbose'
+    $psi.WorkingDirectory = $root
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+
+    $proc = [Diagnostics.Process]::Start($psi)
+    try { $proc.PriorityClass = 'BelowNormal' } catch { }
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $proc.WaitForExit()
+    $stdout = $outTask.Result
+    $stderr = $errTask.Result
+    $code = $proc.ExitCode
+    $proc.Dispose()
+    $sw.Stop()
+
+    foreach ($text in @($stdout, $stderr)) {
+      if ($text -and $text.Trim().Length -gt 0) { Write-Host $text.TrimEnd() }
+    }
+
+    # Bullets used by vitest: 0x2713 ok, 0x00D7 failed, 0x2717 failed.
+    foreach ($line in ($stdout -split "`r?`n")) {
+      $trim = $line.TrimStart()
+      if ($trim.Length -lt 2) { continue }
+      $mark = [int][char]$trim[0]
+      if ($mark -ne 0x2713 -and $mark -ne 0x00D7 -and $mark -ne 0x2717) { continue }
+      $name = $trim.Substring(1).Trim()
+      $name = $name -replace '\s+\d+(\.\d+)?ms$', ''
+      if ($name -match '\.test\.ts\s*\(') { continue } # file-level summary line
+      if (-not $name) { continue }
+      $status = 'failed'
+      if ($mark -eq 0x2713) { $status = 'ok' }
+      [void]$cases.Add([ordered]@{ name = $name; status = $status })
+      if ($status -eq 'ok') { $passed++ } else { $failed++ }
+    }
+    # Fall back to the summary line if the reporter changes: the gate must not silently pass.
+    if ($cases.Count -eq 0) {
+      $summary = [regex]::Match($stdout, 'Tests\s+(\d+) passed')
+      if ($summary.Success) { $passed = [int]$summary.Groups[1].Value }
+      if ($stdout -match 'Tests\s+(\d+) failed') { $failed = [int]$Matches[1] }
+    }
+  } catch {
+    $sw.Stop()
+    Write-Host ('[guard] npm failed to run: {0}' -f $_.Exception.Message)
+  }
+
+  return @{
+    Code = $code
+    Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    Cases = @($cases)
+    Passed = $passed
+    Failed = $failed
+    Ignored = 0
+  }
+}
+
 # Writes both reports: the machine-readable JSON and one appended row in the markdown log.
 function Write-TestReport {
   param(
@@ -175,7 +255,7 @@ function Write-TestReport {
     } else {
       $detail += ('{0} {1}: {2} {3}s ({4} passed, {5} failed)' -f $l.id, $l.label, $l.status, $l.seconds, $l.passed, $l.failed)
       foreach ($c in $l.cases) {
-        if ($c.status -eq 'failed') { $failNames += ('{0}/{1}' -f $l.id, $c.name) }
+        if ($c.status -eq 'failed') { $failNames += ('{0}/{1}::{2}' -f $l.id, $l.label, $c.name) }
       }
     }
   }
@@ -240,6 +320,27 @@ if ($Layer -eq 'l0' -or $Layer -eq 'all') {
       skip_reason = $null; forced = $false;
       passed = $r.Passed; failed = $r.Failed; ignored = $r.Ignored; cases = @($r.Cases)
     })
+
+  # L0 frontend pure functions (Ghost Text / search / day anchors): no window, no dev server
+  $fe = Invoke-FrontendTests
+  if ($null -eq $fe) {
+    Write-Output '[guard] L0 frontend        skipped (npm not found)'
+    [void]$layers.Add([ordered]@{
+        id = 'L0'; label = 'frontend'; status = 'skipped'; seconds = $null;
+        skip_reason = 'npm not found'; forced = $false;
+        passed = 0; failed = 0; ignored = 0; cases = @()
+      })
+  } else {
+    $feStatus = 'failed'
+    if ($fe.Code -eq 0) { $feStatus = 'ok' }
+    if ($fe.Code -ne 0) { $failedRun = $true }
+    Write-Output ("[guard] L0 frontend        {0,-7} {1}s" -f $feStatus, $fe.Seconds)
+    [void]$layers.Add([ordered]@{
+        id = 'L0'; label = 'frontend'; status = $feStatus; seconds = $fe.Seconds;
+        skip_reason = $null; forced = $false;
+        passed = $fe.Passed; failed = $fe.Failed; ignored = $fe.Ignored; cases = @($fe.Cases)
+      })
+  }
 }
 
 if ($Layer -eq 'it' -or $Layer -eq 'all') {
@@ -253,7 +354,7 @@ if ($Layer -eq 'it' -or $Layer -eq 'all') {
         passed = 0; failed = 0; ignored = 0; cases = @()
       })
     if ($Layer -eq 'it') {
-      # 明确要求跑 L1 却没跑，不能算通过
+      # L1 was explicitly requested but could not run: that is not a pass
       Write-Output '[guard] stop the dev instance, or pass -Force to run anyway'
       $notRun = $true
     }
@@ -268,7 +369,7 @@ if ($Layer -eq 'it' -or $Layer -eq 'all') {
         passed = $r.Passed; failed = $r.Failed; ignored = $r.Ignored; cases = @($r.Cases)
       })
 
-    # 主 crate 的单元测试：目前是持久化（原子写、.bak 回退、数据目录选择）
+    # Unit tests of the main crate: persistence (atomic write, .bak fallback, data dir) + history db
     $appManifest = Join-Path $root 'src-tauri\Cargo.toml'
     $p = Invoke-CargoTest @('test', '--bin', 'pinshell', '--offline', '--manifest-path', $appManifest)
     $pStatus = if ($p.Code -eq 0) { 'ok' } else { 'failed' }
