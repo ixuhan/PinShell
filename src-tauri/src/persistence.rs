@@ -145,6 +145,92 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+// ---------- 卷轴快照：每个会话一个文件，只用于显示 ----------
+
+pub const SCROLLBACK_DIR: &str = "scrollback";
+pub const SCROLLBACK_EXT: &str = "ansi";
+
+/// 会话 id → 文件名。id 来自前端（`spawn_session` 的 `session_id`），
+/// 必须挡住 `..`、路径分隔符与空名，否则一个 id 就能写到数据目录外面去。
+/// 合法 id（UUID 之类）原样使用，读起来方便；不合法的一律换成定长哈希名。
+pub fn session_file_name(id: &str) -> String {
+    let safe = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if safe {
+        return format!("{id}.{SCROLLBACK_EXT}");
+    }
+    // FNV-1a：只需要稳定与分散，不用于安全
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    format!("h-{hash:016x}.{SCROLLBACK_EXT}")
+}
+
+pub fn scrollback_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(SCROLLBACK_DIR).join(session_file_name(id))
+}
+
+/// 覆盖写：tmp → flush → 改名。不保留 `.bak`——卷轴快照只是显示层，
+/// 旧的一版没有救回价值，留一份只会白占磁盘。
+fn write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "path has no parent"))?;
+    fs::create_dir_all(dir)?;
+
+    let tmp = sibling(path, ".tmp");
+    let result = (|| -> io::Result<()> {
+        {
+            let mut file = File::create(&tmp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
+        // Windows 的 rename 不覆盖已存在的目标
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&tmp, path)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// 落一份卷轴快照。空内容不写：没有画面就没有可还原的东西。
+pub fn save_scrollback(dir: &Path, id: &str, text: &str) -> io::Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    write_replace(&scrollback_path(dir, id), text.as_bytes())
+}
+
+/// 读回卷轴快照。文件不存在、读不动或内容不是合法 UTF-8 都返回 `None`：
+/// 丢一段历史屏幕可以接受，为此让会话起不来不行。
+pub fn load_scrollback(dir: &Path, id: &str) -> Option<String> {
+    let bytes = fs::read(scrollback_path(dir, id)).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// 删除卷轴快照（关闭会话 = 节点删除，见 I2）。
+pub fn remove_scrollback(dir: &Path, id: &str) -> io::Result<()> {
+    match fs::remove_file(scrollback_path(dir, id)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 // ---------- 工作区 JSON：DTO 与 core-domain 模型互转（core-domain 保持零依赖） ----------
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -231,7 +317,6 @@ pub fn load_workspace(dir: &Path) -> WorkspaceLoad {
     }
 }
 
-#[allow(dead_code)] // M2 接线：会话树落地后由编辑操作调用
 pub fn save_workspace(dir: &Path, workspace: &Workspace) -> io::Result<()> {
     let file = workspace_to_file(workspace);
     let json = serde_json::to_vec_pretty(&file)
@@ -542,5 +627,73 @@ mod tests {
             WorkspaceLoad::Missing => "Missing".into(),
             WorkspaceLoad::Unreadable(err) => format!("Unreadable({err})"),
         }
+    }
+
+    #[test]
+    fn scrollback_round_trips_and_removes() {
+        let dir = temp_dir("scrollback");
+        let text = "PS C:\\> ls\r\n\x1b[32mgreen\x1b[0m\r\n";
+        save_scrollback(&dir, "s1", text).unwrap();
+        assert_eq!(load_scrollback(&dir, "s1").as_deref(), Some(text));
+
+        remove_scrollback(&dir, "s1").unwrap();
+        assert_eq!(load_scrollback(&dir, "s1"), None);
+        // 再删一次不算错：关闭会话可能被重复触发
+        remove_scrollback(&dir, "s1").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_scrollback_is_not_written() {
+        let dir = temp_dir("scrollbackempty");
+        save_scrollback(&dir, "s1", "").unwrap();
+        assert_eq!(load_scrollback(&dir, "s1"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overwriting_a_snapshot_keeps_only_the_new_one() {
+        let dir = temp_dir("scrollbackover");
+        save_scrollback(&dir, "s1", "first").unwrap();
+        save_scrollback(&dir, "s1", "second").unwrap();
+        assert_eq!(load_scrollback(&dir, "s1").as_deref(), Some("second"));
+        // 不保留 .bak：显示层不需要上一版
+        assert!(!dir.join(SCROLLBACK_DIR).join("s1.ansi.bak").exists());
+        assert!(!dir.join(SCROLLBACK_DIR).join("s1.ansi.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hostname_ids_stay_inside_the_scrollback_dir() {
+        let dir = temp_dir("scrollbackpath");
+        let base = dir.join(SCROLLBACK_DIR);
+        for id in [
+            "..",
+            ".",
+            "",
+            "../../evil",
+            "a/b",
+            "a\\b",
+            "C:evil",
+            "con",
+            "with space",
+        ] {
+            let path = scrollback_path(&dir, id);
+            assert_eq!(path.parent(), Some(base.as_path()), "id={id:?}");
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(name.ends_with(".ansi"), "id={id:?} name={name}");
+            assert!(!name.contains('/') && !name.contains('\\'), "id={id:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_names_are_stable_and_distinct() {
+        assert_eq!(session_file_name("s1"), "s1.ansi");
+        assert_ne!(session_file_name("a/b"), session_file_name("a\\b"));
+        assert_ne!(session_file_name(""), session_file_name("."));
+        let long = "x".repeat(200);
+        assert!(session_file_name(&long).len() <= 64);
+        assert_eq!(session_file_name(&long), session_file_name(&long));
     }
 }

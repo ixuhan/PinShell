@@ -12,6 +12,8 @@ const bar = document.getElementById("inputbar") as HTMLDivElement;
 const dot = document.getElementById("own-dot") as HTMLSpanElement;
 const ownLabel = document.getElementById("own-label") as HTMLSpanElement;
 const ib = document.getElementById("ib-input") as HTMLInputElement;
+const sessList = document.getElementById("sess-list") as HTMLDivElement;
+const sessNew = document.getElementById("sess-new") as HTMLButtonElement;
 
 function log(msg: string) {
   hud.textContent = msg;
@@ -51,6 +53,9 @@ let tSpawnStart = 0;
 let tSpawnReturn = 0;
 /// 只有真正新开会话时才量「启动到可输入」；页面重载挂回旧会话不算冷启动
 let measureStartup = false;
+/// 冷启动计量的那一个会话 id：之后新开的会话不参与
+let startupSession = "";
+let startupMeasured = false;
 
 interface SessionInfo {
   id: string;
@@ -119,29 +124,202 @@ async function attach(id: string) {
   void refreshHistory();
 }
 
-async function boot() {
-  const existing = await invoke<SessionInfo[]>("pty_list");
-  if (existing.length) {
-    const last = existing[existing.length - 1];
-    await attach(last.id);
-    log(`已挂回会话 ${last.title} · ${existing.length} 个存活`);
+// 会话树：行来自后端工作区（含冷会话），热/冷对照 pty_list 里的活会话
+let tree: TreeSession[] = [];
+let live = new Map<string, SessionInfo>();
+
+interface TreeSession {
+  id: string;
+  title: string;
+  transport: "terminal" | "serial";
+  shell: string | null;
+  cwd: string | null;
+  hot: boolean;
+}
+
+async function refreshTree() {
+  try {
+    const [sessions, lives] = await Promise.all([
+      invoke<TreeSession[]>("session_tree"),
+      invoke<SessionInfo[]>("pty_list")
+    ]);
+    tree = sessions;
+    live = new Map(lives.map((s) => [s.id, s]));
+  } catch (err) {
+    console.warn(`[tree] ${String(err)}`);
+  }
+  renderTree();
+}
+
+/// 正在改名的会话 id。改名是就地编辑，不弹框：双击名字进入，回车提交、Esc 放弃。
+let renaming: string | null = null;
+
+function renderTree() {
+  sessList.textContent = "";
+  for (const session of tree) {
+    const row = document.createElement("div");
+    row.className = "sess-row" + (session.id === sessionId ? " active" : "");
+    row.title = `${session.title} · ${session.id.slice(0, 8)}${session.cwd ? ` · ${session.cwd}` : ""}`;
+
+    const dot = document.createElement("span");
+    dot.className = "sess-dot" + (live.has(session.id) ? " hot" : "");
+
+    const name = document.createElement("span");
+    name.className = "sess-name";
+    if (renaming === session.id) {
+      const input = document.createElement("input");
+      input.className = "sess-rename";
+      input.value = session.title;
+      input.maxLength = 40;
+      // 提交规则（去空白、截断、不许空）在核心；这里只把文本送过去
+      const commit = async (save: boolean) => {
+        if (renaming !== session.id) return; // 已经提交过（回车后跟着 blur）
+        renaming = null;
+        const next = input.value.trim();
+        if (save && next && next !== session.title) {
+          try {
+            await invoke("rename_session", { id: session.id, title: next });
+          } catch (err) {
+            console.warn(`[rename] ${String(err)}`);
+          }
+          await refreshTree();
+        }
+        renderTree();
+      };
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation(); // 别让 Ctrl+Shift+P/L 之类的全局快捷键在这里生效
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void commit(true);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          void commit(false);
+        }
+      });
+      input.addEventListener("blur", () => void commit(true));
+      input.addEventListener("click", (e) => e.stopPropagation());
+      input.addEventListener("dblclick", (e) => e.stopPropagation());
+      name.append(input);
+      // 先进 DOM 再聚焦，否则焦点会落空
+      queueMicrotask(() => {
+        input.focus();
+        input.select();
+      });
+    } else {
+      name.textContent = `${session.title} · ${session.id.slice(0, 4)}`;
+      name.title = "双击重命名";
+      name.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        renaming = session.id;
+        renderTree();
+      });
+    }
+
+    const close = document.createElement("button");
+    close.className = "sess-close";
+    close.textContent = "✕";
+    close.title = "关闭会话";
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void closeSession(session.id);
+    });
+
+    row.append(dot, name, close);
+    row.addEventListener("click", (e) => {
+      if (e.detail > 1) return; // 双击的第二下属于改名，不该顺带切换会话
+      void openSession(session.id);
+    });
+    sessList.append(row);
+  }
+}
+
+/// 第一次拉起的会话才量冷启动；之后新开的会话不重写这组数字
+async function spawn(id: string | null, cwd: string | null = null): Promise<string> {
+  const first = !startupMeasured;
+  if (first) {
+    startupMeasured = true;
+    measureStartup = true;
+    tSpawnStart = performance.now();
+  }
+  let spawned: string;
+  try {
+    spawned = await invoke<string>("spawn_session", {
+      cols: term.cols,
+      rows: term.rows,
+      shell: null,
+      cwd,
+      sessionId: id
+    });
+  } catch (err) {
+    // 本次没拉起成功：把计量状态还回去，让重试仍然算冷启动
+    if (first) {
+      startupMeasured = false;
+      measureStartup = false;
+    }
+    throw err;
+  }
+  if (first) {
+    startupSession = spawned;
+    tSpawnReturn = performance.now();
+    log(
+      `bench: 前端就绪 ${Math.round(tSpawnStart - t0)}ms · spawn 调用 ${Math.round(tSpawnReturn - tSpawnStart)}ms`
+    );
+  }
+  return spawned;
+}
+
+async function openSession(id: string) {
+  if (id === sessionId && live.has(id)) {
+    term.focus();
     return;
   }
-
-  term.writeln("\x1b[38;5;245m启动会话…\x1b[0m");
-  const cols = term.cols;
-  const rows = term.rows;
-  tSpawnStart = performance.now();
-  sessionId = await invoke<string>("spawn_session", { cols, rows, shell: null, cwd: null });
-  tSpawnReturn = performance.now();
-  measureStartup = true;
-  term.focus();
-  log(
-    `bench: 前端就绪 ${Math.round(tSpawnStart - t0)}ms · spawn 调用 ${Math.round(tSpawnReturn - tSpawnStart)}ms`
-  );
-  // 首帧判定可能在订阅生效前就发出去了，attach 里会补一帧；回放顺带补上启动输出
-  await attach(sessionId);
+  if (!live.has(id)) {
+    // 冷会话：用同一个 id 拉起，会话树里的位置与历史不变。
+    // 后端记住了上次的 CWD，从这里接着开；目录已经不在了就退回默认目录。
+    try {
+      await spawn(id, tree.find((s) => s.id === id)?.cwd ?? null);
+    } catch (err) {
+      console.warn(`[open] ${String(err)}，退回默认目录`);
+      await spawn(id, null);
+    }
+    await refreshTree();
+  }
+  await attach(id);
+  renderTree();
 }
+
+async function newSession() {
+  const id = await spawn(null);
+  await refreshTree();
+  await attach(id);
+  renderTree();
+}
+
+async function closeSession(id: string) {
+  await invoke("pty_close", { id });
+  const wasActive = id === sessionId;
+  sessionId = "";
+  await refreshTree();
+  if (!wasActive) return;
+  const next = tree[tree.length - 1];
+  if (next) await openSession(next.id);
+  else await newSession();
+  renderTree();
+}
+
+async function boot() {
+  await refreshTree();
+  if (!tree.length) {
+    await newSession();
+    return;
+  }
+  const last = tree[tree.length - 1];
+  await openSession(last.id);
+  log(`会话 ${tree.length} 个 · 当前 ${last.title}`);
+}
+
+sessNew.addEventListener("click", () => void newSession());
+
 
 term.onData((data) => {
   if (!sessionId) return;
@@ -220,7 +398,7 @@ function applyOwnership(next: Ownership) {
 
   // 可输入的判定口径：OSC 133 A 推进到 prompt_ready 的那一刻。
   // 只记第一次，后续提示符漂移不改写冷启动数字。挂回旧会话时不计量。
-  if (measureStartup && !inputReadyAt && next.state === "prompt_ready") {
+  if (measureStartup && !inputReadyAt && next.id === startupSession && next.state === "prompt_ready") {
     inputReadyAt = performance.now();
     const ms = Math.round(inputReadyAt - t0);
     log(`可输入 ${ms}ms · 提示符就绪（OSC 133 A）`);
@@ -360,7 +538,7 @@ const listenOut = listen<{ id: string; seq: number; data: string }>("pty:out", (
 
 /// 冷启动计量只认第一次输出；挂回旧会话时 measureStartup 为假，只补画不计量。
 function noteFirstOutput() {
-  if (firstOutputAt || !measureStartup) return;
+  if (firstOutputAt || !measureStartup || sessionId !== startupSession) return;
   firstOutputAt = performance.now();
   log(`session ${sessionId.slice(0, 8)} · 首个字节 ${Math.round(firstOutputAt - t0)}ms`);
   if (!benchScheduled) {
@@ -370,9 +548,13 @@ function noteFirstOutput() {
 }
 
 const listenExit = listen<{ id: string }>("pty:exit", (event) => {
-  if (event.payload.id !== sessionId) return;
+  if (event.payload.id !== sessionId) {
+    void refreshTree();
+    return;
+  }
   flushOut();
   term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
+  void refreshTree();
 });
 
 const listenOwn = listen<Ownership>("pty:ownership", (event) => {

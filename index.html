@@ -7,23 +7,34 @@
   </head>
   <body>
     <div id="app">
-      <div id="term-host"></div>
-      <div id="hud"></div>
-      <div id="inputbar" class="pass">
-        <span id="own-dot"></span>
-        <span id="own-label">未知 · 直通</span>
-        <span id="ib-prompt">❯</span>
-        <input
-          id="ib-input"
-          type="text"
-          spellcheck="false"
-          autocomplete="off"
-          autocapitalize="off"
-          placeholder="提示符就绪后在这里输入"
-          disabled
-        />
-        <span id="ib-hint">↑ 历史 · Ctrl+Shift+P 直通 · Ctrl+Shift+L 锁定</span>
-      </div>
+      <aside id="sidebar">
+        <div id="sess-head">
+          <span>会话</span>
+          <button id="sess-new" title="新建会话">＋</button>
+        </div>
+        <div id="sess-list"></div>
+        <div id="sess-hint">点击切换 · ✕ 关闭</div>
+      </aside>
+
+      <main id="main">
+        <div id="term-host"></div>
+        <div id="hud"></div>
+        <div id="inputbar" class="pass">
+          <span id="own-dot"></span>
+          <span id="own-label">未知 · 直通</span>
+          <span id="ib-prompt">❯</span>
+          <input
+            id="ib-input"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            placeholder="提示符就绪后在这里输入"
+            disabled
+          />
+          <span id="ib-hint">↑ 历史 · Ctrl+Shift+P 直通 · Ctrl+Shift+L 锁定</span>
+        </div>
+      </main>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -71,31 +71,58 @@ function Get-DevBusyReasons {
   return $reasons
 }
 
+# Windows command-line quoting for one argument (the .NET Process API takes a single string).
+function ConvertTo-QuotedArg {
+  param([string]$Value)
+  if ($Value -match '[\s"]') {
+    return '"' + ($Value -replace '"', '\"') + '"'
+  }
+  return $Value
+}
+
 # Runs cargo test at below-normal priority so typing stays responsive, captures the output
 # (the human still sees it), and parses per-case results.
 function Invoke-CargoTest {
   param([string[]]$CargoArgs)
 
-  $outFile = [IO.Path]::GetTempFileName()
-  $errFile = [IO.Path]::GetTempFileName()
   $cases = New-Object System.Collections.ArrayList
   $passed = 0
   $failed = 0
   $ignored = 0
   $sawSummary = $false
+  $exitCode = 1
 
   $sw = [Diagnostics.Stopwatch]::StartNew()
   try {
-    $proc = Start-Process -FilePath 'cargo' -ArgumentList $CargoArgs -NoNewWindow -PassThru `
-      -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    # [Diagnostics.Process] instead of Start-Process -PassThru: with output redirection the
+    # latter returns an object whose ExitCode is empty in Windows PowerShell 5.1, which used
+    # to mark every green layer as failed. Arguments are quoted by hand because there is no
+    # argument array on this API.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cargo'
+    $psi.Arguments = (($CargoArgs | ForEach-Object { ConvertTo-QuotedArg $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $proc = [Diagnostics.Process]::Start($psi)
     try { $proc.PriorityClass = 'BelowNormal' } catch { }
+    # 边跑边读，避免大输出把管道缓冲塞满后卡死
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
+    $stdout = $outTask.Result
+    $stderr = $errTask.Result
+    $code = $proc.ExitCode
+    $proc.Dispose()
     $sw.Stop()
 
-    $stdout = if (Test-Path $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
-    $stderr = if (Test-Path $errFile) { [IO.File]::ReadAllText($errFile) } else { '' }
+    # Write-Host: the human still sees the output, but it must NOT enter the pipeline.
+    # Anything written with Write-Output here would be captured by the caller's
+    # `$r = Invoke-CargoTest ...`, turning $r into an array and breaking $r.Code / $r.Passed.
     foreach ($text in @($stdout, $stderr)) {
-      if ($text -and $text.Trim().Length -gt 0) { Write-Output $text.TrimEnd() }
+      if ($text -and $text.Trim().Length -gt 0) { Write-Host $text.TrimEnd() }
     }
 
     foreach ($line in ($stdout -split "`r?`n")) {
@@ -113,15 +140,13 @@ function Invoke-CargoTest {
         $ignored += [int]$summary.Groups[3].Value
       }
     }
+
+    # A compile error exits non-zero without any "test result" line: never report that as ok.
+    $exitCode = if ($sawSummary) { $code } else { 1 }
   } catch {
     $sw.Stop()
-    Write-Output ('[guard] cargo failed to run: {0}' -f $_.Exception.Message)
-  } finally {
-    Remove-Item -LiteralPath $outFile, $errFile -ErrorAction SilentlyContinue
+    Write-Host ('[guard] cargo failed to run: {0}' -f $_.Exception.Message)
   }
-
-  # A compile error exits non-zero without any "test result" line: never report that as ok.
-  $exitCode = if ($sawSummary) { $proc.ExitCode } else { 1 }
 
   return @{
     Code = $exitCode

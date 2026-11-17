@@ -17,6 +17,9 @@ pub const MAX_SPLIT_DEPTH: u8 = 3;
 pub const MIN_RATIO: f32 = 0.1;
 pub const MAX_RATIO: f32 = 0.9;
 
+/// 会话标题的最大长度，按**字符**数（不是字节）算：中文与 emoji 都不能被切一半。
+pub const MAX_TITLE_CHARS: usize = 40;
+
 /// 切割方向：`Horizontal` 是左右并排（竖线切），`Vertical` 是上下叠（横线切）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -157,6 +160,8 @@ pub enum WorkspaceError {
     SessionAlreadyPlaced(String),
     SessionNotPlaced(String),
     WindowNotFound(u64),
+    /// 空标题没有意义，也没有可回退的显示文本
+    InvalidTitle,
     /// 跨窗口交换不是布局操作：迁移会话要走「移动」，不是交换
     CrossWindowSwap,
     TooDeep,
@@ -200,6 +205,38 @@ impl Workspace {
             .ok_or_else(|| WorkspaceError::UnknownSession(id.to_string()))?;
         session.hot = hot;
         Ok(())
+    }
+
+    /// 跟随 Shell 上报的工作目录。返回是否真的变了：调用方只在变了时落盘，
+    /// 否则每次回车都会重写一遍 workspace.json。
+    pub fn set_cwd(&mut self, id: &str, cwd: impl Into<String>) -> Result<bool, WorkspaceError> {
+        let session = self
+            .session_mut(id)
+            .ok_or_else(|| WorkspaceError::UnknownSession(id.to_string()))?;
+        let cwd = cwd.into();
+        if session.cwd.as_deref() == Some(cwd.as_str()) {
+            return Ok(false);
+        }
+        session.cwd = Some(cwd);
+        Ok(true)
+    }
+
+    /// 改会话标题。首尾空白会被去掉，超过 [`MAX_TITLE_CHARS`] 的部分按字符截断，
+    /// 全空白视为非法。返回是否真的变了，调用方据此决定要不要落盘。
+    pub fn rename_session(&mut self, id: &str, title: &str) -> Result<bool, WorkspaceError> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Err(WorkspaceError::InvalidTitle);
+        }
+        let next: String = trimmed.chars().take(MAX_TITLE_CHARS).collect();
+        let session = self
+            .session_mut(id)
+            .ok_or_else(|| WorkspaceError::UnknownSession(id.to_string()))?;
+        if session.title == next {
+            return Ok(false);
+        }
+        session.title = next;
+        Ok(true)
     }
 
     /// 会话在哪个窗口里。冷会话（没有分格）返回 `None`。
@@ -720,6 +757,45 @@ mod tests {
                 .collect(),
         };
         assert_eq!(ws.validate(), Err(WorkspaceError::TooDeep));
+    }
+
+    #[test]
+    fn set_cwd_reports_only_real_changes() {
+        let mut ws = workspace_with(&["a"]);
+        assert_eq!(ws.set_cwd("a", "C:/Users/me"), Ok(true));
+        assert_eq!(
+            ws.session("a").unwrap().cwd.as_deref(),
+            Some("C:/Users/me")
+        );
+        // 同一个目录反复上报（每次提示符都会来一条）不算变更，调用方据此跳过落盘
+        assert_eq!(ws.set_cwd("a", "C:/Users/me"), Ok(false));
+        assert_eq!(ws.set_cwd("a", "D:/work"), Ok(true));
+        assert_eq!(ws.session("a").unwrap().cwd.as_deref(), Some("D:/work"));
+        assert_eq!(
+            ws.set_cwd("missing", "C:/"),
+            Err(WorkspaceError::UnknownSession("missing".into()))
+        );
+    }
+
+    #[test]
+    fn rename_trims_truncates_and_rejects_blank() {
+        let mut ws = workspace_with(&["a"]);
+        assert_eq!(ws.rename_session("a", "  部署窗口  "), Ok(true));
+        assert_eq!(ws.session("a").unwrap().title, "部署窗口");
+        // 同一个名字再改一次不算变更
+        assert_eq!(ws.rename_session("a", "部署窗口"), Ok(false));
+        // 全空白没有可显示的内容
+        assert_eq!(ws.rename_session("a", "   "), Err(WorkspaceError::InvalidTitle));
+        // 按字符截断：中文与 emoji 都不会被切半个
+        let long = "配".repeat(30) + &"🚀".repeat(20);
+        assert_eq!(ws.rename_session("a", &long), Ok(true));
+        let title = ws.session("a").unwrap().title.clone();
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        assert_eq!(title, "配".repeat(30) + &"🚀".repeat(10));
+        assert_eq!(
+            ws.rename_session("missing", "x"),
+            Err(WorkspaceError::UnknownSession("missing".into()))
+        );
     }
 }
 

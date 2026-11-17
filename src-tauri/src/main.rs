@@ -6,12 +6,14 @@ use core_domain::ownership::{
 };
 use core_domain::replay::ReplayBuffer;
 use core_domain::utf8_stream::Utf8Stream;
+use core_domain::workspace::{SessionMeta, Workspace};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -21,8 +23,8 @@ mod persistence;
 
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
 struct Session {
-    /// 会话树里显示的名字：M2 先用 Shell 文件名，重命名留给会话树
-    title: String,
+    /// 会话树里显示的名字：默认取 Shell 文件名，用户重命名后以用户为准
+    title: Mutex<String>,
     created_ms: u64,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
@@ -32,6 +34,8 @@ struct Session {
     history: Mutex<VecDeque<String>>,
     /// 最近输出的副本：前端晚附着、切走或页面重载后从这里补上一段
     replay: Mutex<ReplayBuffer>,
+    /// 回放缓冲自上次落盘以来有没有新内容（空闲落盘用，见 `IDLE_FLUSH_MS`）
+    dirty: AtomicBool,
 }
 
 /// 每个会话保留多少回放字节。够覆盖一次重载与切会话的空档，又不至于长住内存。
@@ -39,6 +43,10 @@ const REPLAY_CAP_BYTES: usize = 256 * 1024;
 
 /// 输入条历史的上限：只服务 ↑↓ 的即时手感，不做持久化。
 const HISTORY_CAP: usize = 200;
+
+/// 输出静默多久之后才把卷轴快照落盘。太短会在持续刷屏时反复写文件，
+/// 太长则崩溃退出会丢更多屏幕内容。3 秒是「用户已经看完这段话」的量级。
+const IDLE_FLUSH_MS: u64 = 3000;
 
 /// 输入判定状态：状态机 + 用户显式覆盖 + 去重用的上一帧。
 struct InputState {
@@ -51,9 +59,22 @@ struct InputState {
     at_line_start: bool,
 }
 
-#[derive(Default)]
 struct AppState {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// 会话树与布局。内存是唯一写入口，落盘由 [`persist_workspace`] 统一做。
+    workspace: Mutex<Workspace>,
+    /// 解析失败时为 `None`：本版没有必需落盘的状态，不挡启动
+    data_dir: Option<PathBuf>,
+}
+
+impl AppState {
+    fn new(data_dir: Option<PathBuf>, workspace: Workspace) -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            workspace: Mutex::new(workspace),
+            data_dir,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -85,6 +106,17 @@ struct SessionInfo {
     title: String,
     state: &'static str,
     created_ms: u64,
+}
+
+/// 会话树的一行：冷会话也在里面，`hot` 表示当前有没有进程。
+#[derive(Serialize)]
+struct TreeSession {
+    id: String,
+    title: String,
+    transport: &'static str,
+    shell: Option<String>,
+    cwd: Option<String>,
+    hot: bool,
 }
 
 /// 从输出流里摘出来的标记，前端只消费它，不再自己解析字节。
@@ -177,6 +209,17 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// 工作区落盘。失败只记日志：磁盘问题不该让会话操作失败。
+fn persist_workspace(state: &AppState) {
+    let Some(dir) = state.data_dir.as_deref() else {
+        return;
+    };
+    let workspace = state.workspace.lock();
+    if let Err(err) = persistence::save_workspace(dir, &workspace) {
+        eprintln!("[data] save workspace: {err}");
+    }
 }
 
 /// 当前判定。唯一的规则来源是 `core_domain::ownership::decide`。
@@ -290,7 +333,15 @@ fn spawn_session(
     rows: u16,
     shell: Option<String>,
     cwd: Option<String>,
+    session_id: Option<String>,
 ) -> Result<String, String> {
+    // 同一个 id 只能是冷会话被重新拉起；已在运行的不能重复拉起，否则旧进程会失联
+    if let Some(id) = session_id.as_deref() {
+        if state.sessions.lock().contains_key(id) {
+            return Err(format!("session {id} is already live"));
+        }
+    }
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -302,10 +353,11 @@ fn spawn_session(
         .map_err(|e| format!("openpty: {e}"))?;
 
     let shell = resolve_shell(shell);
+    let cwd = cwd.filter(|d| !d.trim().is_empty());
     let mut cmd = CommandBuilder::new(&shell);
     cmd.env("TERM", "xterm-256color");
-    if let Some(dir) = cwd.filter(|d| !d.trim().is_empty()) {
-        cmd.cwd(dir);
+    if let Some(dir) = &cwd {
+        cmd.cwd(dir.as_str());
     }
 
     // 集成脚本只注入我们自己启动的进程：不写用户 profile、不写注册表（ADR 0003）
@@ -340,14 +392,14 @@ fn spawn_session(
         .take_writer()
         .map_err(|e| format!("take writer: {e}"))?;
 
-    let id = Uuid::new_v4().to_string();
+    let id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let title = Path::new(&shell)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(shell.as_str())
         .to_string();
     let session = Arc::new(Session {
-        title,
+        title: Mutex::new(title.clone()),
         created_ms: now_ms(),
         writer: Mutex::new(writer),
         master: Mutex::new(pair.master),
@@ -361,8 +413,45 @@ fn spawn_session(
         }),
         history: Mutex::new(VecDeque::new()),
         replay: Mutex::new(ReplayBuffer::new(REPLAY_CAP_BYTES)),
+        dirty: AtomicBool::new(false),
     });
+
+    // 冷会话重开：把上次的屏幕接在新输出前面。必须在读线程启动前做，
+    // 否则新输出会先占序号、快照反而画在后面。
+    if let Some(dir) = state.data_dir.as_deref() {
+        if let Some(previous) = persistence::load_scrollback(dir, &id) {
+            let seeded = core_domain::scrollback::compose(&previous);
+            if !seeded.is_empty() {
+                session.replay.lock().push(&seeded);
+            }
+        }
+    }
+
     state.sessions.lock().insert(id.clone(), session.clone());
+
+    // 会话树：同一个 id 可能是冷会话被重新拉起，更新而不是新增
+    {
+        let mut workspace = state.workspace.lock();
+        match workspace.session_mut(&id) {
+            Some(meta) => {
+                // 名字不覆盖：用户改过的标题比 Shell 文件名重要
+                meta.transport = TransportKind::Terminal;
+                // 目录没指定（冷会话在默认目录重开）就保留原来记住的那个
+                if cwd.is_some() {
+                    meta.cwd = cwd.clone();
+                }
+                meta.shell = Some(shell.clone());
+                meta.hot = true;
+            }
+            None => {
+                let mut meta = SessionMeta::terminal(id.clone(), title.clone(), shell.clone());
+                meta.cwd = cwd.clone();
+                meta.hot = true;
+                let _ = workspace.add_session(meta);
+            }
+        }
+    }
+    persist_workspace(&state);
 
     // 每个会话一个读线程（ConPTY 要求读写分离，否则死锁）
     let app_for_read = app.clone();
@@ -389,6 +478,10 @@ fn spawn_session(
                     if !events.is_empty() {
                         for ev in events {
                             if let Some(marker) = marker_of(ev) {
+                                // CWD 跟随：记住最后一次上报，冷会话重开时用它做启动目录
+                                if let MarkerPayload::Cwd { path } = &marker {
+                                    note_cwd(&app_for_read, &emit_id, path);
+                                }
                                 let _ = app_for_read.emit(
                                     "pty:marker",
                                     MarkerEvent {
@@ -408,6 +501,7 @@ fn spawn_session(
                             .lock()
                             .push(&text)
                             .unwrap_or_default();
+                        session_for_read.dirty.store(true, Ordering::Relaxed);
                         let _ = app_for_read.emit(
                             "pty:out",
                             OutPayload {
@@ -421,27 +515,87 @@ fn spawn_session(
                 Err(_) => break,
             }
         }
+        // 通道结束（进程退出/被关）：先落卷轴快照、摘掉运行时、标记冷会话，再通知前端
+        {
+            let state = app_for_read.state::<AppState>();
+            // 用户主动关闭的会话，节点已经删掉，不再补一份快照回来（I2）。
+            // 单独取值：不能让 workspace 的锁活在条件里，下面还要再取一次。
+            let still_known = state.workspace.lock().session(&emit_id).is_some();
+            if still_known {
+                save_scrollback(&state, &session_for_read, &emit_id);
+            }
+            state.sessions.lock().remove(&emit_id);
+            {
+                let mut workspace = state.workspace.lock();
+                let _ = workspace.set_hot(&emit_id, false);
+            }
+            persist_workspace(&state);
+        }
         let _ = app_for_read.emit("pty:exit", ExitPayload { id: emit_id });
     });
 
-    // 静默猜测：没有集成脚本时，静默够久且光标在行首才给出「猜测」（只影响状态点颜色）
+    // 后台滴答：静默猜测 + 空闲落盘（崩溃退出最多丢 IDLE_FLUSH_MS 毫秒的屏幕）
     let weak: Weak<Session> = Arc::downgrade(&session);
     let app_for_tick = app.clone();
     let tick_id = id.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(300));
         let Some(session) = weak.upgrade() else { break };
-        {
+        let quiet = {
             let mut input = session.input.lock();
             let quiet = now_ms().saturating_sub(input.last_output_ms);
             let at_line_start = input.at_line_start;
             input.tracker.on_silence(quiet, at_line_start);
-        }
+            quiet
+        };
         push_ownership(&app_for_tick, &session, &tick_id);
+
+        // 只在「有未落盘的新内容」且「已经静默够久」时写一次：
+        // 连续刷屏时不会反复写盘，崩溃时也只丢最后几秒
+        if quiet >= IDLE_FLUSH_MS && session.dirty.swap(false, Ordering::Relaxed) {
+            let state = app_for_tick.state::<AppState>();
+            if !save_scrollback(&state, &session, &tick_id) {
+                // 没写成（没有数据目录/磁盘忙）：留到下一个滴答再试
+                session.dirty.store(true, Ordering::Relaxed);
+            }
+        }
     });
 
     push_ownership(&app, &session, &id);
     Ok(id)
+}
+
+/// 把会话当前的可见内容落成卷轴快照。只在数据目录可用、且回放缓冲里确实有内容时才写。
+/// 返回是否真的写了文件：空闲落盘靠它决定还要不要再试一次。
+/// 快照只用于显示：冷会话重新拉起时接在新输出前面（见 `core_domain::scrollback`）。
+fn save_scrollback(state: &AppState, session: &Session, id: &str) -> bool {
+    let Some(dir) = state.data_dir.as_deref() else {
+        return false;
+    };
+    let text = session.replay.lock().snapshot().text;
+    if text.is_empty() {
+        return false;
+    }
+    match persistence::save_scrollback(dir, id, &text) {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("[data] save scrollback {id}: {err}");
+            false
+        }
+    }
+}
+
+/// 跟随 Shell 上报的 CWD，写进会话树（冷会话重开时用它做启动目录）。
+/// 只在目录真的变了时落盘：提示符每次都会上报一遍，不该每次都写文件。
+fn note_cwd(app: &AppHandle, id: &str, path: &str) {
+    let state = app.state::<AppState>();
+    let changed = {
+        let mut workspace = state.workspace.lock();
+        workspace.set_cwd(id, path).unwrap_or(false)
+    };
+    if changed {
+        persist_workspace(&state);
+    }
 }
 
 /// 写入会话的公共路径。`from_bar` 决定这条命令要不要进输入条历史。
@@ -540,13 +694,56 @@ fn pty_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
         .iter()
         .map(|(id, session)| SessionInfo {
             id: id.clone(),
-            title: session.title.clone(),
+            title: session.title.lock().clone(),
             state: state_name(session.input.lock().tracker.view()),
             created_ms: session.created_ms,
         })
         .collect();
     list.sort_by_key(|info| info.created_ms);
     list
+}
+
+/// 完整会话树（含冷会话），顺序即创建顺序。侧栏用它渲染。
+#[tauri::command]
+fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
+    let workspace = state.workspace.lock();
+    workspace
+        .sessions
+        .iter()
+        .map(|session| TreeSession {
+            id: session.id.clone(),
+            title: session.title.clone(),
+            transport: match session.transport {
+                TransportKind::Terminal => "terminal",
+                TransportKind::Serial => "serial",
+            },
+            shell: session.shell.clone(),
+            cwd: session.cwd.clone(),
+            hot: session.hot,
+        })
+        .collect()
+}
+
+/// 改会话标题。规则（去空白、按字符截断）在 core-domain；这里只负责落盘与同步运行时句柄。
+#[tauri::command]
+fn rename_session(state: State<'_, AppState>, id: String, title: String) -> Result<(), String> {
+    let stored = {
+        let mut workspace = state.workspace.lock();
+        match workspace.rename_session(&id, &title) {
+            Ok(true) => workspace.session(&id).map(|meta| meta.title.clone()),
+            Ok(false) => None,
+            Err(err) => return Err(format!("rename: {err:?}")),
+        }
+    };
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    persist_workspace(&state);
+    // 运行时句柄上的名字跟着改，免得 pty_list 与 sidebar 说法不一致
+    if let Some(session) = state.sessions.lock().get(&id).cloned() {
+        *session.title.lock() = stored;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -602,8 +799,22 @@ fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> R
 
 #[tauri::command]
 fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // 关闭会话 = 节点删除（I2）。先摘节点再杀进程：读线程醒来时看到节点已不在，
+    // 就不会把刚删掉的卷轴快照又写回来。
+    {
+        let mut workspace = state.workspace.lock();
+        let _ = workspace.close_session(&id);
+    }
+    persist_workspace(&state);
+
     if let Some(session) = state.sessions.lock().remove(&id) {
         let _ = session.child.lock().kill();
+    }
+    // 历史与卷轴快照的保留由 M3 的历史库负责；当前版本按 I2 一并删除
+    if let Some(dir) = state.data_dir.as_deref() {
+        if let Err(err) = persistence::remove_scrollback(dir, &id) {
+            eprintln!("[data] remove scrollback {id}: {err}");
+        }
     }
     Ok(())
 }
@@ -620,31 +831,44 @@ fn bench_report(text: String) {
 
 fn main() {
     // 数据目录只在启动时解析一次：便携优先，不可写才回退 %APPDATA%。
-    // 解析失败不挡启动（本版还没有必需落盘的状态），只把原因记到 stdout。
-    match persistence::data_dir() {
-        Ok(dir) => {
-            println!("[data] {}", dir.display());
-            match persistence::load_workspace(&dir) {
-                persistence::WorkspaceLoad::Loaded(ws) => println!(
+    // 解析失败不挡启动（本版没有必需落盘的状态），只把原因记到 stdout。
+    let data_dir = persistence::data_dir();
+    match &data_dir {
+        Ok(dir) => println!("[data] {}", dir.display()),
+        Err(err) => eprintln!("[data] {err}"),
+    }
+    let workspace = match data_dir.as_deref() {
+        Ok(dir) => match persistence::load_workspace(dir) {
+            persistence::WorkspaceLoad::Loaded(ws) => {
+                println!(
                     "[data] workspace: {} window(s), {} session(s)",
                     ws.windows.len(),
                     ws.sessions.len()
-                ),
-                persistence::WorkspaceLoad::Recovered(ws) => println!(
+                );
+                ws
+            }
+            persistence::WorkspaceLoad::Recovered(ws) => {
+                println!(
                     "[data] workspace recovered from .bak: {} session(s)",
                     ws.sessions.len()
-                ),
-                persistence::WorkspaceLoad::Missing => println!("[data] workspace: first run"),
-                persistence::WorkspaceLoad::Unreadable(err) => {
-                    eprintln!("[data] workspace unreadable: {err}")
-                }
+                );
+                ws
             }
-        }
-        Err(err) => eprintln!("[data] {err}"),
-    }
+            persistence::WorkspaceLoad::Missing => {
+                println!("[data] workspace: first run");
+                Workspace::new()
+            }
+            persistence::WorkspaceLoad::Unreadable(err) => {
+                // 旧文件不会被覆盖丢失：下次写入时它会成为 .bak
+                eprintln!("[data] workspace unreadable, starting empty: {err}");
+                Workspace::new()
+            }
+        },
+        Err(_) => Workspace::new(),
+    };
 
     tauri::Builder::default()
-        .manage(AppState::default())
+        .manage(AppState::new(data_dir.ok(), workspace))
         .invoke_handler(tauri::generate_handler![
             spawn_session,
             pty_write,
@@ -654,16 +878,36 @@ fn main() {
             pty_history,
             pty_replay,
             pty_list,
+            session_tree,
+            rename_session,
             pty_resize,
             pty_close,
             bench_ping,
             bench_report
         ])
-        // 退出应用 = 结束全部进程（I3）。页面重载不是退出，会话要留着等前端挂回。
+        // 退出应用 = 结束全部进程（I3）。屏幕内容先落成卷轴快照，下次启动接着还原；
+        // 页面重载不是退出，会话要留着等前端挂回。
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
-                for (_, session) in state.sessions.lock().drain() {
+                let sessions: Vec<(String, Arc<Session>)> = state
+                    .sessions
+                    .lock()
+                    .iter()
+                    .map(|(id, session)| (id.clone(), session.clone()))
+                    .collect();
+                for (id, session) in &sessions {
+                    save_scrollback(&state, session, id);
+                }
+                // 退出后没有任何进程还在跑：落盘就写冷，别让下次启动读到一堆 hot
+                {
+                    let mut workspace = state.workspace.lock();
+                    for (id, _) in &sessions {
+                        let _ = workspace.set_hot(id, false);
+                    }
+                }
+                persist_workspace(&state);
+                for (_, session) in sessions {
                     let _ = session.child.lock().kill();
                 }
             }

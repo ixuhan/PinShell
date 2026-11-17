@@ -9,6 +9,139 @@ body,
 
 #app {
   display: flex;
+  flex-direction: row;
+}
+
+/* 左栏：会话树。热/冷只由状态点表达，不做两套列表 */
+#sidebar {
+  flex: none;
+  width: 196px;
+  display: flex;
+  flex-direction: column;
+  background: #0d1219;
+  border-right: 1px solid #1b2531;
+  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  user-select: none;
+}
+
+#sess-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 6px;
+  color: #8a9ab0;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+#sess-new {
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  color: #8a9ab0;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#sess-new:hover {
+  color: #e8eef7;
+  border-color: #31435a;
+}
+
+#sess-list {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 0 6px;
+}
+
+.sess-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  color: #9aabc2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sess-row:hover {
+  background: #141c28;
+}
+
+.sess-row.active {
+  background: #172536;
+  color: #e8eef7;
+}
+
+.sess-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3c4a5c;
+}
+
+.sess-dot.hot {
+  background: #46d19a;
+  box-shadow: 0 0 6px -1px #46d19a;
+}
+
+.sess-name {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 就地改名：双击名字后出现的输入框，宽度贴合名字那一格 */
+.sess-rename {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: -1px 0;
+  padding: 0 4px;
+  background: #0b1017;
+  border: 1px solid #31435a;
+  border-radius: 4px;
+  outline: 0;
+  color: #e8eef7;
+  font: inherit;
+}
+
+.sess-close {
+  flex: none;
+  padding: 0 2px;
+  background: transparent;
+  border: 0;
+  color: #3f4c60;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.sess-row:hover .sess-close {
+  opacity: 1;
+}
+
+.sess-close:hover {
+  color: #e35d6a;
+}
+
+#sess-hint {
+  padding: 6px 10px 8px;
+  color: #3f4c60;
+  font-size: 10.5px;
+}
+
+#main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
 }
 

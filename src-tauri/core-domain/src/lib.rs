@@ -8,5 +8,6 @@ pub mod history;
 pub mod osc;
 pub mod ownership;
 pub mod replay;
+pub mod scrollback;
 pub mod utf8_stream;
 pub mod workspace;

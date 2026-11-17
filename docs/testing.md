@@ -47,7 +47,9 @@
 | L0-12 | 行结束符取值 | 终端固定 `\r`；串口按 CRLF / CR / LF |
 | L0-13 | 会话状态机不变量 I1–I5 | 纯模型测试：冷会话无进程、关闭保留历史、退出不保活、同串口单热会话、清窗口不动历史 |
 | L0-14 | 回放缓冲 | 序号从 1 递增、空块不占号、超上限按整块丢最旧、超大单块仍保留、清空后序号继续 |
-| L0-15 | 工作区分格树 | 会话最多出现在一格、嵌套 ≤3 层、切开落在目标右侧/下方、关闭折叠父切割、最后一个分格关闭即窗口消失、跨窗口交换被拒 |
+| L0-15 | 工作区分格树 | 会话最多出现在一格、嵌套 ≤3 层、切开落在目标右侧/下方、关闭折叠父切割、最后一个分格关闭即窗口消失、跨窗口交换被拒、CWD 只在真变更时才算变更 |
+| L0-16 | 卷轴快照组装 | 空快照不画分隔线、半行先补换行、重复重开各带一条分隔线、分隔线不含 `133`/`7` 标记（不会被状态机误认成提示符） |
+| L0-17 | 会话标题 | 去首尾空白、按字符截断到 40（中文/emoji 不切半）、全空白拒绝、未变更返回「没变」 |
 
 ### L1 集成
 
@@ -87,7 +89,7 @@
 |---|---|---|
 | M0（已完成） | UTF-8 分块、spawn/resize/close、渲染吞吐、IPC 往返 | L0-01/02、L1-01~05、L3-03 |
 | M1 | 输入所有权状态机、集成脚本、可输入时刻 | L0-03~06、L1-06/07、L3-01/02/04 |
-| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L0-15、L1-08、L3-05 |
+| M2 | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L0-15、L0-16、L0-17、L1-08、L3-05 |
 | M3 | 历史库、Ghost Text、Ctrl+R、掩码 | L0-07~12 |
 | M4 | 文件面板跟随 CWD、原生菜单 | L1、L3-06 |
 | M5 | 串口（假 Transport 优先，真串口靠虚拟串口对） | L0-12、L1 |
@@ -167,8 +169,15 @@
 | L1 bash 标记链路 | `src-tauri/core-domain/tests/bash_markers.rs` | A/C/D/退出码/CWD；找不到 Git Bash 自动 skip |
 | 输入条历史 | `pty_send_line` / `pty_history` | 内存最近 200 条，连续重复不记；落盘与掩码留给 M3 |
 | 回放缓冲 | `core-domain/src/replay.rs` | 6 个用例（L0-14）：序号、整块裁剪、超大单块保留、清空后序号继续 |
-| 工作区分格模型 | `core-domain/src/workspace.rs` | 14 个用例（L0-15）：开窗/切开/关闭折叠/交换、深度与唯一性校验 |
-| 数据目录与原子写 | `src-tauri/src/persistence.rs` | 11 个用例（L1-08）：便携→APPDATA 回退、`PINSHELL_DATA_DIR` 优先、`.bak` 救回、双坏上报、工作区 JSON 往返 |
+| 工作区分格模型 | `core-domain/src/workspace.rs` | 16 个用例（L0-15）：开窗/切开/关闭折叠/交换、深度与唯一性校验、`set_cwd` 只报真变更、`rename_session` 的截断与拒绝 |
+| 数据目录与原子写 | `src-tauri/src/persistence.rs` | 16 个用例（L1-08）：便携→APPDATA 回退、`PINSHELL_DATA_DIR` 优先、`.bak` 救回、双坏上报、工作区 JSON 往返、卷轴快照往返/覆盖/删除/文件名不许越界 |
+| 卷轴快照组装 | `core-domain/src/scrollback.rs` | 5 个用例（L0-16）：分隔线位置与去 OSC 标记 |
+| 卷轴快照落盘与还原 | `save_scrollback` / `spawn_session` / `on_window_event` | 进程退出、应用退出、输出静默 3 秒三处各写一次；冷会话重开时接在新输出前面；关闭会话（I2）删除 |
+| 会话重命名 | `rename_session` + 侧栏双击 | 规则在 core-domain（L0-17），前端只送文本；冷会话重开不覆盖用户改过的名字 |
+| M2 验收链路（手工） | `PINSHELL_DATA_DIR` 临时目录 + `npm run app:dev` | 首跑记下 CWD → 关窗写快照并留 `hot: false` → 重启读回 1 个冷会话并按 CWD 拉起 → 再关一次快照正好多一条分隔线；提示符后约 3 秒快照自动落盘（不用关窗）；可输入 795–820 ms |
+| 会话树（冷/热） | `session_tree` + `src/main.ts` | 冷会话也在树里，`hot` 由 `pty_list` 对照；点冷会话用同一个 id 重新拉起，位置不变 |
+| CWD 跟随 | `note_cwd` + `Workspace::set_cwd` | `OSC 7` 写进会话元数据；冷会话按记住的目录重开，目录没了退回默认目录；只在真变更时落盘 |
+| 门禁取退出码 | `scripts/test-guard.ps1` | 改用 `[Diagnostics.Process]`：`Start-Process -PassThru` 在 PS 5.1 + 重定向下 `ExitCode` 为空，曾把全绿的层判成失败 |
 | 页面重载挂回 | `pty_list` / `pty_replay` / `pty:out.seq` | 启动时挂回存活会话，回放 + seq 去重补画；窗口关闭才结束全部进程 |
 | 「可输入」时刻 | `src/main.ts` → `applyOwnership` | 首个 `prompt_ready` 打 `[bench] input-ready`，口径为模块求值 → OSC 133 A；数字待下次手工运行采集 |
 | 测试报告 | `scripts/test-guard.ps1` | 每次运行写 `tests/report/latest.json` 并追加 `docs/test-report.md`（留最近 10 次） |
