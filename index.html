@@ -70,12 +70,14 @@
 
       <!-- 文件面板（M4）：默认跟随焦点会话的 CWD，手动导航后转为固定路径 -->
       <aside id="files">
+        <div id="files-resizer" title="拖动调整宽度 · 双击恢复默认"></div>
         <button id="files-expand" title="展开文件面板" hidden>◧</button>
         <div id="files-body">
           <div id="files-head">
             <button id="files-mode" class="on" title="跟随当前会话的 CWD">跟随</button>
             <button id="files-up" title="上一级">↑</button>
             <button id="files-refresh" title="刷新">⟳</button>
+            <button id="files-auto" title="自动刷新：每 3 秒一次（大目录自动放慢）">自动</button>
             <button id="files-hidden" title="显示隐藏项（以点开头或带隐藏属性）">隐</button>
             <button id="files-collapse" title="收起面板">›</button>
           </div>

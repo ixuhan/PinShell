@@ -202,6 +202,7 @@
 | 卷轴行数上限 | `src/main.ts` 的 `SCROLLBACK_LINES` | 取 5000 行（约 2 MB）；`scripts/bench-scrollback.mjs` 实测稳态吞吐与上限无关（52–57 MB/s）、内存约 0.4 KB/行，数字见 `docs/bench-m0.md` |
 | 切会话 / 窗口缩放（手工回归） | `.probe/probe_switch_resize.ps1` | 侧栏行按无障碍文本定位再点（行高随 DPI 变，写死 y 会点到标题栏，结论是假的）；两个会话各留一条标记命令，切走再切回后磁盘快照里只有各自的标记（`MARK-A` 只出现在 423c、`MARK-B` 只出现在 c387），回放尾巴完整、无重影；窗口宽度 −300 px 后 Shell 里的 `$Host.UI.RawUI.WindowSize.Width` 由 172 变成 129（探针把它写进 `w_before.txt` / `w_after.txt` 核对），说明 resize 真下到了 PTY |
 | M4 文件面板（第一片） | `core-domain/src/fsview.rs`、`src-tauri/src/fsview.rs`、`src/filePanel.ts`、`src/filePanelUi.ts` | `fs_list` 只读列目录（`path` 为空时跟随会话 CWD，读盘在阻塞线程池）；排序/隐藏过滤/截断/路径归一化在 core-domain（9 个用例）；`std::fs` 填元数据（跟随链接判类型、Windows 隐藏属性）3 个用例；`session:cwd` 只在 CWD 真变更时推；面板显示格式与跟随/固定选择 13 个前端用例；折叠/展开不抢焦点，切换后终端重新 fit |
+| M4 文件面板（第二片：自动刷新） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 逐项比较 5 个用例（任一字段或顺序变了才算变化）、刷新间隔与失败退避 2 个用例（大目录 10 秒、2 的幂到 24 秒）、宽度夹取 5 个：合计 12 个前端用例。DOM 行为用假 IPC 的浏览器验证台确认：内容不变时 3 秒一次只发 `fs_list`、零 DOM 变更；内容变化时重绘 200 行且 `scrollTop` 与选中行都还在；面板收起、无会话时不发请求；大目录（`total > 1000`）周期变 10 秒；一次读盘失败后下一次等到 6 秒 |
 | 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
 
 跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过）。

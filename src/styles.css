@@ -144,11 +144,18 @@ body,
   display: flex;
   flex-direction: column;
   position: relative;
+  /* 终端与覆盖层都不该画到文件面板上：宽度变化时先裁在自己的格子里 */
+  overflow: hidden;
 }
 
 #term-host {
   flex: 1 1 auto;
   min-height: 0;
+  /* 窗口或面板变窄时，WebGL 画布会短暂保持旧尺寸；裁掉溢出，别让它盖到文件面板上。
+     WebGL 画布是独立合成层，单靠 overflow 在 WebView2 里偶尔还会漏一帧，
+     clip-path 在合成阶段再裁一次。 */
+  overflow: hidden;
+  clip-path: inset(0);
   padding: 8px 10px 6px;
   box-sizing: border-box;
 }
@@ -327,13 +334,17 @@ body,
 }
 
 #hud {
-  position: fixed;
+  /* 相对 #main 定位（不是窗口）：否则会压在右侧文件面板与输入条上 */
+  position: absolute;
   right: 10px;
   bottom: 46px;
+  max-width: calc(100% - 20px);
   font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
   color: #4a5a70;
   pointer-events: none;
-  white-space: pre;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: right;
 }
 
@@ -486,14 +497,54 @@ body,
 /* ---------- 文件面板（M4）：跟随焦点会话的 CWD ---------- */
 
 #files {
+  position: relative;
   flex: none;
-  width: 272px;
+  /* 默认按窗口比例，窄窗口不会把终端挤没；拖动后由 --files-width 覆盖 */
+  width: var(--files-width, clamp(160px, 22vw, 280px));
   min-width: 0;
   display: flex;
   flex-direction: column;
   background: #0d1219;
   border-left: 1px solid #1b2531;
   font: 12px/1.5 "Cascadia Mono", Consolas, monospace;
+  user-select: none;
+}
+
+/* 左边缘的拖拽手柄：跨在边框上，抓取范围放宽到 11px（面板外 5px、面板内 6px） */
+#files-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 11px;
+  z-index: 6;
+  cursor: col-resize;
+  /* 触控板/触屏上不要被浏览器当成滚动手势 */
+  touch-action: none;
+}
+
+/* 平时只有一个 col-resize 光标；悬停与拖动期间把边框点亮，告诉用户这里能拖 */
+#files-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: transparent;
+}
+
+#files-resizer:hover::after,
+body.files-dragging #files-resizer::after {
+  background: #2c5a46;
+}
+
+#files.collapsed #files-resizer {
+  display: none;
+}
+
+body.files-dragging {
+  cursor: col-resize;
   user-select: none;
 }
 
@@ -537,6 +588,7 @@ body,
 #files-head {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
   padding: 6px 8px;
@@ -656,10 +708,4 @@ body,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-@media (max-width: 1100px) {
-  #files {
-    width: 232px;
-  }
 }

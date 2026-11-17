@@ -20,7 +20,7 @@ import {
 } from "./historyCache";
 import { stripFocusReports } from "./ptyInput";
 import { keepAfter, type OutChunk } from "./outQueue";
-import { setupFilePanel } from "./filePanelUi";
+import { PANEL_DRAGGING_CLASS, setupFilePanel } from "./filePanelUi";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -538,14 +538,24 @@ term.onData((data) => {
 term.onBell(() => trace("BEL fired in xterm"));
 
 let resizeTimer: number | undefined;
+/// 布局变了：先把画布 fit 到当前容器（同步做，等防抖会晚一帧），再把新尺寸防抖下给 PTY。
 function syncSize() {
+  // 拖文件面板期间不重排终端：每跨一列就整屏重画一次，看起来就是会话区在闪。
+  // 那时画布保持原尺寸、由 #term-host 裁掉多出来的部分，松手时 layoutChanged 再重排一次。
+  if (document.body.classList.contains(PANEL_DRAGGING_CLASS)) return;
+  fit.fit();
   if (!sessionId) return;
   window.clearTimeout(resizeTimer);
   resizeTimer = window.setTimeout(() => {
-    fit.fit();
     void invoke("pty_resize", { id: sessionId, cols: term.cols, rows: term.rows });
   }, 60);
 }
+
+// 终端容器尺寸一变就让画布跟上：拖窗口、折叠面板都会走这里。
+// WebGL 画布是独立合成层，晚一帧就会把旧尺寸的画面画到旁边；ResizeObserver 在布局后、
+// 绘制前触发，正好补上这个空档，也比在每个改布局的地方各挂一次 fit 更不容易漏。
+new ResizeObserver(() => syncSize()).observe(document.getElementById("term-host") as HTMLElement);
+
 window.addEventListener("resize", syncSize);
 
 // ---------- 输入所有权：裁定在 Rust，前端只按结果切换焦点 ----------
