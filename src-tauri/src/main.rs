@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+mod fsview;
 mod history;
 mod persistence;
 
@@ -114,6 +115,13 @@ struct ExitPayload {
     id: String,
 }
 
+/// 会话 CWD 真变了。文件面板的「跟随」只认这一帧，不是每个提示符都发。
+#[derive(Clone, Serialize)]
+struct CwdPayload {
+    id: String,
+    cwd: String,
+}
+
 /// 附着时拿到的回放快照：`data` 覆盖到 `seq` 为止。
 #[derive(Serialize)]
 struct ReplayPayload {
@@ -149,6 +157,61 @@ struct TreeSession {
     transport: &'static str,
     shell: Option<String>,
     cwd: Option<String>,
+}
+
+/// 文件面板列目录的一行（M4）。顺序由后端定：目录在前，名字大小写不敏感。
+#[derive(Serialize)]
+struct FsEntryPayload {
+    name: String,
+    kind: &'static str,
+    /// 符号链接（按目标类型显示，指向目录的仍然能进入）
+    link: bool,
+    /// 只有普通文件有意义
+    size: u64,
+    /// UTC 毫秒；文件系统不提供时间时为 null
+    modified_ms: Option<i64>,
+    hidden: bool,
+}
+
+/// 一次列目录的完整结果。`total` 是过滤前的条目数，`truncated` 说明只返回了前一段。
+#[derive(Serialize)]
+struct FsListingPayload {
+    path: String,
+    parent: Option<String>,
+    total: usize,
+    hidden_count: usize,
+    truncated: bool,
+    entries: Vec<FsEntryPayload>,
+}
+
+impl From<core_domain::fsview::Entry> for FsEntryPayload {
+    fn from(entry: core_domain::fsview::Entry) -> Self {
+        Self {
+            name: entry.name,
+            kind: entry.kind.as_str(),
+            link: entry.link,
+            size: entry.size,
+            modified_ms: entry.modified_ms,
+            hidden: entry.hidden,
+        }
+    }
+}
+
+impl From<core_domain::fsview::Listing> for FsListingPayload {
+    fn from(listing: core_domain::fsview::Listing) -> Self {
+        Self {
+            path: listing.path,
+            parent: listing.parent,
+            total: listing.total,
+            hidden_count: listing.hidden_count,
+            truncated: listing.truncated,
+            entries: listing
+                .entries
+                .into_iter()
+                .map(FsEntryPayload::from)
+                .collect(),
+        }
+    }
 }
 
 /// 从输出流里摘出来的标记，前端只消费它，不再自己解析字节。
@@ -715,6 +778,13 @@ fn note_cwd(app: &AppHandle, id: &str, path: &str) {
     };
     if changed {
         persist_workspace(&state);
+        let _ = app.emit(
+            "session:cwd",
+            CwdPayload {
+                id: id.to_string(),
+                cwd: path.to_string(),
+            },
+        );
     }
 }
 
@@ -897,6 +967,42 @@ fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
             cwd: session.cwd.clone(),
         })
         .collect()
+}
+
+/// 文件面板列一层目录（M4）。`path` 为空时跟随 `session` 记下的 CWD；
+/// 会话没有 CWD（还没上报过提示符）就用用户主目录，保证面板永远有东西可显示。
+///
+/// 读盘放到阻塞线程池：网络盘或超大目录慢的时候，不能让 WebView 的 IPC 排队。
+#[tauri::command]
+async fn fs_list(
+    state: State<'_, AppState>,
+    session: Option<String>,
+    path: Option<String>,
+    show_hidden: Option<bool>,
+) -> Result<FsListingPayload, String> {
+    let requested = path.filter(|path| !path.trim().is_empty()).or_else(|| {
+        let workspace = state.workspace.lock();
+        session
+            .as_deref()
+            .and_then(|id| workspace.session(id))
+            .and_then(|meta| meta.cwd.clone())
+    });
+    let target = PathBuf::from(requested.unwrap_or_else(home_dir));
+    let show_hidden = show_hidden.unwrap_or(false);
+
+    let listing = tauri::async_runtime::spawn_blocking(move || fsview::list(&target, show_hidden))
+        .await
+        .map_err(|err| format!("读取目录失败: {err}"))??;
+    Ok(FsListingPayload::from(listing))
+}
+
+fn home_dir() -> String {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .display()
+        .to_string()
 }
 
 /// 改会话标题。规则（去空白、按字符截断）在 core-domain；这里只负责落盘。
@@ -1157,6 +1263,7 @@ fn main() {
             pty_replay,
             pty_list,
             session_tree,
+            fs_list,
             rename_session,
             pty_resize,
             pty_close,

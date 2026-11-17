@@ -20,6 +20,7 @@ import {
 } from "./historyCache";
 import { stripFocusReports } from "./ptyInput";
 import { keepAfter, type OutChunk } from "./outQueue";
+import { setupFilePanel } from "./filePanelUi";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -131,6 +132,8 @@ try {
 
 let sessionId = "";
 let bytes = 0;
+/// 文件面板的句柄：监听器可能先于 setup 收到事件，所以允许为空
+let filePanel: ReturnType<typeof setupFilePanel> | null = null;
 let benchTerm: Terminal | null = null;
 let benchScheduled = false;
 
@@ -323,6 +326,8 @@ async function attach(id: string) {
   applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
   await syncPaused(id);
   void rebuildHistory(id);
+  // 文件面板跟随会话：切到哪儿就跟到哪儿（固定模式下它自己会忽略这次刷新）
+  filePanel?.reload();
 }
 
 // 会话树：行来自后端工作区（含冷会话），热/冷对照 pty_list 里的活会话
@@ -736,17 +741,23 @@ function moveHistorySelection(delta: number) {
   applyHistorySelection();
 }
 
+/// 命令片段的「填充」出口：只放进输入条，不发送、不写历史。
+function fillInputBar(text: string) {
+  ib.value = text;
+  const end = text.length;
+  ib.setSelectionRange(end, end);
+  histIdx = -1; // 填进来的这条不算 ↑↓ 导航的起点
+  histDraft = "";
+  updateGhost();
+  if (!ib.disabled) ib.focus();
+}
+
 /// Enter / 点击一行：只填充输入条，不发送。
 function acceptHistory() {
   const row = historyRows[historySel];
   if (!row) return;
   closeHistoryOverlay(false);
-  ib.value = row.item.command;
-  const end = ib.value.length;
-  ib.setSelectionRange(end, end);
-  histIdx = -1; // 填进来的这条不算 ↑↓ 导航的起点
-  histDraft = "";
-  updateGhost();
+  fillInputBar(row.item.command);
 }
 
 function openHistoryOverlay() {
@@ -1240,6 +1251,13 @@ const listenOwn = listen<Ownership>("pty:ownership", (event) => {
   applyOwnership(event.payload);
 });
 
+// 会话 CWD 变了（Shell 每次提示符上报 OSC 7）。只有真变化后端才发，不是每个回车一帧。
+const listenCwd = listen<{ id: string; cwd: string }>("session:cwd", (event) => {
+  const item = tree.find((session) => session.id === event.payload.id);
+  if (item) item.cwd = event.payload.cwd;
+  filePanel?.onCwd(event.payload.id);
+});
+
 // 历史缓存增量：只有当前会话的追加会进缓存；id 严格 +1，缺口就整份重建（L2-02）
 const listenHistory = listen<{ session_id: string; item: HistoryItem }>("history:append", (event) => {
   const outcome = applyAppend(cache, sessionId, event.payload);
@@ -1335,10 +1353,18 @@ async function runBench() {
   }
 }
 
+filePanel = setupFilePanel({
+  sessionId: () => sessionId,
+  cwdOf: (id) => tree.find((session) => session.id === id)?.cwd ?? null,
+  fillInput: (text) => fillInputBar(text),
+  layoutChanged: () => syncSize()
+});
+
 void Promise.all([
   listenOut,
   listenExit,
   listenOwn,
+  listenCwd,
   listenHistory,
   listenHistoryDegraded
 ]).then(boot);

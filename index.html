@@ -67,6 +67,23 @@
           <span id="ib-hint">↑ 历史 · Ctrl+R 检索</span>
         </div>
       </main>
+
+      <!-- 文件面板（M4）：默认跟随焦点会话的 CWD，手动导航后转为固定路径 -->
+      <aside id="files">
+        <button id="files-expand" title="展开文件面板" hidden>◧</button>
+        <div id="files-body">
+          <div id="files-head">
+            <button id="files-mode" class="on" title="跟随当前会话的 CWD">跟随</button>
+            <button id="files-up" title="上一级">↑</button>
+            <button id="files-refresh" title="刷新">⟳</button>
+            <button id="files-hidden" title="显示隐藏项（以点开头或带隐藏属性）">隐</button>
+            <button id="files-collapse" title="收起面板">›</button>
+          </div>
+          <div id="files-path"></div>
+          <div id="files-list"></div>
+          <div id="files-foot">双击目录进入 · 双击文件填入输入条</div>
+        </div>
+      </aside>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

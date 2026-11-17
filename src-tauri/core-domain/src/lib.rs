@@ -5,6 +5,7 @@
 //! 2. 对外接口能被单元测试直接驱动，不需要拉起真实的 PTY。
 
 pub mod coalesce;
+pub mod fsview;
 pub mod history;
 pub mod osc;
 pub mod ownership;
