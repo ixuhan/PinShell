@@ -20,7 +20,9 @@ import {
 } from "./historyCache";
 import { stripFocusReports } from "./ptyInput";
 import { keepAfter, type OutChunk } from "./outQueue";
-import { PANEL_DRAGGING_CLASS, setupFilePanel } from "./filePanelUi";
+import { setupFilePanel } from "./filePanelUi";
+import { DRAGGING_CLASS } from "./resize";
+import { setupSidebar } from "./sidebarUi";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -540,9 +542,9 @@ term.onBell(() => trace("BEL fired in xterm"));
 let resizeTimer: number | undefined;
 /// 布局变了：先把画布 fit 到当前容器（同步做，等防抖会晚一帧），再把新尺寸防抖下给 PTY。
 function syncSize() {
-  // 拖文件面板期间不重排终端：每跨一列就整屏重画一次，看起来就是会话区在闪。
+  // 拖左栏或文件面板期间不重排终端：每跨一列就整屏重画一次，看起来就是会话区在闪。
   // 那时画布保持原尺寸、由 #term-host 裁掉多出来的部分，松手时 layoutChanged 再重排一次。
-  if (document.body.classList.contains(PANEL_DRAGGING_CLASS)) return;
+  if (document.body.classList.contains(DRAGGING_CLASS)) return;
   fit.fit();
   if (!sessionId) return;
   window.clearTimeout(resizeTimer);
@@ -1362,6 +1364,9 @@ async function runBench() {
     log("基准失败: " + String(err));
   }
 }
+
+// 左栏先装配：文件面板的宽度上限要量它当前多宽，顺序反了第一帧会算错
+setupSidebar({ layoutChanged: () => syncSize() });
 
 filePanel = setupFilePanel({
   sessionId: () => sessionId,

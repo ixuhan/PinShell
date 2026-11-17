@@ -15,6 +15,8 @@ import {
   type FsEntry,
   type FsListing
 } from "./filePanel";
+// 拖动调宽的手势与 body 上的类名左右两栏共用，别各自再写一份
+import { DRAGGING_CLASS, dragWidth } from "./resize";
 
 export interface FilePanelDeps {
   /// 当前焦点会话的 id；没有会话时返回空串
@@ -39,8 +41,8 @@ interface Stored {
 
 const STORE_KEY = "pinshell.files";
 
-/// 拖动面板宽度期间挂在 body 上的类：样式用它换光标，main.ts 用它把终端重排推迟到松手。
-export const PANEL_DRAGGING_CLASS = "files-dragging";
+/// 列表顶部「..」行的名字。真实的文件名不会是 `..`，所以可以拿它当选中行的身份。
+const PARENT_ROW_NAME = "..";
 
 function loadStored(): Stored {
   const fallback: Stored = { expanded: true, showHidden: false, mode: "follow", width: 0, auto: false };
@@ -61,7 +63,7 @@ function loadStored(): Stored {
   }
 }
 
-/// 拖动时把宽度夹进合法区间；规则在 `filePanel.ts`，这里只提供窗口宽度。
+/// 拖动时把宽度夹进合法区间；规则在 `filePanel.ts`，这里只提供窗口与左栏的实时宽度。
 export function setupFilePanel(deps: FilePanelDeps) {
   const root = document.getElementById("files") as HTMLElement;
   const expandBtn = document.getElementById("files-expand") as HTMLButtonElement;
@@ -75,6 +77,10 @@ export function setupFilePanel(deps: FilePanelDeps) {
   const footEl = document.getElementById("files-foot") as HTMLDivElement;
   const resizer = document.getElementById("files-resizer") as HTMLDivElement;
   const autoBtn = document.getElementById("files-auto") as HTMLButtonElement;
+  // 左栏自己也能拖宽，所以上限要现量它，不能写死 196
+  const sidebar = document.getElementById("sidebar");
+  const clampWidth = (desired: number) =>
+    clampPanelWidth(desired, window.innerWidth, sidebar?.getBoundingClientRect().width ?? 196);
 
   const stored = loadStored();
   let mode: FilePanelMode = stored.mode;
@@ -141,6 +147,16 @@ export function setupFilePanel(deps: FilePanelDeps) {
     listEl.textContent = "";
     selected = null;
     selectedName = null;
+    // 顶部先放一行「..」：和头部 ↑ 是同一件事，但习惯在列表里上翻的人不该被迫去点那个小按钮
+    if (listing.parent) {
+      const up = renderParentRow(listing.parent);
+      if (keepSelected === PARENT_ROW_NAME) {
+        selected = up;
+        selectedName = PARENT_ROW_NAME;
+        up.classList.add("sel");
+      }
+      listEl.append(up);
+    }
     if (!listing.entries.length) {
       const empty = document.createElement("div");
       empty.className = "f-empty";
@@ -162,6 +178,37 @@ export function setupFilePanel(deps: FilePanelDeps) {
     if (listing.hidden_count) parts.push(`隐藏 ${listing.hidden_count}`);
     if (listing.truncated) parts.push(`只显示前 ${listing.entries.length} 项`);
     footEl.textContent = parts.join(" · ");
+  }
+
+  /// 选中一行：同一时刻只有一行带 `sel`。
+  function select(row: HTMLElement, name: string) {
+    if (selected === row) return;
+    selected?.classList.remove("sel");
+    selected = row;
+    selectedName = name;
+    row.classList.add("sel");
+  }
+
+  /// 列表顶部的「..」行。它不是目录里的真实条目，所以没有大小和时间，
+  /// 提示里放的是目标路径；双击回退一级，和头部 ↑ 走同一条 `enter`。
+  function renderParentRow(parent: string): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "f-row dir up";
+    row.title = parent;
+
+    const icon = document.createElement("span");
+    icon.className = "f-icon";
+    icon.textContent = "↑";
+
+    const name = document.createElement("span");
+    name.className = "f-name";
+    name.textContent = PARENT_ROW_NAME;
+
+    row.append(icon, name);
+    row.addEventListener("mousedown", (event) => event.preventDefault());
+    row.addEventListener("click", () => select(row, PARENT_ROW_NAME));
+    row.addEventListener("dblclick", () => enter(parent));
+    return row;
   }
 
   function renderRow(dir: string, entry: FsEntry): HTMLElement {
@@ -195,13 +242,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     row.append(icon, name, size, time);
     // 点面板不该把焦点从终端或输入条抢走：按钮与行都在 mousedown 上阻止默认
     row.addEventListener("mousedown", (event) => event.preventDefault());
-    row.addEventListener("click", () => {
-      if (selected === row) return;
-      selected?.classList.remove("sel");
-      selected = row;
-      selectedName = entry.name;
-      row.classList.add("sel");
-    });
+    row.addEventListener("click", () => select(row, entry.name));
     row.addEventListener("dblclick", () => {
       if (entry.kind === "dir") {
         enter(joinPath(dir, entry.name));
@@ -228,7 +269,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       expanded &&
       deps.sessionId() !== "" &&
       document.visibilityState === "visible" &&
-      !document.body.classList.contains(PANEL_DRAGGING_CLASS)
+      !document.body.classList.contains(DRAGGING_CLASS)
     );
   }
 
@@ -347,49 +388,26 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   // 左边缘拖动调宽：拖动中只改 CSS 宽度，终端保持原尺寸、由 #term-host 裁掉多出来的部分，
   // 松手后才重排一次终端并把新尺寸下给 PTY（拖动中每跨一列就重排会让会话区不停闪）。
-  // 双击恢复按窗口比例的默认宽度。
-  //
-  // 监听器挂在 window 而不是手柄上：指针捕获在部分环境里会失败（抛 NotFoundError），
-  // 一旦抛在 addEventListener 之前，整个手势就永远收不到 pointermove。
+  // 双击恢复按窗口比例的默认宽度。手势本体在 `resize.ts`，与左栏共用。
   resizer.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
     stopAuto(); // 拖动期间不插自动刷新，松手后再重新计时
-    const startX = event.clientX;
-    const startWidth = root.getBoundingClientRect().width;
-    let moved = false;
-
-    try {
-      resizer.setPointerCapture(event.pointerId);
-    } catch {
-      // 捕获失败不要紧：下面的 window 监听照样收得到移动
-    }
-
-    const onMove = (moveEvent: PointerEvent) => {
-      const next = clampPanelWidth(startWidth + (startX - moveEvent.clientX), window.innerWidth);
-      if (next === width) return;
-      width = next;
-      moved = true;
-      root.style.setProperty("--files-width", `${next}px`);
-    };
-
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-      window.removeEventListener("blur", onUp);
-      document.body.classList.remove(PANEL_DRAGGING_CLASS);
-      scheduleAuto();
-      if (!moved) return;
-      save();
-      deps.layoutChanged();
-    };
-
-    document.body.classList.add(PANEL_DRAGGING_CLASS);
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    window.addEventListener("blur", onUp);
+    dragWidth(event, resizer, {
+      edge: "left",
+      startWidth: root.getBoundingClientRect().width,
+      clamp: clampWidth,
+      onWidth: (next) => {
+        width = next;
+        root.style.setProperty("--files-width", `${next}px`);
+      },
+      onEnd: (_next, moved) => {
+        scheduleAuto();
+        if (!moved) return;
+        save();
+        deps.layoutChanged();
+      }
+    });
   });
 
   resizer.addEventListener("dblclick", () => {
@@ -401,7 +419,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   if (width > 0) {
     // 上次退出时的窗口可能比现在宽：先夹一遍，别一启动就把终端挤没
-    width = clampPanelWidth(width, window.innerWidth);
+    width = clampWidth(width);
     root.style.setProperty("--files-width", `${width}px`);
   }
   syncChrome();
@@ -410,7 +428,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
   // 窗口变窄时把已保存的宽度重新夹一遍，否则固定的 px 会把终端挤到看不见
   window.addEventListener("resize", () => {
     if (!width || !expanded) return;
-    const next = clampPanelWidth(width, window.innerWidth);
+    const next = clampWidth(width);
     if (next === width) return;
     width = next;
     root.style.setProperty("--files-width", `${next}px`);

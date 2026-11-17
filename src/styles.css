@@ -14,8 +14,10 @@ body,
 
 /* 左栏：会话树。热/冷只由状态点表达，不做两套列表 */
 #sidebar {
+  position: relative;
   flex: none;
-  width: 196px;
+  /* 默认 196px；拖动分隔条后由 --sidebar-width 覆盖 */
+  width: var(--sidebar-width, 196px);
   display: flex;
   flex-direction: column;
   background: #0d1219;
@@ -24,17 +26,52 @@ body,
   user-select: none;
 }
 
+/* 右边缘的拖拽手柄：跨在边框上，抓取范围 11px（栏内 6px、栏外 5px） */
+#sess-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -5px;
+  width: 11px;
+  z-index: 6;
+  cursor: col-resize;
+  /* 触控板/触屏上不要被浏览器当成滚动手势 */
+  touch-action: none;
+}
+
+/* 平时只有一个 col-resize 光标；悬停与拖动期间把边框点亮，告诉用户这里能拖 */
+#sess-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: transparent;
+}
+
+#sess-resizer:hover::after,
+body.layout-dragging #sess-resizer::after {
+  background: #2c5a46;
+}
+
 #sess-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 10px 10px 6px;
   color: #8a9ab0;
   font-size: 11px;
   letter-spacing: 0.5px;
 }
 
+/* 两个按钮都推到右端：新建在前，收起在后 */
 #sess-new {
+  margin-left: auto;
+}
+
+#sess-new,
+#sess-collapse {
   width: 22px;
   height: 22px;
   background: transparent;
@@ -46,9 +83,45 @@ body,
   cursor: pointer;
 }
 
-#sess-new:hover {
+#sess-new:hover,
+#sess-collapse:hover {
   color: #e8eef7;
   border-color: #31435a;
+}
+
+/* 收起后只剩一条 26px 的竖条：头部、列表、提示与拖拽手柄全部让位 */
+#sidebar.collapsed {
+  width: 26px;
+}
+
+#sidebar.collapsed #sess-head,
+#sidebar.collapsed #sess-list,
+#sidebar.collapsed #sess-hint,
+#sidebar.collapsed #sess-resizer {
+  display: none;
+}
+
+#sess-expand {
+  flex: 1 1 auto;
+  width: 100%;
+  padding: 10px 0;
+  border: 0;
+  background: transparent;
+  color: #5d7fa3;
+  font: inherit;
+  cursor: pointer;
+  /* 竖排两字，26px 宽刚好放得下 */
+  writing-mode: vertical-rl;
+}
+
+#sess-expand:hover {
+  color: #d7e3f0;
+  background: #131a23;
+}
+
+/* hidden 属性必须压过上面的 display，否则展开状态下还会留一个空白按钮 */
+#sess-expand[hidden] {
+  display: none;
 }
 
 #sess-list {
@@ -535,7 +608,7 @@ body,
 }
 
 #files-resizer:hover::after,
-body.files-dragging #files-resizer::after {
+body.layout-dragging #files-resizer::after {
   background: #2c5a46;
 }
 
@@ -543,7 +616,7 @@ body.files-dragging #files-resizer::after {
   display: none;
 }
 
-body.files-dragging {
+body.layout-dragging {
   cursor: col-resize;
   user-select: none;
 }
@@ -680,6 +753,11 @@ body.files-dragging {
 
 .f-row.dir .f-name {
   color: #9fd3ff;
+}
+
+/* 列表顶部的「..」：不是目录里的真实条目，压暗一档，别和真目录抢注意力 */
+.f-row.up .f-name {
+  color: #7f93a8;
 }
 
 .f-link {

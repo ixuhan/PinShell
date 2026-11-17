@@ -11,9 +11,14 @@
         <div id="sess-head">
           <span>会话</span>
           <button id="sess-new" title="新建会话">＋</button>
+          <button id="sess-collapse" title="收起会话栏">‹</button>
         </div>
+        <!-- 收起后只剩这条竖条：点它展开，宽度与折叠状态会记住 -->
+        <button id="sess-expand" title="展开会话栏" hidden>会话</button>
         <div id="sess-list"></div>
         <div id="sess-hint">双击名字改名 · ✕ 关闭</div>
+        <!-- 右边缘的拖拽手柄：和文件面板一样，拖动只改宽度、松手才重排终端 -->
+        <div id="sess-resizer" title="拖动调整会话栏宽度 · 双击恢复默认"></div>
       </aside>
 
       <main id="main">

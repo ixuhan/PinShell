@@ -45,7 +45,7 @@
 | L0-11 | 片段标题截断 | 按字符（非字节）截断，含 emoji 不裂 |
 | L0-12 | 行结束符取值 | 终端固定 `\r`；串口按 CRLF / CR / LF |
 | L0-13 | 会话状态机不变量 I1–I5 | 纯模型测试：冷会话无进程、关闭保留历史、退出不保活、同串口单热会话、清窗口不动历史 |
-| L0-14 | 回放缓冲 | 序号从 1 递增、空块不占号、超上限按整块丢最旧、超大单块仍保留、清空后序号继续 |
+| L0-14 | 回放缓冲 | 序号从 1 递增、空块不占号、超上限按整块丢最旧、超大单块仍保留、清空后序号继续、清屏留下光标那一行（跨块拼接、连续清屏、超长行只留尾部且不切在半条转义序列上） |
 | L0-15 | 工作区分格树 | 会话最多出现在一格、嵌套 ≤3 层、切开落在目标右侧/下方、关闭折叠父切割、最后一个分格关闭即窗口消失、跨窗口交换被拒、CWD 只在真变更时才算变更 |
 | L0-16 | 卷轴快照组装 | 空快照不画分隔线、半行先补换行、重复重开各带一条分隔线、回放前丢掉备用屏与隐藏光标开关、末尾复位 SGR 并放出光标、分隔线不含 `133`/`7` 标记（不会被状态机误认成提示符） |
 | L0-17 | 会话标题 | 去首尾空白、按字符截断到 40（中文/emoji 不切半）、全空白拒绝、未变更返回「没变」 |
@@ -173,7 +173,7 @@
 | 集成脚本注入 | `spawn_session` | pwsh/powershell 用 `-NoExit -EncodedCommand <base64>` 注入脚本正文；bash 用 `--init-file`；都不写用户 profile |
 | L1 bash 标记链路 | `src-tauri/core-domain/tests/bash_markers.rs` | A/C/D/退出码/CWD；找不到 Git Bash 自动 skip |
 | 输入条历史 | `pty_send_line` / `pty_history` / `history:append` | M3 起落 `history.db`；`pty_history` 只是快照的只读视图，供 ↑↓ 用 |
-| 回放缓冲 | `core-domain/src/replay.rs` | 6 个用例（L0-14）：序号、整块裁剪、超大单块保留、清空后序号继续 |
+| 回放缓冲 | `core-domain/src/replay.rs` | 15 个用例（L0-14）：序号、整块裁剪、超大单块保留、清空后序号继续、已答过的查询删除、清屏后留住当前行 |
 | 工作区分格模型 | `core-domain/src/workspace.rs` | 16 个用例（L0-15）：开窗/切开/关闭折叠/交换、深度与唯一性校验、`set_cwd` 只报真变更、`rename_session` 的截断与拒绝 |
 | 数据目录与原子写 | `src-tauri/src/persistence.rs` | 17 个用例（L1-08）：便携→APPDATA 回退、`PINSHELL_DATA_DIR` 优先、`.bak` 救回、双坏上报、工作区 JSON 往返、卷轴快照往返/覆盖/删除/文件名不许越界、覆盖写中途崩溃可从 `.old` 恢复 |
 | 卷轴快照组装 | `core-domain/src/scrollback.rs` | 7 个用例（L0-16）：分隔线位置、去 OSC 标记、备用屏与隐藏光标开关被丢掉、末尾复位 |
@@ -197,12 +197,13 @@
 | 本地门禁 | `scripts/test-guard.ps1`（接入 `scripts/push.ps1`） | dev 在跑时自动只跑 L0 并说明原因；已验证「锁住 exe 时拒绝 L1」 |
 | L0-19 清屏过滤 | `src/outQueue.ts` + `src/outQueue.test.ts` | 4 个用例：下限之前的块全部丢掉、全丢时序号归零、下限为 0 一块不丢、乱序到达按到达顺序拼并取最大序号 |
 | 暂停 / 继续 | `pty_set_paused` / `pty_paused` + `src/main.ts` | 判定在后端读线程：暂停只掐 `pty:out` 事件，输出仍进回放缓冲（暂停多久都不会堆内存——攒着的合流块直接丢，回放自己按上限裁旧）；继续时整屏按回放重画，不把增量接在旧屏幕上；按钮状态按后端 `pty_paused` 复原，不靠前端记忆 |
-| 一键清窗口 | `pty_clear` + `src/main.ts` | 清回放缓冲 + 删磁盘卷轴快照 + `term.clear()`；返回清空前的最后序号，前端据此丢掉在途与已排队的旧块；不发 `Ctrl+L`、不动命令历史 |
+| 一键清窗口 | `pty_clear` + `src/main.ts` | 清回放缓冲 + 删磁盘卷轴快照 + `term.clear()`；保留光标那一行（通常就是提示符）留在回放开头，切走再切回来、暂停后继续都还画得出来；返回清空前的最后序号，前端据此丢掉在途与已排队的旧块；不发 `Ctrl+L`、不动命令历史 |
 | 输入条按钮行 | `index.html` + `src/main.ts` + `src/styles.css` | 暂停 / 清屏 / 直通 / 接管四个按钮与快捷键同源；`mousedown` 阻止默认，按钮不抢焦点，点完可以接着敲键盘 |
 | 卷轴行数上限 | `src/main.ts` 的 `SCROLLBACK_LINES` | 取 5000 行（约 2 MB）；`scripts/bench-scrollback.mjs` 实测稳态吞吐与上限无关（52–57 MB/s）、内存约 0.4 KB/行，数字见 `docs/bench-m0.md` |
 | 切会话 / 窗口缩放（手工回归） | `.probe/probe_switch_resize.ps1` | 侧栏行按无障碍文本定位再点（行高随 DPI 变，写死 y 会点到标题栏，结论是假的）；两个会话各留一条标记命令，切走再切回后磁盘快照里只有各自的标记（`MARK-A` 只出现在 423c、`MARK-B` 只出现在 c387），回放尾巴完整、无重影；窗口宽度 −300 px 后 Shell 里的 `$Host.UI.RawUI.WindowSize.Width` 由 172 变成 129（探针把它写进 `w_before.txt` / `w_after.txt` 核对），说明 resize 真下到了 PTY |
 | M4 文件面板（第一片） | `core-domain/src/fsview.rs`、`src-tauri/src/fsview.rs`、`src/filePanel.ts`、`src/filePanelUi.ts` | `fs_list` 只读列目录（`path` 为空时跟随会话 CWD，读盘在阻塞线程池）；排序/隐藏过滤/截断/路径归一化在 core-domain（9 个用例）；`std::fs` 填元数据（跟随链接判类型、Windows 隐藏属性）3 个用例；`session:cwd` 只在 CWD 真变更时推；面板显示格式与跟随/固定选择 13 个前端用例；折叠/展开不抢焦点，切换后终端重新 fit |
 | M4 文件面板（第二片：自动刷新） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 逐项比较 5 个用例（任一字段或顺序变了才算变化）、刷新间隔与失败退避 2 个用例（大目录 10 秒、2 的幂到 24 秒）、宽度夹取 5 个：合计 12 个前端用例。DOM 行为用假 IPC 的浏览器验证台确认：内容不变时 3 秒一次只发 `fs_list`、零 DOM 变更；内容变化时重绘 200 行且 `scrollTop` 与选中行都还在；面板收起、无会话时不发请求；大目录（`total > 1000`）周期变 10 秒；一次读盘失败后下一次等到 6 秒 |
+| M4 文件面板（第三片：`..`、左栏调宽与收起） | `src/filePanelUi.ts`、`src/sidebar.ts`、`src/sidebarUi.ts`、`src/resize.ts`、`src/styles.css` | 两侧拖动共用同一套手势与 `body.layout-dragging`，拖动中只改 CSS、松手才 `layoutChanged`；左栏 150–360px，两栏各自量对方实时宽度定上限。两栏都能收起成 26px 竖条（左栏竖排「会话」展开按钮），折叠状态与宽度一起进 `localStorage`。前端用例 14 个（夹取 7、存储解析 5、序列化 2，坏数据回默认）。浏览器验证台确认：`..` 只在有父目录时出现、单击可选中、双击发出 `path=C:\`（转「固定」）、无父目录与空目录两种情况都对；左栏 196→297 拖动中零次重排、松手一次；拖到 +900px 被夹在 360；窗口缩到 700px 后两栏各自缩到 195/324、终端留住 180；点「‹」收起后宽度 27px、列表与手柄隐藏、展开按钮出现且 `layoutChanged` 一次，点展开恢复原宽度并再 `layoutChanged` 一次；收起状态重载页面后仍在（存的是 `{"width":195,"collapsed":true}`，展开回到 196） |
 | 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
 
 跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过）。

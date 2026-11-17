@@ -84,7 +84,7 @@ pub fn without_host_queries(text: &str) -> Cow<'_, str> {
 }
 
 /// OSC 的结束位置：BEL 或 ST（`ESC \`）。返回 (body 结束, 下一个字节)。
-fn osc_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+pub(crate) fn osc_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
     let mut j = from;
     while j < bytes.len() {
         match bytes[j] {
@@ -97,7 +97,7 @@ fn osc_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 /// CSI 的结束位置（终止字节 0x40..=0x7e）。返回 (终止字节, 下一个字节)。
-fn csi_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+pub(crate) fn csi_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
     let mut j = from;
     while j < bytes.len() {
         let b = bytes[j];
@@ -113,7 +113,7 @@ fn csi_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 /// DCS 的结束位置：ST（`ESC \`）。返回 (body 结束, 下一个字节)。
-fn st_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
+pub(crate) fn st_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
     let mut j = from;
     while j + 1 < bytes.len() {
         if bytes[j] == 0x1b && bytes[j + 1] == b'\\' {
