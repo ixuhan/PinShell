@@ -5,15 +5,24 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   AUTO_REFRESH_MS,
   autoRefreshDelay,
+  clampMenuPosition,
   clampPanelWidth,
   formatSize,
   formatTime,
   joinPath,
+  normalizePanelStore,
   panelTarget,
+  parentPath,
+  rowMenu,
   sameListing,
   type FilePanelMode,
+  type FilePanelPrefs,
+  type FilePanelStore,
   type FsEntry,
-  type FsListing
+  type FsListing,
+  type MenuCommand,
+  type MenuItem,
+  type RowKind
 } from "./filePanel";
 // 拖动调宽的手势与 body 上的类名左右两栏共用，别各自再写一份
 import { DRAGGING_CLASS, dragWidth } from "./resize";
@@ -29,37 +38,17 @@ export interface FilePanelDeps {
   layoutChanged(): void;
 }
 
-interface Stored {
-  expanded: boolean;
-  showHidden: boolean;
-  mode: FilePanelMode;
-  /// 上次拖动的宽度；0 表示用默认的窗口比例
-  width: number;
-  /// 自动刷新开关；默认关，用户点「自动」才开
-  auto: boolean;
-}
-
 const STORE_KEY = "pinshell.files";
 
 /// 列表顶部「..」行的名字。真实的文件名不会是 `..`，所以可以拿它当选中行的身份。
 const PARENT_ROW_NAME = "..";
 
-function loadStored(): Stored {
-  const fallback: Stored = { expanded: true, showHidden: false, mode: "follow", width: 0, auto: false };
+function loadStored(): FilePanelStore {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as Partial<Stored>;
-    const width = typeof parsed.width === "number" && Number.isFinite(parsed.width) ? Math.round(parsed.width) : 0;
-    return {
-      expanded: parsed.expanded !== false,
-      showHidden: parsed.showHidden === true,
-      mode: parsed.mode === "fixed" ? "fixed" : "follow",
-      width: width > 0 ? width : 0,
-      auto: parsed.auto === true
-    };
+    return normalizePanelStore(raw ? JSON.parse(raw) : null);
   } catch {
-    return fallback;
+    return normalizePanelStore(null);
   }
 }
 
@@ -83,13 +72,21 @@ export function setupFilePanel(deps: FilePanelDeps) {
     clampPanelWidth(desired, window.innerWidth, sidebar?.getBoundingClientRect().width ?? 196);
 
   const stored = loadStored();
-  let mode: FilePanelMode = stored.mode;
-  let showHidden = stored.showHidden;
   let expanded = stored.expanded;
   let width = stored.width;
-  let auto = stored.auto;
+  /// 每个会话各自的设置；`defaults` 给还没有自己记录的会话（也是旧版数据的迁移落点）
+  const sessions = stored.sessions;
+  let defaults = stored.defaults;
+  /// 当前设置绑定到哪个会话。切换会话时整套换掉，宽度与展开状态不动。
+  let boundId: string | null = null;
+  let mode: FilePanelMode = defaults.mode;
+  let showHidden = defaults.showHidden;
+  let auto = defaults.auto;
   let currentPath: string | null = null;
   let lastListing: FsListing | null = null;
+  /// 头部 ↑ 的目标。列表拉不到时后端给不出 `parent`，这份值由前端按路径算出来，
+  /// 保证「读不出来的目录」也能退出去，不会把人卡在里面。
+  let upTarget: string | null = null;
   let token = 0;
   let selected: HTMLElement | null = null;
   /// 重画后按名字恢复选中：自动刷新每 3 秒重建一次列表，不能把用户点的那行弄丢
@@ -98,12 +95,195 @@ export function setupFilePanel(deps: FilePanelDeps) {
   let autoTimer: number | undefined;
   let autoFailures = 0;
 
-  function save() {
+  // ---------- 右键菜单 ----------
+  // 原生菜单由 helper 进程弹（系统 Shell 的 IContextMenu）；它起不来时用这份自建
+  // 菜单兜底，所以两边都在。菜单不抢焦点：键盘走 document 捕获阶段，点外面即关。
+  interface MenuTarget {
+    path: string;
+    kind: RowKind;
+  }
+  const menuEl = document.createElement("div");
+  menuEl.className = "f-menu";
+  menuEl.hidden = true;
+  menuEl.setAttribute("role", "menu");
+  document.body.append(menuEl);
+  let menuTarget: MenuTarget | null = null;
+  let menuItems: MenuItem[] = [];
+  let menuIndex = -1;
+  /// 右键序号：期间又右键了别的行，先回来的那次就作废（不能弹两个菜单）
+  let menuToken = 0;
+
+  function hideMenu() {
+    if (menuEl.hidden) return;
+    menuEl.hidden = true;
+    menuEl.textContent = "";
+    menuTarget = null;
+    menuItems = [];
+    menuIndex = -1;
+  }
+
+  function setMenuIndex(index: number) {
+    if (!menuItems.length) return;
+    menuIndex = (index + menuItems.length) % menuItems.length;
+    Array.from(menuEl.children).forEach((row, position) =>
+      row.classList.toggle("sel", position === menuIndex)
+    );
+  }
+
+  function showFallbackMenu(x: number, y: number, target: MenuTarget) {
+    menuTarget = target;
+    menuItems = rowMenu(target.kind);
+    menuIndex = -1;
+    menuEl.textContent = "";
+    menuItems.forEach((item, index) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "f-menu-item";
+      row.setAttribute("role", "menuitem");
+      row.textContent = item.label;
+      row.addEventListener("mousedown", (event) => event.preventDefault());
+      row.addEventListener("click", () => void runMenuCommand(item.command));
+      row.addEventListener("pointerenter", () => setMenuIndex(index));
+      menuEl.append(row);
+    });
+    // 先渲染再量尺寸：菜单贴到右下角时要往回收，量 0×0 会把它顶到角上
+    menuEl.hidden = false;
+    const rect = menuEl.getBoundingClientRect();
+    const spot = clampMenuPosition(
+      x,
+      y,
+      rect.width,
+      rect.height,
+      window.innerWidth,
+      window.innerHeight
+    );
+    menuEl.style.left = `${spot.x}px`;
+    menuEl.style.top = `${spot.y}px`;
+    setMenuIndex(0);
+  }
+
+  async function openContextMenu(x: number, y: number, target: MenuTarget) {
+    hideMenu();
+    const mine = ++menuToken;
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ expanded, showHidden, mode, width, auto }));
+      const outcome = await invoke<string>("fs_context_menu", { path: target.path });
+      if (mine !== menuToken) return;
+      if (outcome === "unavailable") showFallbackMenu(x, y, target);
+    } catch {
+      if (mine !== menuToken) return;
+      showFallbackMenu(x, y, target);
+    }
+  }
+
+  async function runMenuCommand(command: MenuCommand) {
+    const target = menuTarget;
+    hideMenu();
+    if (!target) return;
+    try {
+      if (command === "open") {
+        if (target.kind === "dir" || target.kind === "parent") {
+          enter(target.path);
+        } else {
+          await invoke("fs_open", { path: target.path });
+        }
+      } else if (command === "reveal") {
+        await invoke("fs_reveal", { path: target.path });
+      } else if (command === "copy") {
+        await navigator.clipboard.writeText(target.path);
+        footEl.textContent = "已复制路径";
+      } else {
+        deps.fillInput(target.path);
+      }
+    } catch (err) {
+      footEl.textContent = String(err);
+    }
+  }
+
+  // 菜单打开时，键盘事件在捕获阶段截住：输入条仍有焦点也不能把 ↑↓/Enter 吃掉
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (menuEl.hidden) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        hideMenu();
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuIndex(menuIndex + 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuIndex(menuIndex - 1);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        const item = menuItems[menuIndex];
+        if (item) void runMenuCommand(item.command);
+      }
+    },
+    true
+  );
+
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (menuEl.hidden) return;
+      if (event.target instanceof Node && menuEl.contains(event.target)) return;
+      hideMenu();
+    },
+    true
+  );
+  window.addEventListener("blur", hideMenu);
+  window.addEventListener("resize", hideMenu);
+
+  /// 当前会话此刻的设置快照。跟随模式不记路径：路径由后端按 CWD 解析。
+  function capturePrefs(): FilePanelPrefs {
+    return { mode, auto, showHidden, path: mode === "fixed" ? currentPath : null };
+  }
+
+  function persist() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({ expanded, width, defaults, sessions }));
     } catch {
       // 存不下就只影响下次打开的默认值，不打断使用
     }
+  }
+
+  /// 改动落到「当前会话」名下，同时成为新建会话的默认值。
+  function save() {
+    const prefs = capturePrefs();
+    if (boundId) sessions[boundId] = prefs;
+    defaults = prefs;
+    persist();
+  }
+
+  /// 切换会话：换上该会话自己的跟随/固定、自动刷新、显示隐藏项。
+  /// 面板宽度与展开状态是窗口级布局，切会话时保持不动。
+  function bindSession(id: string) {
+    if (id === boundId) return;
+    // 先把上一个会话当下的状态写回去：它可能一直用着默认值，却从没被记录过
+    if (boundId) {
+      sessions[boundId] = capturePrefs();
+      persist();
+    }
+    boundId = id;
+    // 新会话沿用最近一次用过的设置，但不继承它的固定路径：从自己的 CWD 起步更合理
+    const prefs = (id ? sessions[id] : undefined) ?? { ...defaults, path: null };
+    mode = prefs.mode;
+    auto = prefs.auto;
+    showHidden = prefs.showHidden;
+    currentPath = prefs.path;
+    // 上一个会话的列表、选中行与菜单都不能留在新会话里
+    lastListing = null;
+    selected = null;
+    selectedName = null;
+    upTarget = null;
+    autoFailures = 0;
+    stopAuto();
+    hideMenu();
+    syncChrome();
   }
 
   function applyExpanded() {
@@ -132,6 +312,8 @@ export function setupFilePanel(deps: FilePanelDeps) {
   }
 
   function render(listing: FsListing) {
+    // 列表重建时菜单还开着，就会指向一行已经不存在的条目
+    hideMenu();
     // 同一目录自动刷新时保住滚动位置与选中行；换了目录才从头开始
     const sameDir = lastListing !== null && lastListing.path === listing.path;
     const keepScroll = sameDir ? listEl.scrollTop : 0;
@@ -142,6 +324,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     currentPath = listing.path;
     pathEl.textContent = listing.path;
     pathEl.title = listing.path;
+    upTarget = listing.parent;
     upBtn.disabled = !listing.parent;
 
     listEl.textContent = "";
@@ -208,6 +391,11 @@ export function setupFilePanel(deps: FilePanelDeps) {
     row.addEventListener("mousedown", (event) => event.preventDefault());
     row.addEventListener("click", () => select(row, PARENT_ROW_NAME));
     row.addEventListener("dblclick", () => enter(parent));
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      select(row, PARENT_ROW_NAME);
+      void openContextMenu(event.clientX, event.clientY, { path: parent, kind: "parent" });
+    });
     return row;
   }
 
@@ -250,6 +438,14 @@ export function setupFilePanel(deps: FilePanelDeps) {
         deps.fillInput(joinPath(dir, entry.name));
       }
     });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      select(row, entry.name);
+      void openContextMenu(event.clientX, event.clientY, {
+        path: joinPath(dir, entry.name),
+        kind: entry.kind
+      });
+    });
     return row;
   }
 
@@ -269,6 +465,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       expanded &&
       deps.sessionId() !== "" &&
       document.visibilityState === "visible" &&
+      menuEl.hidden &&
       !document.body.classList.contains(DRAGGING_CLASS)
     );
   }
@@ -301,10 +498,13 @@ export function setupFilePanel(deps: FilePanelDeps) {
   /// 拉一次目录。返回 false 表示没拉成（没会话、被更新的请求取代、读盘失败）。
   async function reload(): Promise<boolean> {
     const id = deps.sessionId();
+    // 切了会话就先换上它自己的设置，再按那套设置决定列哪个目录
+    bindSession(id);
     if (!id) {
       pathEl.textContent = "无会话";
       listEl.textContent = "";
       footEl.textContent = "";
+      upTarget = null;
       upBtn.disabled = true;
       lastListing = null;
       selected = null;
@@ -330,14 +530,20 @@ export function setupFilePanel(deps: FilePanelDeps) {
       lastListing = null;
       selected = null;
       selectedName = null;
-      pathEl.textContent = currentPath ?? "";
+      // 读不出来的目录也得能退出去：后端没结果就没有 `parent`，这里按路径自己算一份，
+      // 头部 ↑ 与列表顶部的「..」照常可用（否则一个没有权限的目录会把人卡死在里面）。
+      const shown = target ?? currentPath ?? deps.cwdOf(id) ?? "";
+      upTarget = parentPath(shown);
+      pathEl.textContent = shown;
+      pathEl.title = shown;
       listEl.textContent = "";
+      if (upTarget) listEl.append(renderParentRow(upTarget));
       const row = document.createElement("div");
       row.className = "f-empty";
       row.textContent = String(err);
       listEl.append(row);
       footEl.textContent = "";
-      upBtn.disabled = true;
+      upBtn.disabled = !upTarget;
       return false;
     } finally {
       syncChrome();
@@ -377,7 +583,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     void reload();
   });
   upBtn.addEventListener("click", () => {
-    if (lastListing?.parent) enter(lastListing.parent);
+    if (upTarget) enter(upTarget);
   });
   modeBtn.addEventListener("click", () => {
     mode = mode === "follow" ? "fixed" : "follow";

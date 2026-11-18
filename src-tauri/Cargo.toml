@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "PinShell - Windows enhanced workflow terminal"
 edition = "2021"
 rust-version = "1.77"
+# 有第二个可执行文件（右键菜单 helper），不给默认名的话 `cargo run` 会拒绝启动。
+default-run = "pinshell"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -20,8 +22,20 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 # 关掉 WebView2 的浏览器加速键（Ctrl+R 不再是「刷新页面」）需要直接拿到 WebView2 设置。
 [target."cfg(windows)".dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging"
+] }
 webview2-com = "0.39"
 windows-core = "0.62"
+
+# 原生右键菜单 helper：独立进程，第三方 shell 扩展崩了不带走主进程。
+[[bin]]
+name = "pinshell-shellmenu"
+path = "src/bin/shellmenu.rs"
 
 [profile.release]
 codegen-units = 1

@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "app:dev": "tauri dev",
+    "app:dev": "npm run dev:helper && tauri dev",
+    "dev:helper": "cargo build --manifest-path src-tauri/Cargo.toml --bin pinshell-shellmenu",
     "app:build": "tauri build",
     "test": "vitest run"
   },

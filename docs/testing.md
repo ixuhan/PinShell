@@ -51,7 +51,7 @@
 | L0-17 | 会话标题 | 去首尾空白、按字符截断到 40（中文/emoji 不切半）、全空白拒绝、未变更返回「没变」 |
 | L0-18 | 历史库存储语义 | 去重挪到最新并累加次数、10k 封顶、会话隔离、清空只作用当前会话、删除节点销毁历史、时间戳 UTC 往返 |
 | L0-19 | 清屏后的输出过滤 | 序号 ≤ 下限的块全部丢掉（哪怕清屏之后才到达）、其余按到达顺序拼、没有保留块时序号归零、下限为 0 时一块不丢 |
-| L0-20 | 文件面板显示规则 | 目录优先且大小写不敏感排序、隐藏项过滤与计数、2000 条截断、路径归一化与父/子拼接、盘符根与 UNC 根、大小与时间格式、跟随/固定模式的目标路径 |
+| L0-20 | 文件面板显示规则 | 目录优先且大小写不敏感排序、隐藏项过滤与计数、2000 条截断、路径归一化与父/子拼接、盘符根与 UNC 根、大小与时间格式、跟随/固定模式的目标路径、降级菜单的项集合与视口夹取、会话级偏好的解析与迁移（旧版全局配置落到默认值、跟随模式不保留固定路径、脏字段逐项回退） |
 
 ### L1 集成
 
@@ -95,7 +95,7 @@
 | M2（已完成） | 冷/热会话、回放缓冲、快照还原、原子写 | L0-13、L0-14、L0-15、L0-16、L0-17、L1-08、L3-05 |
 | M3（已完成） | 历史库、Ghost Text、Ctrl+R | L0-07、L0-09、L0-18、L1-10、L2-02 |
 | M3 打磨（已完成） | 暂停/继续、一键清窗口、卷轴行数上限、输入条按钮 | L0-19（+ 手工：暂停后继续还原、清屏不回填旧块） |
-| M4（进行中） | 文件面板跟随 CWD（第一片已落地）、原生菜单 | L0-20、L1、L3-06 |
+| M4（已完成） | 文件面板跟随 CWD / 自动刷新 / 拖宽收起、原生右键菜单与降级 | L0-20、L3-06、手工（helper 崩溃降级） |
 | M5 | 串口（假 Transport 优先，真串口靠虚拟串口对） | L0-12、L1 |
 | M6 | 升级后恢复工作区 | L3 |
 
@@ -147,9 +147,21 @@
 |---|---|---|
 | 真 GUI 自动化 | 未装 `tauri-driver` + 匹配 WebView2 的 `msedgedriver`，且会抢焦点 | 等确认是否值得装 |
 | 串口真设备 | 需要硬件或虚拟串口对驱动 | M5 |
-| 原生菜单 helper 隔离 | 依赖 M4 的 helper 进程 | M4 |
+| 原生菜单 helper 隔离 | 已落地：helper 是独立进程，崩溃/缺失都降级为自建菜单；崩溃场景本身靠手工（结束 helper 或换成坏 exe 后右键仍能出菜单） | 手工清单 |
 | IME / 多显示器 / 字体回退 / 高 DPI | GUI 环境相关，自动化收益低 | 手工清单 |
 | 多窗口（单主窗口之外的场景） | 产品未做 | 后续 |
+
+### 8.1 M4 右键菜单手工清单（改过 helper 或打包配置后走一遍）
+
+| 项 | 步骤 | 期望 |
+|---|---|---|
+| 原生菜单 | `npm run app:dev`，右键文件面板里的文件 | 弹出资源管理器菜单，「打开方式」「发送到」与第三方扩展（7-Zip、TortoiseGit 等）都在；选一项能真的执行 |
+| 取消 | 同上，点菜单外面或按 `Esc` | 菜单消失，会话、输入条、自动刷新都正常 |
+| 缺失降级 | 把 `src-tauri\target\debug\pinshell-shellmenu.exe` 改名后右键 | 出四项自建菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条），主进程不崩；改回名字并重启应用后恢复原生 |
+| 崩溃降级 | 用一个立刻退出的 exe 覆盖 helper（或启动应用前把 `PINSHELL_SHELLMENU` 指向它） | 同上降级，主进程存活，能继续切会话 |
+| 安装版 | 装 `src-tauri\target\release\bundle\nsis\PinShell_0.1.0_x64-setup.exe` 后右键 | 安装目录里有 `pinshell-shellmenu.exe`，右键仍出原生菜单；卸载后不残留 |
+
+打包这一项已自动核对：`npm run app:build` 产出的 MSI 与 NSIS 里各只有一份 `pinshell-shellmenu.exe`（生成的 `main.wxs` 与 `installer.nsi` 各一行），文件名与运行时查找的名字一致。
 
 ## 9. 决策记录（2026-11-16 确认）
 
@@ -202,8 +214,10 @@
 | 卷轴行数上限 | `src/main.ts` 的 `SCROLLBACK_LINES` | 取 5000 行（约 2 MB）；`scripts/bench-scrollback.mjs` 实测稳态吞吐与上限无关（52–57 MB/s）、内存约 0.4 KB/行，数字见 `docs/bench-m0.md` |
 | 切会话 / 窗口缩放（手工回归） | `.probe/probe_switch_resize.ps1` | 侧栏行按无障碍文本定位再点（行高随 DPI 变，写死 y 会点到标题栏，结论是假的）；两个会话各留一条标记命令，切走再切回后磁盘快照里只有各自的标记（`MARK-A` 只出现在 423c、`MARK-B` 只出现在 c387），回放尾巴完整、无重影；窗口宽度 −300 px 后 Shell 里的 `$Host.UI.RawUI.WindowSize.Width` 由 172 变成 129（探针把它写进 `w_before.txt` / `w_after.txt` 核对），说明 resize 真下到了 PTY |
 | M4 文件面板（第一片） | `core-domain/src/fsview.rs`、`src-tauri/src/fsview.rs`、`src/filePanel.ts`、`src/filePanelUi.ts` | `fs_list` 只读列目录（`path` 为空时跟随会话 CWD，读盘在阻塞线程池）；排序/隐藏过滤/截断/路径归一化在 core-domain（9 个用例）；`std::fs` 填元数据（跟随链接判类型、Windows 隐藏属性）3 个用例；`session:cwd` 只在 CWD 真变更时推；面板显示格式与跟随/固定选择 13 个前端用例；折叠/展开不抢焦点，切换后终端重新 fit |
+| M4 文件面板（右键菜单） | `src-tauri/src/bin/shellmenu.rs`、`src-tauri/src/shellmenu.rs`、`src/filePanelUi.ts`、`src/filePanel.ts` | helper 独立进程走 `IContextMenu`（STA、光标定位、`TPM_RETURNCMD`）；主进程最多等 10 分钟，缺失/崩溃/超时都返回 `unavailable` 并由前端画降级菜单；`fs_open` / `fs_reveal` 走系统关联；`rowMenu` 与 `clampMenuPosition` 由 8 个前端用例覆盖；helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出（不弹菜单）；helper 是普通 `[[bin]]`，`app:build` 随 crate 一起编译并打进 MSI/NSIS（tauri-cli 2.12 自动收录 bin；再声明 `externalBin` 会把同一个文件装两遍，WiX 以 ICE30 拒绝链接）；「没有 helper / 路径写错 / 启动失败」三条降级路径由 3 个 Rust 用例覆盖，崩溃与超时仍靠手工 |
 | M4 文件面板（第二片：自动刷新） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 逐项比较 5 个用例（任一字段或顺序变了才算变化）、刷新间隔与失败退避 2 个用例（大目录 10 秒、2 的幂到 24 秒）、宽度夹取 5 个：合计 12 个前端用例。DOM 行为用假 IPC 的浏览器验证台确认：内容不变时 3 秒一次只发 `fs_list`、零 DOM 变更；内容变化时重绘 200 行且 `scrollTop` 与选中行都还在；面板收起、无会话时不发请求；大目录（`total > 1000`）周期变 10 秒；一次读盘失败后下一次等到 6 秒 |
 | M4 文件面板（第三片：`..`、左栏调宽与收起） | `src/filePanelUi.ts`、`src/sidebar.ts`、`src/sidebarUi.ts`、`src/resize.ts`、`src/styles.css` | 两侧拖动共用同一套手势与 `body.layout-dragging`，拖动中只改 CSS、松手才 `layoutChanged`；左栏 150–360px，两栏各自量对方实时宽度定上限。两栏都能收起成 26px 竖条（左栏竖排「会话」展开按钮），折叠状态与宽度一起进 `localStorage`。前端用例 14 个（夹取 7、存储解析 5、序列化 2，坏数据回默认）。浏览器验证台确认：`..` 只在有父目录时出现、单击可选中、双击发出 `path=C:\`（转「固定」）、无父目录与空目录两种情况都对；左栏 196→297 拖动中零次重排、松手一次；拖到 +900px 被夹在 360；窗口缩到 700px 后两栏各自缩到 195/324、终端留住 180；点「‹」收起后宽度 27px、列表与手柄隐藏、展开按钮出现且 `layoutChanged` 一次，点展开恢复原宽度并再 `layoutChanged` 一次；收起状态重载页面后仍在（存的是 `{"width":195,"collapsed":true}`，展开回到 196） |
+| M4 文件面板（第四片：设置绑定会话） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 「跟随 / 固定」「自动」「隐」改为**会话级**：存储形如 `{expanded, width, defaults, sessions: {id: {mode, auto, showHidden, path}}}`，切会话先回写上一个会话、再换上新会话的一套；旧版顶层全局配置迁移成 `defaults`，已有会话不被重置。前端用例 6 个（旧版迁移、两会话互不影响、跟随不保留固定路径、脏字段逐项回退、宽度坏值、空存储默认值）。假 IPC 验证台确认：s1 开「隐」+「自动」、s2 关「隐」并转「固定」后，来回切换分别恢复成 `跟随/隐开/自动开` 与 `固定/隐关/自动开`，重载页面后两套仍在，`localStorage` 里两个会话各一条记录 |
 | 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
 
 跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过）。

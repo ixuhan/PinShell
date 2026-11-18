@@ -7,6 +7,12 @@ body,
   background: #0b0e14;
 }
 
+/* 页面整体是深色，原生滚动条/表单控件也要跟着深色。
+   不声明的话 WebView2 会按浅色主题画滚动条，终端右边缘就会多出一条白色长条。 */
+html {
+  color-scheme: dark;
+}
+
 #app {
   display: flex;
   flex-direction: row;
@@ -229,12 +235,39 @@ body.layout-dragging #sess-resizer::after {
      clip-path 在合成阶段再裁一次。 */
   overflow: hidden;
   clip-path: inset(0);
-  padding: 8px 10px 6px;
   box-sizing: border-box;
 }
 
+/* 留白写在 .xterm 自己身上，不能留在 #term-host：FitAddon 量的是宿主的
+   computed 尺寸，却只减 `.xterm` 自身的 padding。padding 挂在宿主上时，
+   它会把这一圈都算成可用高度、多排出一行，最后一行落到输入条后面被裁掉，
+   看起来就是终端内容和输入框重叠。 */
 #term-host .xterm {
   height: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px 6px;
+}
+
+/* 终端自己的滚动条：WebView2 默认画成浅色轨道，在深色背景上就像贴着文件面板
+   的一条白色长条。收窄、轨道透明、滑块用低调的灰蓝，悬停再提亮一点。 */
+#term-host .xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+#term-host .xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#term-host .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #253040;
+  border: 2px solid transparent;
+  border-radius: 5px;
+  background-clip: padding-box;
+}
+
+#term-host .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #33445a;
+  background-clip: padding-box;
 }
 
 /* 输入条：常驻可见，状态点说明此刻按键归谁 */
@@ -786,4 +819,36 @@ body.layout-dragging {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 文件面板的降级右键菜单：原生 shell 菜单弹不出来（helper 缺失或崩了）时才出现。
+   用 fixed 定位，坐标已由 clampMenuPosition 夹进视口。 */
+.f-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 180px;
+  padding: 4px;
+  background: #10161f;
+  border: 1px solid #263445;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.f-menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #c7d5e4;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.f-menu-item.sel {
+  background: #1b2735;
+  color: #e6f1ff;
 }

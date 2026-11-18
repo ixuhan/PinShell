@@ -24,6 +24,7 @@ use uuid::Uuid;
 mod fsview;
 mod history;
 mod persistence;
+mod shellmenu;
 
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
 /// 标题不在这里：唯一真源是工作区里的 `SessionMeta`，见 `pty_list`。
@@ -996,6 +997,66 @@ async fn fs_list(
     Ok(FsListingPayload::from(listing))
 }
 
+/// 用默认程序打开这一项（文件 → 关联程序；目录 → 资源管理器）。
+///
+/// 打开动作统一交给系统的 shell 关联，不在本应用里维护「哪个扩展名用什么程序」。
+#[tauri::command]
+fn fs_open(path: String) -> Result<(), String> {
+    launch_shell(&path, false)
+}
+
+/// 在资源管理器中定位：打开父目录并选中这一项（右键菜单里的「在资源管理器中显示」）。
+#[tauri::command]
+fn fs_reveal(path: String) -> Result<(), String> {
+    launch_shell(&path, true)
+}
+
+/// 文件面板的原生右键菜单。helper 在独立进程里跑，返回三态：
+/// `handled` / `cancelled` / `unavailable`（后者由前端画自建菜单）。
+#[tauri::command]
+async fn fs_context_menu(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
+    if !Path::new(&path).exists() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    #[cfg(windows)]
+    let hwnd = window.hwnd().map(|handle| handle.0 as usize).unwrap_or(0);
+    #[cfg(not(windows))]
+    let _ = &window;
+    #[cfg(not(windows))]
+    let hwnd = 0usize;
+
+    // helper 会一直阻塞到用户选完，所以放阻塞线程池，别占着 IPC 线程。
+    let outcome = tauri::async_runtime::spawn_blocking(move || shellmenu::run(&path, hwnd))
+        .await
+        .map_err(|err| format!("菜单线程失败: {err}"))?;
+    Ok(outcome.as_str().to_string())
+}
+
+#[cfg(windows)]
+fn launch_shell(path: &str, reveal: bool) -> Result<(), String> {
+    let target = Path::new(path);
+    if !target.exists() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    // explorer 的退出码不可靠（成功也常返回 1），所以只关心「起没起来」。
+    let mut command = std::process::Command::new("explorer.exe");
+    if reveal {
+        // 整体一个参数：`"/select,C:\a b\x"`。外层引号由 Command 补上。
+        command.arg(format!("/select,{path}"));
+    } else {
+        command.arg(path);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("无法打开: {err}"))
+}
+
+#[cfg(not(windows))]
+fn launch_shell(_path: &str, _reveal: bool) -> Result<(), String> {
+    Err("打开文件或定位目录目前只在 Windows 上支持".into())
+}
+
 fn home_dir() -> String {
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -1264,6 +1325,9 @@ fn main() {
             pty_list,
             session_tree,
             fs_list,
+            fs_open,
+            fs_reveal,
+            fs_context_menu,
             rename_session,
             pty_resize,
             pty_close,
