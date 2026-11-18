@@ -31,39 +31,46 @@ export function matches(command: string, query: string): boolean {
   return command.toLowerCase().includes(query.toLowerCase());
 }
 
-/** ASCII 小写折叠：只认 A-Z，其余原样返回。 */
-function foldAscii(code: number): number {
-  return code >= 65 && code <= 90 ? code + 32 : code;
+/**
+ * Ghost Text 的预计算视图：`commands[i]` / `lowers[i]` 对应 `items[i]`，多行命令在
+ * 构图时就被剔掉（它们永远不参与建议）。
+ *
+ * 按数组身份缓存：缓存数组一变（切会话、追加一条）就整体重算一次，按键路径上因此
+ * 只剩「长度比较 + startsWith」，不分配、不扫换行符。5000 条重建约零点几毫秒，
+ * 且只发生在缓存替换的那一次调用上，不在连续按键里。
+ */
+interface GhostIndex {
+  commands: string[];
+  lowers: string[];
 }
 
-/**
- * `command` 是否以 `needleLower` 为前缀（后者必须已是小写），且比它更长。
- *
- * 逐字符比较、遇到差异立刻退出：按键路径上每条命令各来一次 `toLowerCase()` 会在
- * 5000 条窗口里制造 5000 个短命字符串，GC 停顿会把 p99 推过 1ms。这里常见的
- * ASCII 路径零分配；只有前缀里出现非 ASCII（中文路径等）才退回切片比较。
- */
-function startsWithLower(command: string, needleLower: string): boolean {
-  if (command.length <= needleLower.length) return false;
-  for (let i = 0; i < needleLower.length; i++) {
-    const a = command.charCodeAt(i);
-    const b = needleLower.charCodeAt(i);
-    if (a === b) continue;
-    if (a < 128 && b < 128) {
-      if (foldAscii(a) !== b) return false;
-      continue;
-    }
-    return command.slice(0, needleLower.length).toLowerCase() === needleLower;
+const ghostIndexes = new WeakMap<readonly HistoryItem[], GhostIndex>();
+
+function ghostIndex(items: readonly HistoryItem[]): GhostIndex {
+  const cached = ghostIndexes.get(items);
+  if (cached) return cached;
+  const commands: string[] = [];
+  const lowers: string[] = [];
+  for (const item of items) {
+    const command = item.command;
+    if (command.includes("\n") || command.includes("\r")) continue;
+    commands.push(command);
+    lowers.push(command.toLowerCase());
   }
-  return true;
+  const index: GhostIndex = { commands, lowers };
+  ghostIndexes.set(items, index);
+  return index;
 }
 
 /**
  * Ghost Text：输入非空白、单行且光标在行尾时，取最近一条以输入为前缀的命令。
- * `recent` 必须按「最新在前」传入；多行命令不参与建议；与输入完全相同不算建议。
+ *
+ * `items` 按缓存顺序传入（`id` 升序，最旧在前），内部从尾巴往前扫，第一条命中的
+ * 就是最近用过的。调用方不要为了「最新在前」再复制一遍数组。多行命令不参与建议；
+ * 与输入等长（含完全相同）不算建议。
  */
 export function ghostFor(
-  recent: HistoryItem[],
+  items: readonly HistoryItem[],
   input: string,
   atLineEnd: boolean
 ): string | null {
@@ -71,12 +78,10 @@ export function ghostFor(
   if (!input.trim()) return null;
   if (input.includes("\n") || input.includes("\r")) return null;
   const needle = input.toLowerCase();
-  for (const item of recent) {
-    const command = item.command;
-    if (command.length <= input.length) continue; // 等长/更短都不可能是建议
-    if (command === input) continue;
-    if (command.includes("\n") || command.includes("\r")) continue;
-    if (startsWithLower(command, needle)) return command;
+  const { commands, lowers } = ghostIndex(items);
+  for (let i = commands.length - 1; i >= 0; i--) {
+    if (commands[i].length <= input.length) continue;
+    if (lowers[i].startsWith(needle)) return commands[i];
   }
   return null;
 }

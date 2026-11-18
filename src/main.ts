@@ -628,10 +628,6 @@ let currentGhost = "";
 /// 输入法正在组合（拼音选字）：这段时间既不画建议，也不响应 → 与 Enter
 let composing = false;
 
-function newestFirstHistory(): HistoryItem[] {
-  return cache.items.slice().reverse();
-}
-
 function updateGhost() {
   // 组合期间输入框里是拼音而不是命令：留着上一条建议会看着像已经匹配了
   if (composing) {
@@ -642,7 +638,7 @@ function updateGhost() {
   const value = ib.value;
   const atEnd = ib.selectionStart === value.length && ib.selectionEnd === value.length;
   const focused = document.activeElement === ib && !ib.disabled && histOverlay.hidden;
-  const suggestion = focused && atEnd ? ghostFor(newestFirstHistory(), value, true) : null;
+  const suggestion = focused && atEnd ? ghostFor(cache.items, value, true) : null;
   if (!suggestion) {
     currentGhost = "";
     ghostEl.textContent = "";

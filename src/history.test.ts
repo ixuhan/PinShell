@@ -17,13 +17,13 @@ function item(id: number, command: string, used_ms = id): HistoryItem {
   return { id, command, used_ms, use_count: 1 };
 }
 
-/** 调用方约定：最新在前。 */
-function newestFirst(items: HistoryItem[]): HistoryItem[] {
-  return items.slice().sort((a, b) => b.id - a.id);
+/** 与缓存同序：`id` 升序（最旧在前），`ghostFor` 自己从尾巴往前扫。 */
+function oldestFirst(items: HistoryItem[]): HistoryItem[] {
+  return items.slice().sort((a, b) => a.id - b.id);
 }
 
 describe("Ghost Text 前缀匹配（L0-07）", () => {
-  const history = newestFirst([
+  const history = oldestFirst([
     item(1, "git status"),
     item(2, "git stash"),
     item(3, "git commit -m 'wip'"),
@@ -46,7 +46,7 @@ describe("Ghost Text 前缀匹配（L0-07）", () => {
 
   it("与输入完全相同不算建议，多行条目不参与", () => {
     expect(ghostFor(history, "git stash", true)).toBeNull();
-    const withMultiline = newestFirst([item(9, "echo one\necho two"), item(8, "echo hi")]);
+    const withMultiline = oldestFirst([item(9, "echo one\necho two"), item(8, "echo hi")]);
     expect(ghostFor(withMultiline, "echo", true)).toBe("echo hi");
   });
 
@@ -54,7 +54,7 @@ describe("Ghost Text 前缀匹配（L0-07）", () => {
     const big: HistoryItem[] = Array.from({ length: 5000 }, (_, index) =>
       item(index + 1, `git commit -m "message ${index}"`, 1_700_000_000_000 + index)
     );
-    const recent = newestFirst(big);
+    const recent = oldestFirst(big);
     const queries = ["git ", "git c", "git co", "git com", "make", "npm", "docker", "ps", "git st"];
     // 预热，排除 JIT 首轮
     for (let i = 0; i < 100; i++) ghostFor(recent, queries[i % queries.length], true);
