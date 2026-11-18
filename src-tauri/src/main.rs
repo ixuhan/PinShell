@@ -6,33 +6,38 @@ use core_domain::ownership::{
     decide, is_submit, Confidence, Override, Owner, PromptTracker, TerminalState, TransportKind,
 };
 use core_domain::replay::ReplayBuffer;
-use core_domain::resize::SentSize;
+use core_domain::serial::{
+    build_payload, conflicting_session, same_port, DataBits, FlowControl, LineEnding, Parity,
+    SendMode, SerialConfig, StopBits,
+};
 use core_domain::utf8_stream::Utf8Stream;
 use core_domain::workspace::{SessionMeta, Workspace};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use transport::{SerialTransport, Transport, TransportStatus};
 use uuid::Uuid;
 
 mod fsview;
 mod history;
 mod persistence;
 mod shellmenu;
+mod transport;
 
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
 /// 标题不在这里：唯一真源是工作区里的 `SessionMeta`，见 `pty_list`。
 struct Session {
     created_ms: u64,
-    writer: Mutex<Box<dyn Write + Send>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// 通道：终端（ConPTY）或串口。会话层不再直接认识管道或 COM 口。
+    transport: Arc<dyn Transport>,
     input: Mutex<InputState>,
     /// 最近输出的副本：前端晚附着、切走或页面重载后从这里补上一段
     replay: Mutex<ReplayBuffer>,
@@ -41,9 +46,12 @@ struct Session {
     /// 暂停接收输出：读线程照常解析、照常记回放，只是不再发 `pty:out`。
     /// 继续时前端按回放整屏重画，所以暂停期间的输出不丢、也不会与 Shell 的屏幕错位。
     paused: AtomicBool,
-    /// 最近一次生效的 PTY 尺寸。相同尺寸不再下发：ConPTY 每次 resize 都会整屏重绘，
-    /// 会把刚清掉的屏幕又画回来（见 `core_domain::resize`）。
-    size: Mutex<SentSize>,
+    /// 串口专用：端口已主动释放（暂停 = 真关句柄，见 M5）。终端恒为 false。
+    released: AtomicBool,
+    /// 读线程的代次。释放端口、重连、关闭时 +1，让迟到的旧读线程安静退出。
+    reader_gen: AtomicU64,
+    /// 串口读线程的句柄：释放端口要先 join，否则克隆句柄还占着 COM 口。
+    reader_join: Mutex<Option<JoinHandle<()>>>,
     /// 输出合流：读线程只往里追加，发送线程按帧把攒下的块发一次 `pty:out`。
     /// 刷屏时读循环一秒能读到上千块，逐块发事件会把主线程和前端压满（见 `core_domain::coalesce`）。
     outbox: Arc<OutMailbox>,
@@ -147,6 +155,27 @@ struct SessionInfo {
     title: String,
     state: &'static str,
     created_ms: u64,
+    /// 能力位决定界面隐藏哪些入口（串口没有补全、命令检索与备用屏）
+    caps: CapsPayload,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct CapsPayload {
+    completion: bool,
+    history: bool,
+    timestamp: bool,
+    alt_screen: bool,
+}
+
+impl From<core_domain::serial::Capabilities> for CapsPayload {
+    fn from(caps: core_domain::serial::Capabilities) -> Self {
+        Self {
+            completion: caps.completion,
+            history: caps.history,
+            timestamp: caps.timestamp,
+            alt_screen: caps.alt_screen,
+        }
+    }
 }
 
 /// 会话树的一行：冷会话也在里面。热/冷由前端对照 `pty_list` 得出，
@@ -158,6 +187,111 @@ struct TreeSession {
     transport: &'static str,
     shell: Option<String>,
     cwd: Option<String>,
+    /// 串口会话才有：冷会话重新拉起时按这份配置重连，界面也用它显示 8N1 摘要。
+    serial: Option<SerialConfigPayload>,
+}
+
+/// 串口配置的 IPC 形态。core-domain 里的枚举在这里翻成稳定字符串，
+/// 前端只负责展示与回传，不复制任何默认值或校验规则。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct SerialConfigPayload {
+    port: String,
+    baud: u32,
+    data_bits: u8,
+    parity: String,
+    stop_bits: String,
+    flow: String,
+    dtr: bool,
+    rts: bool,
+    line_ending: String,
+    send_mode: String,
+}
+
+impl From<&SerialConfig> for SerialConfigPayload {
+    fn from(config: &SerialConfig) -> Self {
+        Self {
+            port: config.port.trim().to_string(),
+            baud: config.baud,
+            data_bits: config.data_bits.value(),
+            parity: config.parity.as_str().to_string(),
+            stop_bits: config.stop_bits.as_str().to_string(),
+            flow: config.flow.as_str().to_string(),
+            dtr: config.dtr,
+            rts: config.rts,
+            line_ending: config.line_ending.as_str().to_string(),
+            send_mode: config.send_mode.as_str().to_string(),
+        }
+    }
+}
+
+impl SerialConfigPayload {
+    fn into_config(self) -> Result<SerialConfig, String> {
+        let data_bits = DataBits::from_value(self.data_bits)
+            .ok_or_else(|| format!("数据位只能是 5–8，收到 {}", self.data_bits))?;
+        let parity = Parity::from_str(&self.parity)
+            .ok_or_else(|| format!("未知校验方式 {}", self.parity))?;
+        let stop_bits = StopBits::from_str(&self.stop_bits)
+            .ok_or_else(|| format!("未知停止位 {}", self.stop_bits))?;
+        let flow =
+            FlowControl::from_str(&self.flow).ok_or_else(|| format!("未知流控 {}", self.flow))?;
+        let line_ending = LineEnding::from_str(&self.line_ending)
+            .ok_or_else(|| format!("未知行结束符 {}", self.line_ending))?;
+        let send_mode = SendMode::from_str(&self.send_mode)
+            .ok_or_else(|| format!("未知发送方式 {}", self.send_mode))?;
+        let config = SerialConfig {
+            port: self.port.trim().to_string(),
+            baud: self.baud,
+            data_bits,
+            parity,
+            stop_bits,
+            flow,
+            dtr: self.dtr,
+            rts: self.rts,
+            line_ending,
+            send_mode,
+        };
+        config.validate().map_err(|err| err.to_string())?;
+        Ok(config)
+    }
+}
+
+/// 一个串口可选项。字段与 `transport::PortInfo` 一一对应。
+#[derive(Serialize)]
+struct SerialPortPayload {
+    port: String,
+    kind: &'static str,
+    vid: Option<u16>,
+    pid: Option<u16>,
+    manufacturer: Option<String>,
+    product: Option<String>,
+    serial_number: Option<String>,
+}
+
+impl From<transport::PortInfo> for SerialPortPayload {
+    fn from(info: transport::PortInfo) -> Self {
+        Self {
+            port: info.port,
+            kind: info.kind,
+            vid: info.vid,
+            pid: info.pid,
+            manufacturer: info.manufacturer,
+            product: info.product,
+            serial_number: info.serial_number,
+        }
+    }
+}
+
+/// 串口当前状态。`status` 三态与 `TransportStatus` 同义；`paused` 是用户主动断开。
+/// `summary` 是 `115200 8N1` 这类一句话摘要，规则在 core-domain，前端只显示。
+#[derive(Clone, Serialize)]
+struct SerialStatusPayload {
+    id: String,
+    status: &'static str,
+    error: Option<String>,
+    log: Option<String>,
+    paused: bool,
+    summary: String,
+    config: SerialConfigPayload,
 }
 
 /// 文件面板列目录的一行（M4）。顺序由后端定：目录在前，名字大小写不敏感。
@@ -319,9 +453,9 @@ fn persist_workspace(state: &AppState) {
 }
 
 /// 当前判定。唯一的规则来源是 `core_domain::ownership::decide`。
-fn ownership_of(id: &str, input: &InputState) -> OwnershipPayload {
+fn ownership_of(id: &str, kind: TransportKind, input: &InputState) -> OwnershipPayload {
     let state = input.tracker.view();
-    let decision = decide(TransportKind::Terminal, state, input.ovr);
+    let decision = decide(kind, state, input.ovr);
     OwnershipPayload {
         id: id.to_string(),
         owner: owner_name(decision.owner),
@@ -333,9 +467,10 @@ fn ownership_of(id: &str, input: &InputState) -> OwnershipPayload {
 
 /// 只在判定变化时推送：按键路径不允许有逐键 IPC。
 fn push_ownership(app: &AppHandle, session: &Session, id: &str) {
+    let kind = session.transport.kind();
     let payload = {
         let mut input = session.input.lock();
-        let current = ownership_of(id, &input);
+        let current = ownership_of(id, kind, &input);
         if input.last_sent.as_ref() == Some(&current) {
             return;
         }
@@ -348,7 +483,11 @@ fn push_ownership(app: &AppHandle, session: &Session, id: &str) {
         &payload.id[..payload.id.len().min(8)],
         payload.state,
         payload.owner,
-        if payload.confidence == "guess" { " (guess)" } else { "" }
+        if payload.confidence == "guess" {
+            " (guess)"
+        } else {
+            ""
+        }
     );
     let _ = app.emit("pty:ownership", payload);
 }
@@ -520,10 +659,6 @@ fn spawn_session(
         .map_err(|e| format!("spawn {shell}: {e}"))?;
     drop(pair.slave);
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("clone reader: {e}"))?;
     let writer = pair
         .master
         .take_writer()
@@ -535,39 +670,18 @@ fn spawn_session(
         .and_then(|s| s.to_str())
         .unwrap_or(shell.as_str())
         .to_string();
-    let outbox = Arc::new(OutMailbox {
-        pending: Mutex::new(Coalescer::new()),
-        running: AtomicBool::new(true),
-    });
-    let session = Arc::new(Session {
-        created_ms: now_ms(),
-        writer: Mutex::new(writer),
-        master: Mutex::new(pair.master),
-        child: Mutex::new(child),
-        input: Mutex::new(InputState {
-            tracker: PromptTracker::new(),
-            ovr: Override::None,
-            last_sent: None,
-            last_output_ms: now_ms(),
-            at_line_start: true,
-        }),
-        replay: Mutex::new(ReplayBuffer::new(REPLAY_CAP_BYTES)),
-        dirty: AtomicBool::new(false),
-        paused: AtomicBool::new(false),
-        size: Mutex::new(SentSize::seeded(cols.max(1), rows.max(1))),
-        outbox: outbox.clone(),
-    });
+    let transport: Arc<dyn Transport> = Arc::new(transport::PtyTransport::new(
+        writer,
+        pair.master,
+        child,
+        cols,
+        rows,
+    ));
+    let session = new_session(transport);
 
     // 冷会话重开：把上次的屏幕接在新输出前面。必须在读线程启动前做，
     // 否则新输出会先占序号、快照反而画在后面。
-    if let Some(dir) = state.data_dir.as_deref() {
-        if let Some(previous) = persistence::load_scrollback(dir, &id) {
-            let seeded = core_domain::scrollback::compose(&previous);
-            if !seeded.is_empty() {
-                session.replay.lock().push(&seeded);
-            }
-        }
-    }
+    seed_scrollback(&state, &session, &id);
 
     state.sessions.lock().insert(id.clone(), session.clone());
 
@@ -583,6 +697,7 @@ fn spawn_session(
                     meta.cwd = cwd.clone();
                 }
                 meta.shell = Some(shell.clone());
+                meta.serial = None;
                 meta.hot = true;
             }
             None => {
@@ -595,13 +710,61 @@ fn spawn_session(
     }
     persist_workspace(&state);
 
-    // 输出发送线程：每 OUT_COALESCE_MS 把合流缓冲攒下的块发一次 `pty:out`。
-    // 暂停期间直接丢掉攒下的块（内容在回放缓冲里，继续时整屏重画），
-    // 否则长时间暂停会让缓冲一直长。
+    start_pumps(&app, &session, &id);
+    start_reader(app.clone(), session.clone(), id.clone());
+    push_ownership(&app, &session, &id);
+    Ok(id)
+}
+
+/// 装配一个会话运行时。终端与串口共用同一份状态：回放、输入判定、输出合流。
+fn new_session(transport: Arc<dyn Transport>) -> Arc<Session> {
+    let outbox = Arc::new(OutMailbox {
+        pending: Mutex::new(Coalescer::new()),
+        running: AtomicBool::new(true),
+    });
+    Arc::new(Session {
+        created_ms: now_ms(),
+        transport,
+        input: Mutex::new(InputState {
+            tracker: PromptTracker::new(),
+            ovr: Override::None,
+            last_sent: None,
+            last_output_ms: now_ms(),
+            at_line_start: true,
+        }),
+        replay: Mutex::new(ReplayBuffer::new(REPLAY_CAP_BYTES)),
+        dirty: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
+        released: AtomicBool::new(false),
+        reader_gen: AtomicU64::new(0),
+        reader_join: Mutex::new(None),
+        outbox,
+    })
+}
+
+/// 冷会话重开：把上次的屏幕接在新输出前面（见 `core_domain::scrollback`）。
+fn seed_scrollback(state: &AppState, session: &Session, id: &str) {
+    let Some(dir) = state.data_dir.as_deref() else {
+        return;
+    };
+    if let Some(previous) = persistence::load_scrollback(dir, id) {
+        let seeded = core_domain::scrollback::compose(&previous);
+        if !seeded.is_empty() {
+            session.replay.lock().push(&seeded);
+        }
+    }
+}
+
+/// 每个会话两条后台线程：
+/// 1. 输出发送线程：每 `OUT_COALESCE_MS` 把合流缓冲攒下的块发一次 `pty:out`；
+/// 2. 滴答线程：静默猜测（只对终端有意义）与空闲落盘。
+///
+/// 两条线程都活在 `Arc<Session>` 上，串口「断开 → 重连」不需要重建它们。
+fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
     {
         let app_for_out = app.clone();
         let session_for_out = session.clone();
-        let out_id = id.clone();
+        let out_id = id.to_string();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(OUT_COALESCE_MS));
             let running = session_for_out.outbox.running.load(Ordering::Relaxed);
@@ -623,105 +786,9 @@ fn spawn_session(
         });
     }
 
-    // 每个会话一个读线程（ConPTY 要求读写分离，否则死锁）
-    let app_for_read = app.clone();
-    let session_for_read = session.clone();
-    let emit_id = id.clone();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        let mut stream = Utf8Stream::new();
-        let mut parser = OscParser::new();
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let events = parser.feed(&buf[..n]);
-                    {
-                        let mut input = session_for_read.input.lock();
-                        input.last_output_ms = now_ms();
-                        input.at_line_start = matches!(buf[..n].last(), Some(b'\n') | Some(b'\r'));
-                        for ev in &events {
-                            input.tracker.on_event(ev);
-                        }
-                    }
-                    // 先推进标记，再发字节：状态变化不晚于屏幕变化
-                    if !events.is_empty() {
-                        for ev in events {
-                            if let Some(marker) = marker_of(ev) {
-                                // CWD 跟随：记住最后一次上报，冷会话重开时用它做启动目录
-                                if let MarkerPayload::Cwd { path } = &marker {
-                                    note_cwd(&app_for_read, &emit_id, path);
-                                }
-                                let _ = app_for_read.emit(
-                                    "pty:marker",
-                                    MarkerEvent {
-                                        id: emit_id.clone(),
-                                        marker,
-                                    },
-                                );
-                            }
-                        }
-                        push_ownership(&app_for_read, &session_for_read, &emit_id);
-                    }
-                    let text = stream.push(&buf[..n]);
-                    if !text.is_empty() {
-                        // 先记回放再发事件：凡是被前端看到过的块，一定也能被回放到
-                        let seq = session_for_read
-                            .replay
-                            .lock()
-                            .push(&text)
-                            .unwrap_or_default();
-                        session_for_read.dirty.store(true, Ordering::Relaxed);
-                        // 暂停只掐事件，不掐回放：继续时前端按回放整屏重画，暂停期间的内容
-                        // 还在（受 REPLAY_CAP_BYTES 限制，超出部分按整块丢）。这样既省掉
-                        // 刷屏时的 IPC，又不会让暂停期间的终端查询（DSR 之类）永远丢答。
-                        //
-                        // 事件不在这里直接发：先攒进合流缓冲，由发送线程按帧发出去。
-                        // 刷屏时这里一秒会跑上千次，逐块发 IPC 的代价全落在主线程与前端。
-                        session_for_read.outbox.pending.lock().push(&text, seq);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        // 读循环结束：先停发送线程，再把最后一块发出去，最后才发退出事件。
-        // 顺序反了会让屏幕上的最后一段内容落在「[进程已退出]」之后。
-        session_for_read.outbox.running.store(false, Ordering::Relaxed);
-        if let Some((data, seq)) = session_for_read.outbox.pending.lock().take() {
-            if !session_for_read.paused.load(Ordering::Relaxed) {
-                let _ = app_for_read.emit(
-                    "pty:out",
-                    OutPayload {
-                        id: emit_id.clone(),
-                        seq,
-                        data,
-                    },
-                );
-            }
-        }
-        // 通道结束（进程退出/被关）：先落卷轴快照、摘掉运行时、标记冷会话，再通知前端
-        {
-            let state = app_for_read.state::<AppState>();
-            // 用户主动关闭的会话，节点已经删掉，不再补一份快照回来（I2）。
-            // 单独取值：不能让 workspace 的锁活在条件里，下面还要再取一次。
-            let still_known = state.workspace.lock().session(&emit_id).is_some();
-            if still_known {
-                save_session_scrollback(&state, &session_for_read, &emit_id);
-            }
-            state.sessions.lock().remove(&emit_id);
-            {
-                let mut workspace = state.workspace.lock();
-                let _ = workspace.set_hot(&emit_id, false);
-            }
-            persist_workspace(&state);
-        }
-        let _ = app_for_read.emit("pty:exit", ExitPayload { id: emit_id });
-    });
-
-    // 后台滴答：静默猜测 + 空闲落盘（崩溃退出最多丢 IDLE_FLUSH_MS 毫秒的屏幕）
-    let weak: Weak<Session> = Arc::downgrade(&session);
+    let weak: Weak<Session> = Arc::downgrade(session);
     let app_for_tick = app.clone();
-    let tick_id = id.clone();
+    let tick_id = id.to_string();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(300));
         let Some(session) = weak.upgrade() else { break };
@@ -744,9 +811,402 @@ fn spawn_session(
             }
         }
     });
+}
 
+/// 起一个读线程。终端只会起一次；串口每次「连接」都起一个新的，
+/// 互斥靠 `reader_gen`：旧线程醒来发现代次变了就安静退出，不做收尾。
+fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
+    let generation = session.reader_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let kind = session.transport.kind();
+    let thread_session = session.clone();
+    let handle = std::thread::spawn(move || {
+        let mut reader = match thread_session.transport.take_reader() {
+            Ok(reader) => reader,
+            Err(err) => {
+                thread_session.transport.note_failure(&err);
+                emit_serial_status(&app, &thread_session, &id);
+                return;
+            }
+        };
+        let mut buf = [0u8; 8192];
+        let mut stream = Utf8Stream::new();
+        let mut parser = OscParser::new();
+        let mut read_error: Option<String> = None;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if kind == TransportKind::Serial {
+                        // 串口没有 Shell，也就没有 OSC 标记：字节直接当屏幕内容，
+                        // 同时按原始字节写日志（用户看到的是解码后的文本，日志保留原样）。
+                        thread_session.transport.log_rx(&buf[..n]);
+                        // 串口也要记「最近一次输出」：空闲落盘靠它判断「刷屏结束没有」，
+                        // 不更新的话持续输出时每 300ms 就会写一次卷轴快照。
+                        thread_session.input.lock().last_output_ms = now_ms();
+                        let text = stream.push(&buf[..n]);
+                        if !text.is_empty() {
+                            let seq = thread_session.replay.lock().push(&text).unwrap_or_default();
+                            thread_session.dirty.store(true, Ordering::Relaxed);
+                            thread_session.outbox.pending.lock().push(&text, seq);
+                        }
+                        continue;
+                    }
+
+                    let events = parser.feed(&buf[..n]);
+                    {
+                        let mut input = thread_session.input.lock();
+                        input.last_output_ms = now_ms();
+                        input.at_line_start = matches!(buf[..n].last(), Some(b'\n') | Some(b'\r'));
+                        for ev in &events {
+                            input.tracker.on_event(ev);
+                        }
+                    }
+                    // 先推进标记，再发字节：状态变化不晚于屏幕变化
+                    if !events.is_empty() {
+                        for ev in events {
+                            if let Some(marker) = marker_of(ev) {
+                                // CWD 跟随：记住最后一次上报，冷会话重开时用它做启动目录
+                                if let MarkerPayload::Cwd { path } = &marker {
+                                    note_cwd(&app, &id, path);
+                                }
+                                let _ = app.emit(
+                                    "pty:marker",
+                                    MarkerEvent {
+                                        id: id.clone(),
+                                        marker,
+                                    },
+                                );
+                            }
+                        }
+                        push_ownership(&app, &thread_session, &id);
+                    }
+                    let text = stream.push(&buf[..n]);
+                    if !text.is_empty() {
+                        // 先记回放再发事件：凡是被前端看到过的块，一定也能被回放到
+                        let seq = thread_session.replay.lock().push(&text).unwrap_or_default();
+                        thread_session.dirty.store(true, Ordering::Relaxed);
+                        // 暂停只掐事件，不掐回放：继续时前端按回放整屏重画，暂停期间的内容
+                        // 还在（受 REPLAY_CAP_BYTES 限制，超出部分按整块丢）。这样既省掉
+                        // 刷屏时的 IPC，又不会让暂停期间的终端查询（DSR 之类）永远丢答。
+                        //
+                        // 事件不在这里直接发：先攒进合流缓冲，由发送线程按帧发出去。
+                        // 刷屏时这里一秒会跑上千次，逐块发 IPC 的代价全落在主线程与前端。
+                        thread_session.outbox.pending.lock().push(&text, seq);
+                    }
+                }
+                Err(err) => {
+                    read_error = Some(format!("读串口失败：{err}"));
+                    break;
+                }
+            }
+        }
+
+        // 旧线程（被断开、重连或关闭顶掉）不负责收尾
+        if thread_session.reader_gen.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        // 串口断开时读端按设计结束：会话仍是热的，等用户「连接」
+        if thread_session.transport.status() == TransportStatus::Released {
+            return;
+        }
+
+        if kind == TransportKind::Serial {
+            // 设备拔掉/读失败：会话保持热的，状态标为失败，让用户决定重连还是关闭
+            let message = read_error.unwrap_or_else(|| "串口连接已结束".to_string());
+            thread_session.transport.note_failure(&message);
+            emit_serial_status(&app, &thread_session, &id);
+            return;
+        }
+
+        // 终端：读循环结束 = 进程退出/被关。先停发送线程，再把最后一块发出去，
+        // 最后才发退出事件。顺序反了会让屏幕上的最后一段内容落在「[进程已退出]」之后。
+        thread_session
+            .outbox
+            .running
+            .store(false, Ordering::Relaxed);
+        if let Some((data, seq)) = thread_session.outbox.pending.lock().take() {
+            if !thread_session.paused.load(Ordering::Relaxed) {
+                let _ = app.emit(
+                    "pty:out",
+                    OutPayload {
+                        id: id.clone(),
+                        seq,
+                        data,
+                    },
+                );
+            }
+        }
+        // 通道结束（进程退出/被关）：先落卷轴快照、摘掉运行时、标记冷会话，再通知前端
+        {
+            let state = app.state::<AppState>();
+            // 用户主动关闭的会话，节点已经删掉，不再补一份快照回来（I2）。
+            // 单独取值：不能让 workspace 的锁活在条件里，下面还要再取一次。
+            let still_known = state.workspace.lock().session(&id).is_some();
+            if still_known {
+                save_session_scrollback(&state, &thread_session, &id);
+            }
+            state.sessions.lock().remove(&id);
+            {
+                let mut workspace = state.workspace.lock();
+                let _ = workspace.set_hot(&id, false);
+            }
+            persist_workspace(&state);
+        }
+        let _ = app.emit("pty:exit", ExitPayload { id });
+    });
+
+    // 只有串口需要 join：释放端口前必须等克隆句柄也关掉，否则 COM 口仍被占着
+    if kind == TransportKind::Serial {
+        *session.reader_join.lock() = Some(handle);
+    }
+}
+
+fn join_reader(session: &Session) {
+    let handle = session.reader_join.lock().take();
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+}
+
+fn status_name(status: TransportStatus) -> &'static str {
+    match status {
+        TransportStatus::Open => "open",
+        TransportStatus::Released => "released",
+        TransportStatus::Failed => "failed",
+    }
+}
+
+fn serial_status_of(id: &str, session: &Session) -> SerialStatusPayload {
+    let config = session
+        .transport
+        .serial_config()
+        .unwrap_or_else(|| SerialConfig::new(""));
+    SerialStatusPayload {
+        id: id.to_string(),
+        status: status_name(session.transport.status()),
+        error: session.transport.last_error(),
+        log: session
+            .transport
+            .log_path()
+            .map(|path| path.display().to_string()),
+        paused: session.released.load(Ordering::Relaxed),
+        summary: config.summary(),
+        config: (&config).into(),
+    }
+}
+
+fn emit_serial_status(app: &AppHandle, session: &Session, id: &str) {
+    if session.transport.kind() != TransportKind::Serial {
+        return;
+    }
+    let _ = app.emit("serial:status", serial_status_of(id, session));
+}
+
+/// I4：同一个串口不允许两个热会话。暂停不改变「热」——端口让出去是给别的程序用的，
+/// 不是给本应用的第二个会话用的。判定规则只有一处：`core_domain::serial::conflicting_session`。
+fn port_conflict(state: &AppState, port: &str, except: &str) -> Option<String> {
+    let sessions = state.sessions.lock();
+    let ports: Vec<(String, String)> = sessions
+        .iter()
+        .filter_map(|(id, session)| session.transport.port_key().map(|key| (id.clone(), key)))
+        .collect();
+    let pairs: Vec<(&str, &str)> = ports
+        .iter()
+        .map(|(id, key)| (id.as_str(), key.as_str()))
+        .collect();
+    conflicting_session(pairs, port, except).map(str::to_string)
+}
+
+/// 错误里点名的会话 id：取前 8 个字符。按字符截，不按字节——
+/// 一旦有人用非 ASCII 的 id，按字节切会切在字符中间直接 panic。
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// 打开一个串口会话。`session_id` 存在时表示冷会话重新拉起：端口配置以工作区为准，
+/// 传进来的 `config` 只在新建会话时使用（前端仍会带上，方便两边显示一致）。
+#[tauri::command]
+fn spawn_serial_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    config: SerialConfigPayload,
+    session_id: Option<String>,
+) -> Result<String, String> {
+    if let Some(id) = session_id.as_deref() {
+        if state.sessions.lock().contains_key(id) {
+            return Err(format!("session {id} is already live"));
+        }
+    }
+
+    let id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    // 冷会话重新拉起按工作区里记住的配置（端口可能被用户改过），新建才用请求里的
+    let saved = state
+        .workspace
+        .lock()
+        .session(&id)
+        .and_then(|meta| meta.serial.clone());
+    let config = match saved {
+        Some(saved) => saved,
+        None => config.into_config()?,
+    };
+    if let Some(other) = port_conflict(&state, &config.port, &id) {
+        return Err(format!(
+            "{} 已被另一个会话占用（{}）：同一串口不允许两个热会话",
+            config.port.trim(),
+            short_id(&other)
+        ));
+    }
+
+    let transport: Arc<dyn Transport> = if transport::fake_serial_enabled()
+        && same_port(&config.port, transport::fake::FAKE_PORT)
+    {
+        // 开发/演示用：内存回环，完全不碰系统端口
+        let (transport, _peer) = transport::fake::MemoryTransport::loopback(config.clone());
+        Arc::new(transport)
+    } else {
+        Arc::new(SerialTransport::open(
+            config.clone(),
+            &id,
+            state.data_dir.as_deref(),
+        )?)
+    };
+    let title = config.default_title();
+    let session = new_session(transport);
+    seed_scrollback(&state, &session, &id);
+    state.sessions.lock().insert(id.clone(), session.clone());
+
+    {
+        let mut workspace = state.workspace.lock();
+        match workspace.session_mut(&id) {
+            Some(meta) => {
+                meta.transport = TransportKind::Serial;
+                meta.shell = None;
+                meta.serial = Some(config.clone());
+                meta.cwd = None;
+                meta.hot = true;
+            }
+            None => {
+                let mut meta = SessionMeta::serial(id.clone(), title, config.clone());
+                meta.hot = true;
+                let _ = workspace.add_session(meta);
+            }
+        }
+    }
+    persist_workspace(&state);
+
+    start_pumps(&app, &session, &id);
+    start_reader(app.clone(), session.clone(), id.clone());
     push_ownership(&app, &session, &id);
+    emit_serial_status(&app, &session, &id);
     Ok(id)
+}
+
+/// 端口列表。枚举会碰系统设备，放到阻塞线程池，别占着 IPC 线程。
+#[tauri::command]
+async fn serial_ports() -> Vec<SerialPortPayload> {
+    match tauri::async_runtime::spawn_blocking(transport::available_ports).await {
+        Ok(list) => list.into_iter().map(SerialPortPayload::from).collect(),
+        Err(err) => {
+            eprintln!("[serial] 枚举端口失败: {err}");
+            Vec::new()
+        }
+    }
+}
+
+/// 串口会话的当前状态（状态点、错误、日志路径、配置摘要）。
+#[tauri::command]
+fn serial_status(state: State<'_, AppState>, id: String) -> Result<SerialStatusPayload, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    Ok(serial_status_of(&id, &session))
+}
+
+/// 断开串口：真正关闭句柄，让别的程序也能用这个口。会话保持热的，回放与历史都不动。
+fn disconnect_serial(app: &AppHandle, id: &str, session: &Arc<Session>) -> Result<(), String> {
+    if session.released.swap(true, Ordering::SeqCst) {
+        return Ok(()); // 已经断开
+    }
+    // 先让旧读线程的收尾作废，再关句柄；join 保证克隆句柄也关掉了
+    session.reader_gen.fetch_add(1, Ordering::SeqCst);
+    let result = session.transport.release();
+    join_reader(session);
+    session.outbox.pending.lock().clear();
+    emit_serial_status(app, session, id);
+    result
+}
+
+/// 重新连接串口：按工作区里记住的配置重开端口，并起一个新的读线程。
+fn connect_serial(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+    session: &Arc<Session>,
+) -> Result<(), String> {
+    let config = session
+        .transport
+        .serial_config()
+        .ok_or_else(|| "串口配置缺失".to_string())?;
+    if let Some(other) = port_conflict(state, &config.port, id) {
+        return Err(format!(
+            "{} 已被另一个会话占用（{}）",
+            config.port.trim(),
+            short_id(&other)
+        ));
+    }
+    // 已经好好连着：什么都没变，别为一个空动作把读线程重启一遍
+    let released = session.released.load(Ordering::SeqCst);
+    if !released && session.transport.status() == TransportStatus::Open {
+        return Ok(());
+    }
+    // 走到这里有两种情况：用户主动断开（Released），或读写出错（Failed）。
+    // 两种情况都要先把旧句柄与旧读线程收干净，再真开一次端口。
+    session.reader_gen.fetch_add(1, Ordering::SeqCst);
+    if session.transport.status() != TransportStatus::Released {
+        let _ = session.transport.release();
+    }
+    join_reader(session);
+    session.outbox.pending.lock().clear();
+    if let Err(err) = session.transport.reopen() {
+        session.released.store(true, Ordering::SeqCst);
+        emit_serial_status(app, session, id);
+        return Err(err);
+    }
+    session.released.store(false, Ordering::SeqCst);
+    start_reader(app.clone(), session.clone(), id.to_string());
+    emit_serial_status(app, session, id);
+    Ok(())
+}
+
+#[tauri::command]
+fn serial_disconnect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    if session.transport.kind() != TransportKind::Serial {
+        return Err("不是串口会话".into());
+    }
+    disconnect_serial(&app, &id, &session)
+}
+
+#[tauri::command]
+fn serial_connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+    if session.transport.kind() != TransportKind::Serial {
+        return Err("不是串口会话".into());
+    }
+    connect_serial(&app, &state, &id, &session)
 }
 
 /// 把会话当前的可见内容落成卷轴快照。只在数据目录可用、且回放缓冲里确实有内容时才写。
@@ -804,21 +1264,16 @@ fn write_session(
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
 
-    // 提交意图先于字节生效：回车一按就停止接管，比等标记回来更保守
-    if is_submit(data) {
+    // 提交意图先于字节生效：回车一按就停止接管，比等标记回来更保守。
+    // 串口没有提示符状态，判定恒归输入条，不需要推进。
+    if session.transport.kind() == TransportKind::Terminal && is_submit(data) {
         session.input.lock().tracker.on_submit();
         push_ownership(app, &session, id);
     }
 
-    {
-        let mut writer = session.writer.lock();
-        writer
-            .write_all(data.as_bytes())
-            .and_then(|_| writer.flush())
-            .map_err(|e| format!("write: {e}"))?;
-    }
+    session.transport.write(data.as_bytes())?;
 
-    // 先发 PTY、再排进历史库的单写线程：落盘失败不影响命令已经发出去（M3）
+    // 先发通道、再排进历史库的单写线程：落盘失败不影响内容已经发出去（M3）
     if from_bar {
         if let Some(history) = state.history() {
             history.record(id, data, now_ms());
@@ -838,14 +1293,51 @@ fn pty_write(
 }
 
 /// 输入条提交一行：与逐键写入走同一条路径，额外记历史。
+///
+/// 终端固定追加 `\r`（L0-12）。串口按会话的发送方式与行结束符组包；
+/// `hex` 为真时按整行十六进制解析，绝不追加行结束符（HEX 一律整行原样发送）。
 #[tauri::command]
 fn pty_send_line(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     line: String,
+    hex: Option<bool>,
 ) -> Result<(), String> {
-    write_session(&app, &state, &id, &format!("{line}\r"), true)
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no session {id}"))?;
+
+    let Some(config) = session.transport.serial_config() else {
+        return write_session(&app, &state, &id, &format!("{line}\r"), true);
+    };
+
+    // 串口：端口断着就别假装发出去了，前端会把这一行留在输入条上
+    if session.released.load(Ordering::Relaxed) {
+        return Err("端口已断开，先点「连接」".into());
+    }
+    if session.transport.status() == TransportStatus::Failed {
+        return Err(session
+            .transport
+            .last_error()
+            .unwrap_or_else(|| "串口连接已断开".into()));
+    }
+    let payload = build_payload(
+        &line,
+        config.send_mode,
+        config.line_ending,
+        hex.unwrap_or(false),
+    )
+    .map_err(|err| err.to_string())?;
+    session.transport.write(&payload)?;
+    // 发送历史（↑↓）与命令历史共用一张表：串口没有补全与检索，但仍要能翻上一次写的内容
+    if let Some(history) = state.history() {
+        history.record(&id, &line, now_ms());
+    }
+    Ok(())
 }
 
 /// 输入条历史，按时间顺序（最后一条是最近的）。↑↓ 只用最近 5000 条。
@@ -947,6 +1439,7 @@ fn pty_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
                 .unwrap_or_else(|| id.clone()),
             state: state_name(session.input.lock().tracker.view()),
             created_ms: session.created_ms,
+            caps: session.transport.capabilities().into(),
         })
         .collect();
     list.sort_by_key(|info| info.created_ms);
@@ -966,6 +1459,7 @@ fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
             transport: session.transport.as_str(),
             shell: session.shell.clone(),
             cwd: session.cwd.clone(),
+            serial: session.serial.as_ref().map(SerialConfigPayload::from),
         })
         .collect()
 }
@@ -1101,16 +1595,32 @@ fn pty_set_override(
     Ok(())
 }
 
-/// 暂停 / 继续接收输出。返回设置后的状态，前端不必再查一次。
-/// 判定在后端读线程：暂停期间不再发 `pty:out`（省掉刷屏时的 IPC），输出继续进回放缓冲。
+/// 暂停 / 继续。**两种语义**：
+/// - 终端：显示层暂停，读线程照常记回放，只是不再发 `pty:out`；
+/// - 串口：真断开端口（M5 的验收点），恢复时按原配置重开。
+///
+/// 返回设置后的状态，前端不必再查一次。
 #[tauri::command]
-fn pty_set_paused(state: State<'_, AppState>, id: String, paused: bool) -> Result<bool, String> {
+fn pty_set_paused(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    paused: bool,
+) -> Result<bool, String> {
     let session = state
         .sessions
         .lock()
         .get(&id)
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
+    if session.transport.kind() == TransportKind::Serial {
+        if paused {
+            disconnect_serial(&app, &id, &session)?;
+        } else {
+            connect_serial(&app, &state, &id, &session)?;
+        }
+        return Ok(paused);
+    }
     session.paused.store(paused, Ordering::Relaxed);
     // 攒着的块：暂停时发出去也没人画，继续时前端按回放整屏重画（再发就等于画两遍）。
     // 直接丢掉，省掉长时间暂停时的内存。
@@ -1119,6 +1629,7 @@ fn pty_set_paused(state: State<'_, AppState>, id: String, paused: bool) -> Resul
 }
 
 /// 当前是否暂停。切会话回来时要按后端状态复原按钮，不能凭前端记忆。
+/// 串口的「暂停」是端口已断开（真释放），与终端的显示层暂停并到同一个开关。
 #[tauri::command]
 fn pty_paused(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     let session = state
@@ -1127,7 +1638,7 @@ fn pty_paused(state: State<'_, AppState>, id: String) -> Result<bool, String> {
         .get(&id)
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
-    Ok(session.paused.load(Ordering::Relaxed))
+    Ok(session.paused.load(Ordering::Relaxed) || session.released.load(Ordering::Relaxed))
 }
 
 /// 清窗口：丢掉回放内容并删掉磁盘上的卷轴快照，屏幕由前端自己清。
@@ -1164,12 +1675,13 @@ fn pty_ownership(state: State<'_, AppState>, id: String) -> Result<OwnershipPayl
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
     let input = session.input.lock();
-    Ok(ownership_of(&id, &input))
+    Ok(ownership_of(&id, session.transport.kind(), &input))
 }
 
-/// 改 PTY 尺寸。**相同尺寸不下发**：ConPTY 每收到一次 resize（哪怕没变）都会整屏重绘
+/// 改尺寸。**相同尺寸不下发**：ConPTY 每收到一次 resize（哪怕没变）都会整屏重绘
 /// 自己的缓冲，把「清屏」清掉的内容重新吐回来（暂停 → 清屏 → 继续 就是这么复现的）。
 /// 重新附着与继续都不该顺手 resize，只有真实的窗口尺寸变化才下发，规则见 `core_domain::resize`。
+/// 串口没有尺寸概念，`Transport::resize` 是 no-op。
 #[tauri::command]
 fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     let session = state
@@ -1178,24 +1690,12 @@ fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> R
         .get(&id)
         .cloned()
         .ok_or_else(|| format!("no session {id}"))?;
-    let want = (cols.max(1), rows.max(1));
-    let Some((cols, rows)) = session.size.lock().accept(want.0, want.1) else {
-        return Ok(());
-    };
-    let master = session.master.lock();
-    master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("resize: {e}"))
+    session.transport.resize(cols, rows)
 }
 
 #[tauri::command]
 fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    // 关闭会话 = 节点删除（I2）。先摘节点再杀进程：读线程醒来时看到节点已不在，
+    // 关闭会话 = 节点删除（I2）。先摘节点再结束通道：读线程醒来时看到节点已不在，
     // 就不会把刚删掉的卷轴快照又写回来。
     {
         let mut workspace = state.workspace.lock();
@@ -1204,7 +1704,13 @@ fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
     persist_workspace(&state);
 
     if let Some(session) = state.sessions.lock().remove(&id) {
-        let _ = session.child.lock().kill();
+        // 旧读线程不许再收尾（终端退出/串口断开都不该把会话写回工作区）
+        session.reader_gen.fetch_add(1, Ordering::SeqCst);
+        let _ = session.transport.close();
+        if session.transport.kind() == TransportKind::Serial {
+            join_reader(&session);
+        }
+        session.outbox.running.store(false, Ordering::Relaxed);
     }
     // 关闭会话 = 节点删除：历史（M3）与卷轴快照一起销毁（I2）
     if let Some(history) = state.history() {
@@ -1288,7 +1794,9 @@ fn main() {
                         let Ok(core) = controller.CoreWebView2() else {
                             return;
                         };
-                        let Ok(settings) = core.Settings() else { return };
+                        let Ok(settings) = core.Settings() else {
+                            return;
+                        };
                         let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() else {
                             return;
                         };
@@ -1297,7 +1805,11 @@ fn main() {
                             let _ = settings3.AreBrowserAcceleratorKeysEnabled(&mut on);
                             println!(
                                 "[webview] 浏览器加速键: {}",
-                                if on.as_bool() { "on（未生效）" } else { "off" }
+                                if on.as_bool() {
+                                    "on（未生效）"
+                                } else {
+                                    "off"
+                                }
                             );
                         }
                     });
@@ -1310,6 +1822,11 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             spawn_session,
+            spawn_serial_session,
+            serial_ports,
+            serial_status,
+            serial_disconnect,
+            serial_connect,
             pty_write,
             pty_send_line,
             pty_set_override,
@@ -1357,7 +1874,8 @@ fn main() {
                 }
                 persist_workspace(&state);
                 for (_, session) in sessions {
-                    let _ = session.child.lock().kill();
+                    // 终端 = 结束进程；串口 = 关句柄与日志（I3：不保活）
+                    let _ = session.transport.close();
                 }
             }
         })

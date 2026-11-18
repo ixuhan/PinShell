@@ -19,6 +19,7 @@ portable-pty = "0.9"
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+serialport = { version = "4.10.1", default-features = false }
 
 # 关掉 WebView2 的浏览器加速键（Ctrl+R 不再是「刷新页面」）需要直接拿到 WebView2 设置。
 [target."cfg(windows)".dependencies]

@@ -52,6 +52,7 @@
 | L0-18 | 历史库存储语义 | 去重挪到最新并累加次数、10k 封顶、会话隔离、清空只作用当前会话、删除节点销毁历史、时间戳 UTC 往返 |
 | L0-19 | 清屏后的输出过滤 | 序号 ≤ 下限的块全部丢掉（哪怕清屏之后才到达）、其余按到达顺序拼、没有保留块时序号归零、下限为 0 时一块不丢 |
 | L0-20 | 文件面板显示规则 | 目录优先且大小写不敏感排序、隐藏项过滤与计数、2000 条截断、路径归一化与父/子拼接、盘符根与 UNC 根、大小与时间格式、跟随/固定模式的目标路径、降级菜单的项集合与视口夹取、会话级偏好的解析与迁移（旧版全局配置落到默认值、跟随模式不保留固定路径、脏字段逐项回退） |
+| L0-21 | 端口下拉文案 | 产品名 > 厂商名 > 通道类型逐级回退；空字符串当作没有，不画出「COM3 · 」；假串口带自己的标签 |
 
 ### L1 集成
 
@@ -96,7 +97,7 @@
 | M3（已完成） | 历史库、Ghost Text、Ctrl+R | L0-07、L0-09、L0-18、L1-10、L2-02 |
 | M3 打磨（已完成） | 暂停/继续、一键清窗口、卷轴行数上限、输入条按钮 | L0-19（+ 手工：暂停后继续还原、清屏不回填旧块） |
 | M4（已完成） | 文件面板跟随 CWD / 自动刷新 / 拖宽收起、原生右键菜单与降级 | L0-20、L3-06、手工（helper 崩溃降级） |
-| M5 | 串口（假 Transport 优先，真串口靠虚拟串口对） | L0-12、L1 |
+| M5（已完成） | 串口通道、假 Transport、HEX 与日志 | L0-10、L0-12、L0-13（I4）、L0-21、主 crate 的 `transport` 用例 + 手工清单（假串口回环、真串口对） |
 | M6 | 升级后恢复工作区 | L3 |
 
 ## 4. 夹具与隔离
@@ -128,11 +129,12 @@
 |---|---|---|---|
 | `.\scripts\test-guard.ps1 -Layer l0` | 常跑集：core-domain 纯逻辑 + 前端纯逻辑（独立 target、子进程降优先级） | 1–2 s | 无 |
 | `npm test` | 只跑前端纯逻辑（Ghost Text / 检索 / 跨天锚点 / 历史缓存 / 清屏过滤），vitest、node 环境 | ~1 s | 无 |
-| `.\scripts\test-guard.ps1 -Layer it` | L1：真 pwsh/bash 标记链路 + 主 crate 单元测试（持久化） | ~2–6 s | dev 未运行；否则拒绝执行并返回 1 |
+| `.\scripts\test-guard.ps1 -Layer it` | L1：真 pwsh/bash 标记链路 + 主 crate 单元测试（持久化、历史库、transport） | ~2–6 s | dev 未运行；否则拒绝执行并返回 1 |
 | `.\scripts\test-guard.ps1 -Layer all` | 两层；dev 在跑时只跑 L0 并打印原因 | ~1 s | 无 |
+| `$env:CARGO_TARGET_DIR="<repo>\src-tauri\target-m5"` 后 `.\scripts\test-guard.ps1 -Layer all -Force` | dev 在跑、又必须跑 L1 时：换一份独立 target，不碰被占用的 `target\debug`，也就不用停 dev | 首次全量编译几分钟，之后 ~3 s | 磁盘多一份 target（`src-tauri/target-*/` 已忽略）；`-Force` 只跳过闸门判断，不跳过测试 |
 | `.\scripts\push.ps1` | 先跑 L0 门禁再推；`-SkipTests` 可跳过 | +0.5 s | 无 |
 
-前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）与 `src/outQueue.ts`（清屏后的输出过滤）都是值得测的纯函数模块，用 vitest（node 环境，不起窗口、不占 1420），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
+前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）、`src/outQueue.ts`（清屏后的输出过滤）与 `src/serialUi.ts`（端口下拉文案）都是值得测的纯函数模块，用 vitest（node 环境，不起窗口、不占 1420），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
 
 ## 7. 汇报（已落地）
 
@@ -146,7 +148,7 @@
 | 项 | 原因 | 什么时候能测 |
 |---|---|---|
 | 真 GUI 自动化 | 未装 `tauri-driver` + 匹配 WebView2 的 `msedgedriver`，且会抢焦点 | 等确认是否值得装 |
-| 串口真设备 | 需要硬件或虚拟串口对驱动 | M5 |
+| 串口真设备 | 假 Transport 已覆盖组包、释放/重开与日志；真设备与 com0com 之类的虚拟串口对仍靠手工（装驱动 = 打扰） | 已列入 §8.2 手工清单 |
 | 原生菜单 helper 隔离 | 已落地：helper 是独立进程，崩溃/缺失都降级为自建菜单；崩溃场景本身靠手工（结束 helper 或换成坏 exe 后右键仍能出菜单） | 手工清单 |
 | IME / 多显示器 / 字体回退 / 高 DPI | GUI 环境相关，自动化收益低 | 手工清单 |
 | 多窗口（单主窗口之外的场景） | 产品未做 | 后续 |
@@ -162,6 +164,22 @@
 | 安装版 | 装 `src-tauri\target\release\bundle\nsis\PinShell_0.1.0_x64-setup.exe` 后右键 | 安装目录里有 `pinshell-shellmenu.exe`，右键仍出原生菜单；卸载后不残留 |
 
 打包这一项已自动核对：`npm run app:build` 产出的 MSI 与 NSIS 里各只有一份 `pinshell-shellmenu.exe`（生成的 `main.wxs` 与 `installer.nsi` 各一行），文件名与运行时查找的名字一致。
+
+### 8.2 M5 串口手工清单（改过 transport / 发送组包 / 日志后走一遍）
+
+没有硬件也能先走前四项：启动前设 `PINSHELL_FAKE_SERIAL=1`，端口列表里会出现 `PINSHELL_LOOP`（内存回环，不碰系统端口）。
+
+| 项 | 步骤 | 期望 |
+|---|---|---|
+| 新建与回显 | `PINSHELL_FAKE_SERIAL=1` 后点侧栏「⌁」，端口选 `PINSHELL_LOOP`，创建 | 会话出现在树里（行首带 `⌁`），屏幕先出一行「PinShell 假串口」；输入条显示 `串口 PINSHELL_LOOP · 115200 8N1`；回车后内容原样回显 |
+| HEX | 点输入条「HEX」，输入 `41 54 0D 0A` 回车 | 屏幕回显 `AT`（不带行结束符）；输入 `ABC` 回车 → 提示「十六进制位数是奇数」，这一行留在输入条上；`0x41` → 指出 `x` 不是十六进制数字 |
+| 行结束符 | 分别用 CRLF / CR / LF 创建一个会话，发送 `AT` | 日志里 TX 分别是 `AT\r\n` / `AT\r` / `AT\n` |
+| 日志 | 点「日志」 | 用系统关联打开 `data/logs/serial-*.log`；头部有端口/波特率/8N1，正文按 `[TX +毫秒]` / `[RX +毫秒]` 记录，二进制字节写成 `\xNN` |
+| 断开即释放 | 真串口（或虚拟串口对）上点「断开」（按钮文字是「断开」时的那个动作） | 按钮变成「连接」、状态点转琥珀；用另一个串口工具能打开同一个端口；再点「连接」恢复收发，回放与历史都还在 |
+| 同一端口单热会话（I4） | 已有一个 `COM3` 热会话时再建一个 `COM3` | 对话框里显示「已被另一个会话占用」，不创建；暂停（已断开）的会话同样占名额 |
+| 拔线可重连 | 会话进行中拔掉 USB 转串口 | 状态变「连接失败」、屏幕保留已有内容；插回后点「连接」按原配置重开，能继续收发 |
+| 能力位 | 串口会话里看输入条 | 没有 Ghost Text、Ctrl+R 无反应；↑↓ 仍能翻本会话发送过的行；文件面板回退到用户主目录（串口没有 CWD） |
+| 冷会话 | 关掉应用重开，点树里的串口会话 | 按记住的参数重连；屏幕先画回上次内容与分隔线；标题不覆盖用户改过的名字 |
 
 ## 9. 决策记录（2026-11-16 确认）
 
@@ -218,6 +236,11 @@
 | M4 文件面板（第二片：自动刷新） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 逐项比较 5 个用例（任一字段或顺序变了才算变化）、刷新间隔与失败退避 2 个用例（大目录 10 秒、2 的幂到 24 秒）、宽度夹取 5 个：合计 12 个前端用例。DOM 行为用假 IPC 的浏览器验证台确认：内容不变时 3 秒一次只发 `fs_list`、零 DOM 变更；内容变化时重绘 200 行且 `scrollTop` 与选中行都还在；面板收起、无会话时不发请求；大目录（`total > 1000`）周期变 10 秒；一次读盘失败后下一次等到 6 秒 |
 | M4 文件面板（第三片：`..`、左栏调宽与收起） | `src/filePanelUi.ts`、`src/sidebar.ts`、`src/sidebarUi.ts`、`src/resize.ts`、`src/styles.css` | 两侧拖动共用同一套手势与 `body.layout-dragging`，拖动中只改 CSS、松手才 `layoutChanged`；左栏 150–360px，两栏各自量对方实时宽度定上限。两栏都能收起成 26px 竖条（左栏竖排「会话」展开按钮），折叠状态与宽度一起进 `localStorage`。前端用例 14 个（夹取 7、存储解析 5、序列化 2，坏数据回默认）。浏览器验证台确认：`..` 只在有父目录时出现、单击可选中、双击发出 `path=C:\`（转「固定」）、无父目录与空目录两种情况都对；左栏 196→297 拖动中零次重排、松手一次；拖到 +900px 被夹在 360；窗口缩到 700px 后两栏各自缩到 195/324、终端留住 180；点「‹」收起后宽度 27px、列表与手柄隐藏、展开按钮出现且 `layoutChanged` 一次，点展开恢复原宽度并再 `layoutChanged` 一次；收起状态重载页面后仍在（存的是 `{"width":195,"collapsed":true}`，展开回到 196） |
 | M4 文件面板（第四片：设置绑定会话） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 「跟随 / 固定」「自动」「隐」改为**会话级**：存储形如 `{expanded, width, defaults, sessions: {id: {mode, auto, showHidden, path}}}`，切会话先回写上一个会话、再换上新会话的一套；旧版顶层全局配置迁移成 `defaults`，已有会话不被重置。前端用例 6 个（旧版迁移、两会话互不影响、跟随不保留固定路径、脏字段逐项回退、宽度坏值、空存储默认值）。假 IPC 验证台确认：s1 开「隐」+「自动」、s2 关「隐」并转「固定」后，来回切换分别恢复成 `跟随/隐开/自动开` 与 `固定/隐关/自动开`，重载页面后两套仍在，`localStorage` 里两个会话各一条记录 |
-| 分层决策 | `docs/adr/0005-test-layering.md` | 已接受 |
+| M5 串口规则（L0-10 / L0-12 / L0-13 的 I4） | `src-tauri/core-domain/src/serial.rs` | 14 个用例：HEX 分隔符/大小写/奇数位/非法字符位置/往返、CRLF-CR-LF 字节、行缓冲与直发组包、HEX 不追加结束符、8N1 默认值与端口/波特率校验、标题截断、能力位、端口比较不区分大小写、同一端口单热会话、日志转义与文件名安全化 |
+| M5 通道抽象与假 Transport | `src-tauri/src/transport.rs` | `Transport` trait 统一终端与串口；`PtyTransport` 收下 resize 去重；`SerialTransport` 读写/释放/重开/日志；`MemoryTransport` 回环（`PINSHELL_FAKE_SERIAL=1`）。10 个主 crate 用例：能力位、写读往返、释放后读端结束且写入报错、重开后能继续收发、回环横幅与回显、端口数字排序、日志方向与转义、枚举不 panic、HEX 预览、发送方式标签 |
+| M5 串口会话生命周期 | `spawn_serial_session` / `serial_connect` / `serial_disconnect` / `pty_set_paused` | 暂停即真释放（丢写句柄并 join 读线程）；重连先丢弃失败句柄再重开；失败后会话保持热；I4 由 `conflicting_session` 判定且在 `spawn_serial_session` 与 `connect_serial` 两处生效；串口读线程不喂 OSC、更新静默时间、写原始日志；冷会话按工作区配置重连 |
+| M5 工作区 v2 | `src-tauri/src/persistence.rs` | `WORKSPACE_VERSION = 2`，会话多一个可选 `serial` 段；2 个用例：串口配置往返一致、v1 文件无 serial 字段照常读回为冷会话 |
+| M5 前端 | `index.html`、`src/main.ts`、`src/serialUi.ts`、`src/styles.css` | 「⌁」新建对话框（端口枚举/手输、8N1 各项、DTR/RTS、行结束符、发送方式、错误原文回显）；侧栏串口记号；输入条 `串口 COM3 · 115200 8N1` 摘要与连接失败原因；「暂停」显示成「断开 / 连接」；HEX 开关按会话记忆；「日志」按钮用系统关联打开；没有 Ghost Text 与 Ctrl+R，↑↓ 保留发送历史；发送失败把这一行放回输入条。端口下拉文案由 `src/serialUi.test.ts` 的 3 个用例覆盖（L0-21：产品名/厂商名/类型逐级回退、空串当没有、假串口自带标签） |
+| M5 验收 | 自动层 | `L0` 门禁：core-domain 117 个用例 + 前端 91 个用例全绿；`L1` 门禁：主 crate `cargo test --bin pinshell` 48 个用例（含 transport 10 个、persistence v2 2 个）+ 真 pwsh/bash 标记 3 个全绿。dev 正在跑，这一轮用独立 target 目录 `src-tauri\target-m5` 执行，没有碰被占用的 `target\debug`（跑法见 §6）。GUI 手工项见 §8.2（假串口回环先行；真设备/虚拟串口对按清单走） |
 
-跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过）。
+跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过。dev 在跑又必须跑 L1 时，按 §6 表格最后一行先设 `CARGO_TARGET_DIR` 再加 `-Force`）。

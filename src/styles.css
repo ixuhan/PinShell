@@ -432,6 +432,223 @@ body.layout-dragging #sess-resizer::after {
   border-color: #4a3a22;
 }
 
+/* ---------- 串口（M5） ---------- */
+
+/* 状态点：主动断开是琥珀，读写失败是红；连上时仍用绿色 ok */
+#own-dot.warn {
+  background: #d6a34a;
+  box-shadow: 0 0 7px -1px #d6a34a;
+}
+
+#own-dot.err {
+  background: #e35d6a;
+  box-shadow: 0 0 7px -1px #e35d6a;
+}
+
+#inputbar.serial {
+  border-color: #24405a;
+}
+
+#inputbar.failed {
+  border-color: #5a2a30;
+}
+
+#inputbar.failed #own-label {
+  color: #e35d6a;
+}
+
+#ib-paused.err {
+  color: #e35d6a;
+}
+
+/* 串口会话在侧栏里用一个记号区分：终端是普通过程，串口是一条一直开着的线 */
+.sess-row .sess-serial-mark {
+  flex: none;
+  color: #4f8cc9;
+  font-size: 10.5px;
+}
+
+/* 串口的 HEX 模式亮着时提示「这次发送按十六进制解析」 */
+#ib-hex.on {
+  background: #223247;
+  border-color: #3f5468;
+  color: #e8eef7;
+}
+
+/* ---------- 新建串口会话 ---------- */
+#serial-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05090fb8;
+  z-index: 40;
+}
+
+#serial-overlay[hidden] {
+  display: none;
+}
+
+#serial-form {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  padding: 14px 16px 12px;
+  background: #0f1620;
+  border: 1px solid #2a3a4d;
+  border-radius: 12px;
+  box-shadow: 0 18px 48px -12px #000c;
+  font: 12px/1.7 "Cascadia Mono", Consolas, monospace;
+  color: #8a9ab0;
+}
+
+#serial-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: #e8eef7;
+}
+
+#serial-head button {
+  padding: 0 6px;
+  background: transparent;
+  border: 0;
+  color: #65758c;
+  font: inherit;
+  cursor: pointer;
+}
+
+#serial-head button:hover {
+  color: #e8eef7;
+}
+
+#serial-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+#serial-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10.5px;
+  color: #65758c;
+}
+
+#serial-grid label.wide {
+  grid-column: 1 / -1;
+}
+
+#serial-grid input,
+#serial-grid select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: #121a25;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  color: #e8eef7;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+#serial-grid input:focus,
+#serial-grid select:focus {
+  border-color: #3f5468;
+}
+
+.serial-inline {
+  display: flex;
+  gap: 6px;
+}
+
+.serial-inline input {
+  flex: 1 1 auto;
+}
+
+.serial-inline button {
+  flex: none;
+  width: 30px;
+  background: transparent;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  color: #8a9ab0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.serial-inline button:hover {
+  color: #e8eef7;
+  border-color: #31435a;
+}
+
+#serial-flags {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 10.5px;
+  color: #65758c;
+}
+
+#serial-flags label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #8a9ab0;
+}
+
+#serial-flags span {
+  margin-left: auto;
+  color: #3f4c60;
+}
+
+#serial-error {
+  min-height: 1.7em;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #e06c75;
+  white-space: pre-wrap;
+}
+
+#serial-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+#serial-ports-hint {
+  flex: 1 1 auto;
+  font-size: 10.5px;
+  color: #3f4c60;
+}
+
+#serial-foot button {
+  padding: 4px 14px;
+  background: transparent;
+  border: 1px solid #24303f;
+  border-radius: 7px;
+  color: #8a9ab0;
+  font: inherit;
+  cursor: pointer;
+}
+
+#serial-foot button[type="submit"] {
+  background: #223247;
+  border-color: #3f5468;
+  color: #e8eef7;
+}
+
+#serial-foot button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* 窗口窄时先砍掉快捷键提示，把位置留给输入框 */
 @media (max-width: 1000px) {
   #ib-hint {

@@ -9,6 +9,7 @@
 //! 3. 窗口里至少要有一个分格（最后一个分格关闭时整个窗口消失）。
 
 use crate::ownership::TransportKind;
+use crate::serial::SerialConfig;
 
 /// 分格的最大嵌套层数：再深每一格就小到不可用，改为拖出去开新窗口。
 pub const MAX_SPLIT_DEPTH: u8 = 3;
@@ -92,6 +93,8 @@ pub struct SessionMeta {
     pub cwd: Option<String>,
     /// 终端通道才有；串口会话为 `None`
     pub shell: Option<String>,
+    /// 串口通道才有；终端会话为 `None`。整份随工作区落盘，冷会话重开时按它重连。
+    pub serial: Option<SerialConfig>,
     pub hot: bool,
 }
 
@@ -103,17 +106,23 @@ impl SessionMeta {
             transport: TransportKind::Terminal,
             cwd: None,
             shell: Some(shell.into()),
+            serial: None,
             hot: false,
         }
     }
 
-    pub fn serial(id: impl Into<String>, title: impl Into<String>) -> Self {
+    pub fn serial(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        config: SerialConfig,
+    ) -> Self {
         SessionMeta {
             id: id.into(),
             title: title.into(),
             transport: TransportKind::Serial,
             cwd: None,
             shell: None,
+            serial: Some(config),
             hot: false,
         }
     }

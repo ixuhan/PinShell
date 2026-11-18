@@ -11,6 +11,9 @@
 //! 读取：主文件坏了退 `.bak`；两个都坏返回 `Unreadable`，由调用方决定是否重置。
 
 use core_domain::ownership::TransportKind;
+use core_domain::serial::{
+    DataBits, FlowControl, LineEnding, Parity, SendMode, SerialConfig, StopBits,
+};
 use core_domain::workspace::{Axis, Layout, Rect, SessionMeta, Window, Workspace};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,7 +24,10 @@ use std::path::{Path, PathBuf};
 pub const WORKSPACE_FILE: &str = "workspace.json";
 
 /// `workspace.json` 的结构版本。读到更高版本时拒绝，免得把旧程序不认识的数据写回去。
-pub const WORKSPACE_VERSION: u32 = 1;
+///
+/// v2（M5）：会话多了一个可选的 `serial` 段。v1 文件照常读，缺的就按「没有串口配置」处理；
+/// 写出去一律是 v2。
+pub const WORKSPACE_VERSION: u32 = 2;
 
 /// 解析出的数据目录。
 pub fn data_dir() -> Result<PathBuf, String> {
@@ -299,8 +305,134 @@ struct SessionFile {
     cwd: Option<String>,
     #[serde(default)]
     shell: Option<String>,
+    /// v2 起：串口会话的连接参数与发送偏好
+    #[serde(default)]
+    serial: Option<SerialFile>,
     #[serde(default)]
     hot: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SerialFile {
+    port: String,
+    baud: u32,
+    data_bits: u8,
+    parity: ParityFile,
+    stop_bits: StopBitsFile,
+    flow: FlowFile,
+    dtr: bool,
+    rts: bool,
+    line_ending: LineEndingFile,
+    send_mode: SendModeFile,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ParityFile {
+    None,
+    Odd,
+    Even,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StopBitsFile {
+    One,
+    Two,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FlowFile {
+    None,
+    Software,
+    Hardware,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LineEndingFile {
+    Crlf,
+    Cr,
+    Lf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SendModeFile {
+    Direct,
+    Line,
+}
+
+impl From<&SerialConfig> for SerialFile {
+    fn from(config: &SerialConfig) -> Self {
+        SerialFile {
+            port: config.port.clone(),
+            baud: config.baud,
+            data_bits: config.data_bits.value(),
+            parity: match config.parity {
+                Parity::None => ParityFile::None,
+                Parity::Odd => ParityFile::Odd,
+                Parity::Even => ParityFile::Even,
+            },
+            stop_bits: match config.stop_bits {
+                StopBits::One => StopBitsFile::One,
+                StopBits::Two => StopBitsFile::Two,
+            },
+            flow: match config.flow {
+                FlowControl::None => FlowFile::None,
+                FlowControl::Software => FlowFile::Software,
+                FlowControl::Hardware => FlowFile::Hardware,
+            },
+            dtr: config.dtr,
+            rts: config.rts,
+            line_ending: match config.line_ending {
+                LineEnding::Crlf => LineEndingFile::Crlf,
+                LineEnding::Cr => LineEndingFile::Cr,
+                LineEnding::Lf => LineEndingFile::Lf,
+            },
+            send_mode: match config.send_mode {
+                SendMode::Direct => SendModeFile::Direct,
+                SendMode::Line => SendModeFile::Line,
+            },
+        }
+    }
+}
+
+impl SerialFile {
+    /// 读回并做一次校验：数据位非法时退回 8 位而不是丢掉整份工作区。
+    fn to_config(&self) -> SerialConfig {
+        SerialConfig {
+            port: self.port.clone(),
+            baud: self.baud,
+            data_bits: DataBits::from_value(self.data_bits).unwrap_or(DataBits::Eight),
+            parity: match self.parity {
+                ParityFile::None => Parity::None,
+                ParityFile::Odd => Parity::Odd,
+                ParityFile::Even => Parity::Even,
+            },
+            stop_bits: match self.stop_bits {
+                StopBitsFile::One => StopBits::One,
+                StopBitsFile::Two => StopBits::Two,
+            },
+            flow: match self.flow {
+                FlowFile::None => FlowControl::None,
+                FlowFile::Software => FlowControl::Software,
+                FlowFile::Hardware => FlowControl::Hardware,
+            },
+            dtr: self.dtr,
+            rts: self.rts,
+            line_ending: match self.line_ending {
+                LineEndingFile::Crlf => LineEnding::Crlf,
+                LineEndingFile::Cr => LineEnding::Cr,
+                LineEndingFile::Lf => LineEnding::Lf,
+            },
+            send_mode: match self.send_mode {
+                SendModeFile::Direct => SendMode::Direct,
+                SendModeFile::Line => SendMode::Line,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -356,8 +488,8 @@ pub fn load_workspace(dir: &Path) -> WorkspaceLoad {
 
 pub fn save_workspace(dir: &Path, workspace: &Workspace) -> io::Result<()> {
     let file = workspace_to_file(workspace);
-    let json = serde_json::to_vec_pretty(&file)
-        .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+    let json =
+        serde_json::to_vec_pretty(&file).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
     write_atomic(&dir.join(WORKSPACE_FILE), &json)
 }
 
@@ -385,6 +517,7 @@ fn workspace_to_file(workspace: &Workspace) -> WorkspaceFile {
                 transport: session.transport.into(),
                 cwd: session.cwd.clone(),
                 shell: session.shell.clone(),
+                serial: session.serial.as_ref().map(SerialFile::from),
                 hot: session.hot,
             })
             .collect(),
@@ -440,6 +573,7 @@ fn workspace_from_file(file: WorkspaceFile) -> Result<Workspace, String> {
                 transport: session.transport.into(),
                 cwd: session.cwd.clone(),
                 shell: session.shell.clone(),
+                serial: session.serial.as_ref().map(SerialFile::to_config),
                 hot: false,
             })
             .collect(),
@@ -479,10 +613,8 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "pinshell-test-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pinshell-test-{tag}-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -521,6 +653,60 @@ mod tests {
         match load_workspace(&dir) {
             WorkspaceLoad::Loaded(back) => {
                 assert!(back.sessions.iter().all(|s| !s.hot));
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serial_session_round_trips_with_its_config() {
+        let dir = temp_dir("serial");
+        let mut ws = sample_workspace();
+        let mut config = SerialConfig::new("COM7");
+        config.baud = 9_600;
+        config.parity = Parity::Even;
+        config.stop_bits = StopBits::Two;
+        config.flow = FlowControl::Hardware;
+        config.dtr = false;
+        config.line_ending = LineEnding::Lf;
+        config.send_mode = SendMode::Direct;
+        ws.add_session(SessionMeta::serial("ser", "COM7 · 9600", config.clone()))
+            .unwrap();
+        save_workspace(&dir, &ws).unwrap();
+
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(back) => {
+                let meta = back.session("ser").expect("serial session");
+                assert_eq!(meta.transport, TransportKind::Serial);
+                assert_eq!(meta.serial.as_ref(), Some(&config));
+                assert_eq!(back, ws);
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_one_workspace_still_loads_without_serial_fields() {
+        let dir = temp_dir("v1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            br#"{
+              "version": 1,
+              "windows": [{"id": 1, "x": 0, "y": 0, "width": 800, "height": 600,
+                           "layout": {"kind": "leaf", "session": "s1"}}],
+              "sessions": [{"id": "s1", "title": "pwsh", "transport": "terminal",
+                            "cwd": null, "shell": "pwsh.exe", "hot": true}]
+            }"#,
+        )
+        .unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(back) => {
+                let meta = back.session("s1").unwrap();
+                assert_eq!(meta.serial, None);
+                assert!(!meta.hot, "读回一律按冷会话");
             }
             other => panic!("expected Loaded, got {:?}", describe(&other)),
         }

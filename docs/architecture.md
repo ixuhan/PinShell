@@ -55,6 +55,20 @@ trait Transport {
 
 能力位决定 UI 行为：串口通道关掉输入条的命令历史/预测/补全，但保留发送历史与时间戳。
 
+已落地（M5）：通道抽象收在 `src-tauri/src/transport.rs`。`Transport` 负责字节进出、resize、释放/重开、关闭、能力位、读端与日志；`PtyTransport` 与 `SerialTransport` 是仅有的两个实现，会话层（`main.rs`）不再直接认识 ConPTY 或 COM 口。原来散在会话层的「相同尺寸不下发」也随之下沉到 `PtyTransport`（`core_domain::resize::SentSize`），串口的 `resize` 是 no-op。
+
+串口的几个约定：
+
+- **暂停 = 真释放**。`release()` 先置停止位、丢掉写句柄，再把克隆给读线程的句柄 `join` 掉（Windows 上串口是独占打开，不 join 等于端口还被占着）；`reopen()` 按同一份配置重开。会话仍是热的：回放、历史、标题都不动，只是端口让给了别的程序。I4 因此按「热会话」判定，暂停中的会话仍占着它的端口名额。
+- **失败可重连**。设备拔掉或读写报错时读线程结束，会话保持热、状态标为 `failed`；「连接」会先丢掉已经不可信的旧句柄再重开，而不是只把状态改回 `open`。
+- **没有 Shell 就没有标记**。串口读线程不喂 OSC 解析器，字节经 `Utf8Stream` 解码后直接进回放与 `pty:out`，同时按原始字节写日志。输出静默 3 秒落卷轴快照、暂停继续整屏重画、清屏只清显示层这些规则与终端完全共用。
+- **HEX 与行结束符**只有一处实现（`core_domain::serial`）：HEX 按整行解析成字节、**不追加**行结束符；行缓冲模式追加该会话的 CRLF / CR / LF；直发模式只写文本本身。
+- **日志**落在 `data/logs/serial-<端口>-<UTC 时间>-<会话 id 前 8 位>.log`，按 `[RX/TX +毫秒]` 记，控制与高位字节转义成 `\r` / `\n` / `\xNN`，二进制里的换行不会把一条记录拆成两行。路径随 `serial:status` 给前端，「日志」按钮用系统关联打开。
+- **假串口**：`PINSHELL_FAKE_SERIAL=1` 时端口列表多一个 `PINSHELL_LOOP`，它是内存回环（写什么回什么），完全不碰系统端口，没接硬件也能把界面走通。
+- **落盘**：`workspace.json` 升到 v2，会话多一个可选 `serial` 段；v1 文件照常读，缺的按「没有串口配置」处理。前端不复制默认值与校验，错误原文来自核心。
+
+前端（M5）：侧栏「＋」旁边多一个「⌁」新建串口会话，参数在对话框里填一次（端口可手输，列表来自 `serial_ports`），之后随工作区落盘、冷会话按它重连。串口会话在输入条上把「暂停」显示成「断开 / 连接」，并给出 `串口 COM3 · 115200 8N1` 摘要、错误原因、HEX 开关与日志入口；没有补全与 Ctrl+R，↑↓ 仍翻发送历史。
+
 ### 2.2 输出事件
 
 会话输出统一为「带时间戳的字节块」事件，附带该块是否改变了备用屏状态。前端永远只订阅事件，不直接读管道。
@@ -85,6 +99,8 @@ trait Transport {
 - **发送**：`text + 行结束符` 写入 Transport；发送后写入历史、清空输入条、状态由 integration 推进。（落盘与去重见 M3，已落地。）
 
 直通模式下的按键走另一条路径，不做任何文本处理，直接 `write` 原始字节。
+
+已落地（M5）：`pty_send_line` 多一个可选的 `hex`。终端与串口的区别只在组包：终端固定 `text + \r`；串口按该会话的 `send_mode` 与 `line_ending` 组包，`hex = true` 时把整行按十六进制解析成字节、原样写出（不追加结束符）。解析拒绝原因（空、奇数位、非法字符及其位置）由 `core_domain::serial` 给出，界面直接显示原文。端口断开或读写失败时发送返回错误，前端把这一行放回输入条，不让用户重敲。
 
 已落地（M3）：历史按 `session_id` 隔离，只记输入条提交的行；直通键入、片段发送、REPL 输入都不记。同一条命令只留一行，再次执行时挪到最新并累加次数；去重键是原文。每会话封顶 10000 条。`history.db` 用 SQLite（WAL、单写线程），先发 PTY、再异步写库；落盘失败只挂一次「历史未保存」标记，本次运行退化为纯内存。条目存原文、UTC 毫秒、执行次数、最后使用时间，不记 CWD 与退出码。库打不开或损坏时改名为 `history.db.corrupt-<时间>` 并重建空库，不阻塞启动。清空历史只作用于当前会话；删除会话节点连同历史一起销毁。前端缓存契约：附着取 `history_snapshot`（最近 5000 条，带 `upto_id`），随后收带单调 `id` 的 `history:append`；检测到缺口或重连就整份重建，不逐条修补，缓存只留当前焦点会话。
 
@@ -155,7 +171,7 @@ data/                     ← 便携：exe 同级；不可写则回退 %APPDATA%
 ├── workspace.json        ← 窗口/会话树/布局/片段；+ workspace.json.bak
 ├── history.db            ← SQLite，按 session_id 隔离
 ├── scrollback/<id>.ansi  ← 卷轴快照；空闲 3 秒落盘
-├── logs/                 ← 串口日志，占位符命名
+├── logs/                 ← 串口日志 serial-<端口>-<UTC>-<会话 id 前 8 位>.log（RX/TX + 毫秒）
 └── integration/          ← 生成的 Shell 脚本副本（用于注入与版本比对）
 ```
 
@@ -163,7 +179,7 @@ data/                     ← 便携：exe 同级；不可写则回退 %APPDATA%
 
 原子写：同目录 tmp → `FlushFileBuffers` → `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`，失败退避重试；保留上一版 `.bak`。Windows 无目录 fsync，不照搬 POSIX。
 
-已落地（M2）：目录解析顺序 `PINSHELL_DATA_DIR`（明确指定却不可写就报错，不悄悄换地方）→ exe 同级 `data\` → `%APPDATA%\PinShell\`；`workspace.json` 带 `version`（当前 1），读回后一律按冷会话处理。写入失败不会留下半截主文件，读取时主文件坏了自动退 `.bak`，两份都坏返回 `Unreadable` 而不是静默重置。卷轴快照已落成 `scrollback/<id>.ansi`（纯文本、覆盖写、不保留 `.bak`；替换时旧版先挪到 `.old`，失败再挪回来，成功后删掉；文件名由会话 id 派生，非法 id 一律换成定长哈希名，防止写到数据目录外面）。
+已落地（M2）：目录解析顺序 `PINSHELL_DATA_DIR`（明确指定却不可写就报错，不悄悄换地方）→ exe 同级 `data\` → `%APPDATA%\PinShell\`；`workspace.json` 带 `version`（M2 时为 1，M5 升到 2，见 §5），读回后一律按冷会话处理。写入失败不会留下半截主文件，读取时主文件坏了自动退 `.bak`，两份都坏返回 `Unreadable` 而不是静默重置。卷轴快照已落成 `scrollback/<id>.ansi`（纯文本、覆盖写、不保留 `.bak`；替换时旧版先挪到 `.old`，失败再挪回来，成功后删掉；文件名由会话 id 派生，非法 id 一律换成定长哈希名，防止写到数据目录外面）。
 
 已落地（M3）：`history.db` 由 `src-tauri/src/history.rs` 持有，WAL + `synchronous=NORMAL` + `busy_timeout`；表 `history(session_id, rev, command, used_ms, use_count)` 与 `history_meta(session_id, next_rev)`。打开时跑 `PRAGMA quick_check`，失败则把主库连同 `-wal`/`-shm` 改名成 `history.db.corrupt-<UTC 毫秒>` 后重建空库；重建也失败就本次运行只用内存，并只发一次 `history:degraded`（前端只提示「历史未保存」，不挡输入）。日志仍随 M5 落地。
 
@@ -190,7 +206,7 @@ data/                     ← 便携：exe 同级；不可写则回退 %APPDATA%
 | M2 已完成 | 会话树 + 冷/热会话 + 回放缓冲 + 快照还原 | 关掉重开还原到原样 |
 | M3 已完成 | 历史库 + Ghost Text + Ctrl+R | 快打不闪旧预测 |
 | M4 已完成 | 文件面板（跟随 CWD、自动刷新、原生右键菜单 + 降级） | 跟随 CWD 正确，右键出原生菜单 |
-| M5 | 串口 | 暂停即释放，HEX 与日志可用 |
+| M5 已完成 | 串口（真正的 Transport 实现 + 对话框 + HEX + 日志） | 暂停即释放，HEX 与日志可用 |
 | M6 | 自动更新 + 设置面板全量 | 安装版静默升级后恢复工作区 |
 
 M0–M2 是产品成立的最小闭环；M4/M5/M6 之间无依赖，可任意调序。

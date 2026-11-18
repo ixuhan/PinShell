@@ -12,5 +12,6 @@ pub mod ownership;
 pub mod replay;
 pub mod resize;
 pub mod scrollback;
+pub mod serial;
 pub mod utf8_stream;
 pub mod workspace;

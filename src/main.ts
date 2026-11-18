@@ -23,6 +23,7 @@ import { keepAfter, type OutChunk } from "./outQueue";
 import { setupFilePanel } from "./filePanelUi";
 import { DRAGGING_CLASS } from "./resize";
 import { setupSidebar } from "./sidebarUi";
+import { setupSerialDialog, type SerialConfig } from "./serialUi";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -35,6 +36,7 @@ const ib = document.getElementById("ib-input") as HTMLInputElement;
 const ghostEl = document.getElementById("ib-ghost") as HTMLSpanElement;
 const sessList = document.getElementById("sess-list") as HTMLDivElement;
 const sessNew = document.getElementById("sess-new") as HTMLButtonElement;
+const sessSerial = document.getElementById("sess-serial") as HTMLButtonElement;
 const histOverlay = document.getElementById("hist-overlay") as HTMLDivElement;
 const histQuery = document.getElementById("hist-query") as HTMLInputElement;
 const histList = document.getElementById("hist-list") as HTMLDivElement;
@@ -46,6 +48,9 @@ const ibClear = document.getElementById("ib-clear") as HTMLButtonElement;
 const ibPass = document.getElementById("ib-pass") as HTMLButtonElement;
 const ibTake = document.getElementById("ib-take") as HTMLButtonElement;
 const ibPaused = document.getElementById("ib-paused") as HTMLSpanElement;
+const ibHex = document.getElementById("ib-hex") as HTMLButtonElement;
+const ibLog = document.getElementById("ib-log") as HTMLButtonElement;
+const ibHint = document.getElementById("ib-hint") as HTMLSpanElement;
 
 function log(msg: string) {
   hud.textContent = msg;
@@ -136,6 +141,8 @@ let sessionId = "";
 let bytes = 0;
 /// 文件面板的句柄：监听器可能先于 setup 收到事件，所以允许为空
 let filePanel: ReturnType<typeof setupFilePanel> | null = null;
+/// 新建串口会话的对话框：按钮在装配前就可能被点到（理论上不会），所以允许为空
+let serialDialog: ReturnType<typeof setupSerialDialog> | null = null;
 let benchTerm: Terminal | null = null;
 let benchScheduled = false;
 
@@ -155,11 +162,19 @@ const coldStart = {
   inputReadyAt: 0
 };
 
+interface Caps {
+  completion: boolean;
+  history: boolean;
+  timestamp: boolean;
+  alt_screen: boolean;
+}
+
 interface SessionInfo {
   id: string;
   title: string;
   state: TermState;
   created_ms: number;
+  caps: Caps;
 }
 
 interface ReplayPayload {
@@ -301,6 +316,22 @@ async function attach(id: string) {
   lastSeq = 0;
   pending = [];
   attaching = false;
+  // 通道类型决定界面上哪些入口存在（串口没有补全、命令检索与备用屏）。
+  // 能力位由后端给（`pty_list` 的 `caps`），这里只按会话类型切换提示文案。
+  serialKind = tree.find((session) => session.id === id)?.transport === "serial";
+  serialStatus = null;
+  hexMode = hexBySession.get(id) ?? false;
+  notice = "";
+  window.clearTimeout(noticeTimer);
+  ibHex.hidden = !serialKind;
+  ibLog.hidden = !serialKind;
+  ibHex.classList.toggle("on", hexMode);
+  ibHex.disabled = false;
+  ibLog.disabled = true;
+  ibHint.textContent = serialKind ? "↑ 发送历史" : "↑ 历史 · Ctrl+R 检索";
+  ib.placeholder = serialKind
+    ? "输入要发送的内容"
+    : "提示符就绪后可在这里输入";
   // 历史覆盖层、输入草稿、↑↓ 游标都属于上一个会话：切走时一起丢掉，
   // 否则旧会话里敲了一半的命令会被回车发到新会话去。
   if (!histOverlay.hidden) closeHistoryOverlay(false, false);
@@ -326,7 +357,8 @@ async function attach(id: string) {
   if (!ok || sessionId !== id) return;
 
   applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
-  await syncPaused(id);
+  if (serialKind) await syncSerial(id);
+  else await syncPaused(id);
   void rebuildHistory(id);
   // 文件面板跟随会话：切到哪儿就跟到哪儿（固定模式下它自己会忽略这次刷新）
   filePanel?.reload();
@@ -342,6 +374,20 @@ interface TreeSession {
   transport: "terminal" | "serial";
   shell: string | null;
   cwd: string | null;
+  serial: SerialConfig | null;
+}
+
+/// `serial:status` 的载荷（串口会话才有）。`status` 三态：
+/// open = 端口握在手里；released = 已主动断开（还能「连接」）；
+/// failed = 读写出错（拔线、端口被系统收走），同样可以重连。
+interface SerialStatus {
+  id: string;
+  status: "open" | "released" | "failed";
+  error: string | null;
+  log: string | null;
+  paused: boolean;
+  summary: string;
+  config: SerialConfig;
 }
 
 async function refreshTree() {
@@ -366,10 +412,23 @@ function renderTree() {
   for (const session of tree) {
     const row = document.createElement("div");
     row.className = "sess-row" + (session.id === sessionId ? " active" : "");
-    row.title = `${session.title} · ${session.id.slice(0, 8)}${session.cwd ? ` · ${session.cwd}` : ""}`;
+    const detail = session.transport === "serial" && session.serial
+      ? `串口 ${session.serial.port} · ${session.serial.baud}`
+      : session.cwd ?? "";
+    row.title = `${session.title} · ${session.id.slice(0, 8)}${detail ? ` · ${detail}` : ""}`;
 
     const dot = document.createElement("span");
     dot.className = "sess-dot" + (live.has(session.id) ? " hot" : "");
+
+    // 串口会话在行上加一个记号：终端是「跑一个进程」，串口是「占一条线」，
+    // 两者共用同一套会话模型，但一眼就该分得出来（ADR 0001）。
+    let mark: HTMLSpanElement | null = null;
+    if (session.transport === "serial") {
+      mark = document.createElement("span");
+      mark.className = "sess-serial-mark";
+      mark.textContent = "⌁";
+      mark.title = "串口会话";
+    }
 
     const name = document.createElement("span");
     name.className = "sess-name";
@@ -429,7 +488,9 @@ function renderTree() {
       void closeSession(session.id);
     });
 
-    row.append(dot, name, close);
+    row.append(dot);
+    if (mark) row.append(mark);
+    row.append(name, close);
     row.addEventListener("click", (e) => {
       if (e.detail > 1) return; // 双击的第二下属于改名，不该顺带切换会话
       void openSession(session.id);
@@ -480,12 +541,22 @@ async function openSession(id: string) {
   }
   if (!live.has(id)) {
     // 冷会话：用同一个 id 拉起，会话树里的位置与历史不变。
-    // 后端记住了上次的 CWD，从这里接着开；目录已经不在了就退回默认目录。
-    try {
-      await spawn(id, tree.find((s) => s.id === id)?.cwd ?? null);
-    } catch (err) {
-      console.warn(`[open] ${String(err)}，退回默认目录`);
-      await spawn(id, null);
+    const known = tree.find((s) => s.id === id);
+    if (known?.transport === "serial") {
+      // 串口冷会话按工作区里记住的配置重连；目录、Shell 与它无关。
+      if (!known.serial) {
+        log(`串口会话 ${id.slice(0, 8)} 缺少连接参数，无法重连`);
+        return;
+      }
+      await invoke("spawn_serial_session", { config: known.serial, sessionId: id });
+    } else {
+      // 后端记住了上次的 CWD，从这里接着开；目录已经不在了就退回默认目录。
+      try {
+        await spawn(id, known?.cwd ?? null);
+      } catch (err) {
+        console.warn(`[open] ${String(err)}，退回默认目录`);
+        await spawn(id, null);
+      }
     }
     await refreshTree();
   }
@@ -498,6 +569,15 @@ async function newSession() {
   await refreshTree();
   await attach(id);
   renderTree();
+}
+
+/// 新建串口会话。参数来自对话框，错误一路抛回去让对话框显示（端口被占用、
+/// 设备不在、波特率越界……），不在这里吞掉。成功返回会话 id，挂载交给调用方：
+/// 会话已经建好之后，界面挂载失败不该把对话框留在「创建失败」上（重载页面还能挂回来）。
+async function newSerialSession(config: SerialConfig): Promise<string> {
+  const id = await invoke<string>("spawn_serial_session", { config, sessionId: null });
+  await refreshTree();
+  return id;
 }
 
 async function closeSession(id: string) {
@@ -525,6 +605,7 @@ async function boot() {
 }
 
 sessNew.addEventListener("click", () => void newSession());
+sessSerial.addEventListener("click", () => serialDialog?.open());
 
 
 /// xterm 的 onData 里有真按键，也有终端回报。焦点报告（`ESC[I` / `ESC[O`）不是用户输入：
@@ -631,6 +712,12 @@ let composing = false;
 function updateGhost() {
   // 组合期间输入框里是拼音而不是命令：留着上一条建议会看着像已经匹配了
   if (composing) {
+    currentGhost = "";
+    ghostEl.textContent = "";
+    return;
+  }
+  // 串口没有「命令」可补全（caps.completion = false），也就不画 Ghost Text
+  if (serialKind) {
     currentGhost = "";
     ghostEl.textContent = "";
     return;
@@ -895,17 +982,11 @@ function applyOwnership(next: Ownership) {
 
   dot.className = guess ? "guess" : takes ? "ok" : "";
   bar.className = takes ? "ok" : guess ? "guess" : "pass";
-  // 这两项不是所有权的一部分，但都画在同一条输入条上：重设 className 会把它们抹掉，
-  // 所以每次刷新所有权都按当前状态重新贴一遍。
-  if (paused) bar.classList.add("paused");
   ibPass.classList.toggle("on", next.override === "passthrough");
   ibTake.classList.toggle("on", next.override === "input_bar");
-  ownLabel.textContent =
-    next.override === "passthrough"
-      ? "已锁直通 · 按键全给终端"
-      : next.override === "input_bar"
-        ? "已锁输入条 · 按键不回终端"
-        : STATE_TEXT[next.state];
+  // 串口的状态点、按钮文案、错误提示都挂在同一条输入条上：统一由 renderBarStatus 画，
+  // 免得重设 className 抹掉暂停 / 断开这些不是所有权的一部分的状态。
+  renderBarStatus();
 
   // 可输入的判定口径：OSC 133 A 推进到 prompt_ready 的那一刻。
   // 只记第一次，后续提示符漂移不改写冷启动数字。挂回旧会话时不计量。
@@ -940,18 +1021,120 @@ function toggleOverride(mode: Exclude<OverrideMode, "none">) {
   setOverride(own?.override === mode ? "none" : mode);
 }
 
-// ---------- 输入条按钮：暂停 / 清屏 / 直通 / 接管 ----------
-// 这四个动作此前只有快捷键，鼠标点不到。按钮一律不抢焦点：点完焦点还在终端或输入框，
+// ---------- 输入条按钮：暂停 / 断开 / 清屏 / 直通 / 接管 ----------
+// 这些动作此前只有快捷键，鼠标点不到。按钮一律不抢焦点：点完焦点还在终端或输入框，
 // 可以接着敲键盘（否则点完「接管」还得再点一次输入框才能打字）。
 
-/// 暂停接收输出。判定在后端读线程（暂停期间不再发 `pty:out`），前端只表达意图与按钮状态。
+/// 终端通道：暂停接收输出（显示层开关，后端仍然记回放）。
+/// 串口通道：`serialStatus.paused` 才是「端口已释放」——那里的暂停是真关句柄。
 let paused = false;
 
-function renderPaused() {
-  ibPause.classList.toggle("on", paused);
-  ibPause.textContent = paused ? "继续" : "暂停";
-  ibPaused.hidden = !paused;
-  bar.classList.toggle("paused", paused);
+/// 当前会话是不是串口。由会话树里的 `transport` 决定，切会话时重设。
+let serialKind = false;
+/// 当前串口会话的状态（`serial:status` 与 `serial_status` 的载荷）。终端会话恒为 null。
+let serialStatus: SerialStatus | null = null;
+/// HEX 发送开关按会话记：切走再切回来还是上次的样子。
+/// 真正的解析在 core-domain，这里只表达「这次发送按十六进制读」。
+let hexMode = false;
+const hexBySession = new Map<string, boolean>();
+
+/// 输入条右侧的临时提示（HEX 解析失败、端口被别的程序抢走……）。
+/// 和「暂停中」共用同一个位置：同一时刻只可能有一件需要说的事。
+let notice = "";
+let noticeIsError = false;
+let noticeTimer: number | undefined;
+
+function showNotice(text: string, isError = true, ttl = 6000) {
+  notice = text;
+  noticeIsError = isError;
+  window.clearTimeout(noticeTimer);
+  if (ttl > 0) {
+    noticeTimer = window.setTimeout(() => {
+      notice = "";
+      renderBarStatus();
+    }, ttl);
+  }
+  renderBarStatus();
+}
+
+/// 把「所有权 + 通道状态」画到输入条上。所有会改这些状态的地方都只调它，
+/// 不各自去改 className，否则后画的会抹掉先画的（暂停、断开、错误都是同一行）。
+function renderBarStatus() {
+  const takes = own?.owner === "input_bar";
+
+  bar.classList.toggle("serial", serialKind);
+  bar.classList.toggle("failed", serialKind && serialStatus?.status === "failed");
+  bar.classList.toggle("paused", serialKind ? !!serialStatus?.paused : paused);
+
+  // 串口的状态点：连上=绿、主动断开=琥珀、读写失败=红。终端的点只表达所有权。
+  dot.classList.toggle("err", serialKind && serialStatus?.status === "failed");
+  dot.classList.toggle("warn", serialKind && (!serialStatus || serialStatus.paused || serialStatus.status === "released"));
+  dot.classList.toggle("ok", serialKind && serialStatus?.status === "open" && takes);
+
+  let labelText: string;
+  if (own?.override === "passthrough") {
+    labelText = "已锁直通 · 按键全给通道";
+  } else if (own?.override === "input_bar") {
+    labelText = "已锁输入条 · 按键不回通道";
+  } else if (serialKind) {
+    if (!serialStatus) {
+      labelText = "串口 · 连接中";
+    } else if (serialStatus.status === "failed") {
+      labelText = `串口 ${serialStatus.config.port} · 连接失败`;
+    } else if (serialStatus.paused || serialStatus.status === "released") {
+      labelText = `串口 ${serialStatus.config.port} · 已断开`;
+    } else {
+      labelText = `串口 ${serialStatus.config.port} · ${serialStatus.summary}`;
+    }
+  } else {
+    labelText = STATE_TEXT[own?.state ?? "unknown"];
+  }
+  ownLabel.textContent = labelText;
+
+  // 同一格文案的优先级：临时错误 > 串口失败 > 串口断开 > 终端暂停中
+  if (notice) {
+    ibPaused.hidden = false;
+    ibPaused.textContent = notice;
+    ibPaused.title = notice;
+    ibPaused.classList.toggle("err", noticeIsError);
+  } else if (serialKind && serialStatus?.status === "failed") {
+    ibPaused.hidden = false;
+    ibPaused.textContent = "连接失败";
+    ibPaused.title = serialStatus.error ?? "";
+    ibPaused.classList.add("err");
+  } else if (serialKind && (serialStatus?.paused || serialStatus?.status === "released")) {
+    ibPaused.hidden = false;
+    ibPaused.textContent = "端口已断开";
+    ibPaused.title = "点「连接」按原配置重开；会话、回放与历史都还在";
+    ibPaused.classList.remove("err");
+  } else if (!serialKind) {
+    ibPaused.hidden = !paused;
+    ibPaused.textContent = "暂停中";
+    ibPaused.title = "";
+    ibPaused.classList.remove("err");
+  } else {
+    ibPaused.hidden = true;
+  }
+
+  // 暂停按钮在串口会话里就是「断开 / 连接」：暂停的语义是真正释放端口（M5）
+  if (serialKind) {
+    const down = !serialStatus || serialStatus.paused || serialStatus.status === "released" || serialStatus.status === "failed";
+    ibPause.classList.toggle("on", down);
+    ibPause.textContent = down ? "连接" : "断开";
+    ibPause.title = down
+      ? "按原配置重新打开端口 · 同一串口不允许两个热会话"
+      : "真正释放端口：关闭句柄后别的程序也能用它；会话、回放与历史都保留";
+    ibHex.disabled = false;
+    ibLog.disabled = !serialStatus?.log;
+    ibLog.title = serialStatus?.log
+      ? `打开 ${serialStatus.log}`
+      : "本次会话没有日志文件（数据目录不可写）";
+  } else {
+    ibPause.classList.toggle("on", paused);
+    ibPause.textContent = paused ? "继续" : "暂停";
+    ibPause.title = "暂停接收输出 · Ctrl+Shift+Space\n暂停期间不再刷新屏幕，输出仍记进回放缓冲；继续时按回放整屏重画";
+    ibLog.disabled = true;
+  }
 }
 
 /// 切会话/切回来时按后端的真实状态复原按钮：暂停是后端的开关，
@@ -965,24 +1148,56 @@ async function syncPaused(id: string) {
   }
   if (sessionId !== id) return; // 查的途中又切走了
   paused = next;
-  renderPaused();
+  renderBarStatus();
+}
+
+/// 串口会话的状态（端口是否握在手里、错误、日志路径）。终端会话不调这里。
+async function syncSerial(id: string) {
+  try {
+    const next = await invoke<SerialStatus>("serial_status", { id });
+    if (sessionId !== id) return;
+    serialStatus = next;
+    paused = next.paused;
+  } catch (err) {
+    if (sessionId !== id) return;
+    console.warn(`[serial] 状态: ${String(err)}`);
+    serialStatus = null;
+  }
+  renderBarStatus();
 }
 
 /// 暂停 = 冻结画面但不丢数据：后端照常把输出记进回放缓冲，只是不再推事件。
 /// 继续时整屏按回放重画一次——只把后续增量画在旧屏幕上会与 Shell 的屏幕错位
 /// （它以为光标在某一行，实际早就不是了）。
+///
+/// 串口会话的同一个按钮是「断开 / 连接」：断开真的关掉端口句柄（别的程序能用），
+/// 连接按原配置重开并起新的读线程。回放与历史都不动，所以不必重画屏幕。
 async function togglePause() {
   const id = sessionId;
   if (!id) return;
+
+  if (serialKind) {
+    const down =
+      !serialStatus || serialStatus.paused || serialStatus.status === "released" || serialStatus.status === "failed";
+    try {
+      if (down) await invoke("serial_connect", { id });
+      else await invoke("serial_disconnect", { id });
+    } catch (err) {
+      if (sessionId === id) showNotice(`连接失败：${String(err)}`, true, 8000);
+    }
+    if (sessionId === id) await syncSerial(id);
+    return;
+  }
+
   const next = !paused;
   if (next) flushOut(); // 暂停前已经到手的块属于「暂停前」，先画完再冻结
   paused = next;
-  renderPaused();
+  renderBarStatus();
   try {
     await invoke("pty_set_paused", { id, paused: next });
   } catch (err) {
     paused = !next;
-    renderPaused();
+    renderBarStatus();
     console.warn(`[pause] ${String(err)}`);
     return;
   }
@@ -1016,7 +1231,7 @@ async function clearScreen() {
   term.clear(); // 与 `clear` 指令一致：当前行提到首行，历史一起丢
 }
 
-for (const btn of [ibPause, ibClear, ibPass, ibTake]) {
+for (const btn of [ibPause, ibClear, ibPass, ibTake, ibHex, ibLog]) {
   // 不抢焦点：点在按钮上等同于按快捷键
   btn.addEventListener("mousedown", (e) => e.preventDefault());
 }
@@ -1025,10 +1240,36 @@ ibClear.addEventListener("click", () => void clearScreen());
 ibPass.addEventListener("click", () => toggleOverride("passthrough"));
 ibTake.addEventListener("click", () => toggleOverride("input_bar"));
 
+/// HEX 模式：只改「这次发送怎么读」，不改变输入内容。解析与拒绝原因都在核心。
+ibHex.addEventListener("click", () => {
+  if (!serialKind || !sessionId) return;
+  hexMode = !hexMode;
+  hexBySession.set(sessionId, hexMode);
+  ibHex.classList.toggle("on", hexMode);
+  ib.placeholder = hexMode
+    ? "HEX：48 65 6C 6C 6F（整行发送，不追加行结束符）"
+    : "输入要发送的内容";
+  ib.focus();
+  updateGhost();
+});
+
+/// 打开本会话的串口日志。没有日志文件（数据目录不可写）就直说，不静默失败。
+ibLog.addEventListener("click", () => {
+  const path = serialStatus?.log;
+  if (!path) {
+    showNotice("本次会话没有日志文件", true);
+    return;
+  }
+  void invoke("fs_open", { path }).catch((err) => showNotice(String(err), true));
+});
+
 // 快捷键放在捕获阶段，避免 xterm 先吃掉按键
 window.addEventListener(
   "keydown",
   (e) => {
+    // 串口对话框开着时，按键属于表单：Esc 关闭、Enter 提交都由它自己处理，
+    // 不能让 Ctrl+Shift+P / Ctrl+R 之类在对话框里生效。
+    if (serialDialog?.isOpen()) return;
     if (DEBUG) {
       const t = e.target as HTMLElement | null;
       trace(
@@ -1042,7 +1283,8 @@ window.addEventListener(
     // 浏览器加速键已在 Rust 侧关掉（见 main.rs 的 AreBrowserAcceleratorKeysEnabled），
     // 这里拦下来的只是本应用的开关，不会再触发页面重载。
     if (e.ctrlKey && !e.shiftKey && matchesKey(e, "KeyR", "r")) {
-      if (own?.owner === "input_bar" || !histOverlay.hidden) {
+      // 串口没有命令历史与检索能力（`caps.history = false`），Ctrl+R 什么都不做
+      if (!serialKind && (own?.owner === "input_bar" || !histOverlay.hidden)) {
         e.preventDefault();
         e.stopPropagation();
         if (e.repeat) return; // 长按只开/关一次，别让覆盖层闪成跑马灯
@@ -1074,10 +1316,30 @@ window.addEventListener(
   true
 );
 
-// 输入条是命令的唯一入口：只发「文本 + 回车」，状态推进仍由后端负责
+// 输入条是命令的唯一入口：终端发「文本 + 回车」，串口按会话的发送方式与行结束符组包
+// （HEX 模式下整行按十六进制解析，核心负责拒绝非法输入）。
+// 发送失败时把这一行还给输入条：端口断了、HEX 位数不对都不该让用户重敲。
 function sendLine(line: string) {
-  if (!sessionId) return;
-  void invoke("pty_send_line", { id: sessionId, line });
+  const id = sessionId;
+  if (!id) return;
+  const hex = serialKind && hexMode;
+  void invoke("pty_send_line", { id, line, hex }).then(
+    () => {
+      if (noticeIsError && sessionId === id) {
+        notice = "";
+        noticeIsError = false;
+        window.clearTimeout(noticeTimer);
+        renderBarStatus();
+      }
+    },
+    (err) => {
+      if (sessionId !== id) return;
+      if (!ib.value) ib.value = line;
+      ib.setSelectionRange(ib.value.length, ib.value.length);
+      showNotice(String(err), true, 8000);
+      if (serialKind) void syncSerial(id);
+    }
+  );
 }
 
 ib.addEventListener("keydown", (e) => {
@@ -1259,6 +1521,14 @@ const listenOwn = listen<Ownership>("pty:ownership", (event) => {
   applyOwnership(event.payload);
 });
 
+// 串口状态：连上 / 主动断开 / 读写失败。后端只在变化时发，前端只负责画。
+const listenSerial = listen<SerialStatus>("serial:status", (event) => {
+  if (event.payload.id !== sessionId) return;
+  serialStatus = event.payload;
+  paused = event.payload.paused;
+  renderBarStatus();
+});
+
 // 会话 CWD 变了（Shell 每次提示符上报 OSC 7）。只有真变化后端才发，不是每个回车一帧。
 const listenCwd = listen<{ id: string; cwd: string }>("session:cwd", (event) => {
   const item = tree.find((session) => session.id === event.payload.id);
@@ -1371,10 +1641,23 @@ filePanel = setupFilePanel({
   layoutChanged: () => syncSize()
 });
 
+// 串口对话框：创建成功才关闭，失败把后端的原因原样显示在表单里
+serialDialog = setupSerialDialog({
+  create: async (config) => {
+    const id = await newSerialSession(config);
+    // 建好的会话已经进了工作区：挂载失败只记日志，别让对话框假装没创建成功
+    void attach(id)
+      .then(() => renderTree())
+      .catch((err) => console.warn(`[serial] attach: ${String(err)}`));
+    return "";
+  }
+});
+
 void Promise.all([
   listenOut,
   listenExit,
   listenOwn,
+  listenSerial,
   listenCwd,
   listenHistory,
   listenHistoryDegraded

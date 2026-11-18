@@ -10,7 +10,8 @@
       <aside id="sidebar">
         <div id="sess-head">
           <span>会话</span>
-          <button id="sess-new" title="新建会话">＋</button>
+          <button id="sess-new" title="新建终端会话">＋</button>
+          <button id="sess-serial" title="新建串口会话">⌁</button>
           <button id="sess-collapse" title="收起会话栏">‹</button>
         </div>
         <!-- 收起后只剩这条竖条：点它展开，宽度与折叠状态会记住 -->
@@ -64,10 +65,12 @@
           </div>
           <span id="ib-paused" hidden>暂停中</span>
           <div id="ib-actions">
-            <button id="ib-pause" title="暂停接收输出 · Ctrl+Shift+Space&#10;暂停期间不再刷新屏幕，输出仍记进回放缓冲（上限 256 KB）；继续时按回放整屏重画">暂停</button>
+            <button id="ib-hex" title="HEX 模式：输入按整行十六进制发送（空格、逗号分隔；不追加行结束符）" hidden>HEX</button>
+            <button id="ib-log" title="打开本会话的串口日志" hidden>日志</button>
+            <button id="ib-pause" title="暂停接收输出 · Ctrl+Shift+Space&#10;终端：只冻结画面，输出仍记进回放缓冲；串口：真正释放端口，点「连接」按原配置重开">暂停</button>
             <button id="ib-clear" title="清空本会话屏幕与回放，不动命令历史 · Ctrl+Shift+K">清屏</button>
-            <button id="ib-pass" title="锁直通：按键全给终端 · Ctrl+Shift+P">直通</button>
-            <button id="ib-take" title="锁输入条：按键不回终端 · Ctrl+Shift+L">接管</button>
+            <button id="ib-pass" title="锁直通：按键全给通道 · Ctrl+Shift+P">直通</button>
+            <button id="ib-take" title="锁输入条：按键不回通道 · Ctrl+Shift+L">接管</button>
           </div>
           <span id="ib-hint">↑ 历史 · Ctrl+R 检索</span>
         </div>
@@ -91,6 +94,80 @@
           <div id="files-foot">双击目录进入 · 双击文件填入输入条</div>
         </div>
       </aside>
+
+      <!-- 新建串口会话：连接参数只在创建时填一次，之后随工作区落盘，冷会话按它重连 -->
+      <div id="serial-overlay" hidden>
+        <form id="serial-form">
+          <div id="serial-head">
+            <span>新建串口会话</span>
+            <button type="button" id="serial-close" title="关闭（Esc）">✕</button>
+          </div>
+          <div id="serial-grid">
+            <label class="wide">端口
+              <span class="serial-inline">
+                <input id="serial-port" list="serial-port-list" placeholder="COM3" spellcheck="false" autocomplete="off" autocapitalize="off" />
+                <button type="button" id="serial-refresh" title="重新枚举串口">⟳</button>
+              </span>
+            </label>
+            <datalist id="serial-port-list"></datalist>
+            <label>波特率
+              <input id="serial-baud" type="number" min="50" max="4000000" step="1" value="115200" />
+            </label>
+            <label>数据位
+              <select id="serial-data">
+                <option value="8" selected>8</option>
+                <option value="7">7</option>
+                <option value="6">6</option>
+                <option value="5">5</option>
+              </select>
+            </label>
+            <label>校验
+              <select id="serial-parity">
+                <option value="none" selected>无</option>
+                <option value="odd">奇</option>
+                <option value="even">偶</option>
+              </select>
+            </label>
+            <label>停止位
+              <select id="serial-stop">
+                <option value="one" selected>1</option>
+                <option value="two">2</option>
+              </select>
+            </label>
+            <label>流控
+              <select id="serial-flow">
+                <option value="none" selected>无</option>
+                <option value="software">XON/XOFF</option>
+                <option value="hardware">RTS/CTS</option>
+              </select>
+            </label>
+            <label>行结束符
+              <select id="serial-ending">
+                <option value="crlf" selected>CRLF（\r\n）</option>
+                <option value="cr">CR（\r）</option>
+                <option value="lf">LF（\n）</option>
+              </select>
+            </label>
+            <label>发送方式
+              <select id="serial-mode">
+                <option value="line" selected>行缓冲</option>
+                <option value="direct">直发</option>
+              </select>
+            </label>
+          </div>
+          <div id="serial-flags">
+            <label><input id="serial-dtr" type="checkbox" checked /> DTR</label>
+            <label><input id="serial-rts" type="checkbox" checked /> RTS</label>
+            <span>打开端口时把这两条握手线拉高；多数 USB 转串口需要</span>
+          </div>
+          <div id="serial-error"></div>
+          <div id="serial-foot">
+            <span id="serial-ports-hint"></span>
+            <button type="button" id="serial-cancel">取消</button>
+            <button type="submit" id="serial-create">创建</button>
+          </div>
+        </form>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
