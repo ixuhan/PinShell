@@ -5,8 +5,6 @@
 
 | 时间 | 层 | 明细 | 结论 | 失败用例 |
 |---|---|---|---|---|
-| 2026-11-18T09:14:10+08:00 | it | L1 shell markers: ok 2.4s (3 passed, 0 failed)<br>L1 persistence: ok 5.3s (36 passed, 0 failed) | PASS | - |
-| 2026-11-18T09:22:19+08:00 | all | L0 core-domain: ok 0.6s (103 passed, 0 failed)<br>L0 frontend: ok 1.7s (77 passed, 0 failed)<br>L1 shell markers: ok 2.5s (3 passed, 0 failed)<br>L1 persistence: ok 14.7s (36 passed, 0 failed) | PASS | - |
 | 2026-11-18T10:48:39+08:00 | l0 | L0 core-domain: ok 0.5s (103 passed, 0 failed)<br>L0 frontend: ok 1.6s (88 passed, 0 failed) | PASS | - |
 | 2026-11-18T11:36:15+08:00 | l0 | L0 core-domain: ok 5.7s (116 passed, 0 failed)<br>L0 frontend: ok 2.1s (88 passed, 0 failed) | PASS | - |
 | 2026-11-18T11:53:34+08:00 | l0 | L0 core-domain: ok 1.8s (116 passed, 0 failed)<br>L0 frontend: ok 2.1s (88 passed, 0 failed) | PASS | - |
@@ -15,3 +13,5 @@
 | 2026-11-18T12:03:08+08:00 | all | L0 core-domain: ok 0.3s (117 passed, 0 failed)<br>L0 frontend: ok 1.6s (88 passed, 0 failed)<br>L1 shell markers: ok 2.4s (3 passed, 0 failed)<br>L1 persistence: ok 0.7s (48 passed, 0 failed) | PASS | - |
 | 2026-11-18T12:06:55+08:00 | all | L0 core-domain: ok 0.3s (117 passed, 0 failed)<br>L0 frontend: ok 1.6s (88 passed, 0 failed)<br>L1 shell markers: ok 2.4s (3 passed, 0 failed)<br>L1 persistence: ok 0.8s (48 passed, 0 failed) | PASS | - |
 | 2026-11-18T12:07:56+08:00 | all | L0 core-domain: ok 0.5s (117 passed, 0 failed)<br>L0 frontend: ok 1.7s (91 passed, 0 failed)<br>L1 shell markers: ok 2.3s (3 passed, 0 failed)<br>L1 persistence: ok 0.9s (48 passed, 0 failed) | PASS | - |
+| 2026-11-18T15:06:08+08:00 | l0 | L0 core-domain: ok 0.9s (117 passed, 0 failed)<br>L0 frontend: ok 1.9s (91 passed, 0 failed) | PASS | - |
+| 2026-11-18T15:10:31+08:00 | l0 | L0 core-domain: ok 0.2s (117 passed, 0 failed)<br>L0 frontend: ok 1.7s (91 passed, 0 failed) | PASS | - |

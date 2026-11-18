@@ -1128,7 +1128,7 @@ function renderBarStatus() {
     ibLog.disabled = !serialStatus?.log;
     ibLog.title = serialStatus?.log
       ? `打开 ${serialStatus.log}`
-      : "本次会话没有日志文件（数据目录不可写）";
+      : "本次会话没有日志文件";
   } else {
     ibPause.classList.toggle("on", paused);
     ibPause.textContent = paused ? "继续" : "暂停";
@@ -1182,6 +1182,13 @@ async function togglePause() {
     try {
       if (down) await invoke("serial_connect", { id });
       else await invoke("serial_disconnect", { id });
+      // 端口状态刚刚变了，上一条「端口已断开」「连接失败」的提示就过期了。
+      // 不清掉会出现「状态点已经绿的、提示还写着已断开」的自相矛盾画面（M5 验收）。
+      if (sessionId === id) {
+        notice = "";
+        noticeIsError = false;
+        window.clearTimeout(noticeTimer);
+      }
     } catch (err) {
       if (sessionId === id) showNotice(`连接失败：${String(err)}`, true, 8000);
     }

@@ -273,6 +273,7 @@ body.layout-dragging #sess-resizer::after {
 /* 输入条：常驻可见，状态点说明此刻按键归谁 */
 #inputbar {
   flex: none;
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -457,8 +458,24 @@ body.layout-dragging #sess-resizer::after {
   color: #e35d6a;
 }
 
+/* 出错提示浮在输入条上方，不占输入条的位置。
+   之前它和输入框一起排在一行里：长错误（「十六进制位数是奇数，每字节需要两位」）
+   会把输入框挤成 0 宽，用户看不到「发送失败后留在输入条上」待改的那一行。 */
 #ib-paused.err {
   color: #e35d6a;
+  position: absolute;
+  right: 10px;
+  bottom: calc(100% + 6px);
+  max-width: min(520px, calc(100% - 20px));
+  padding: 3px 9px;
+  border: 1px solid #5a2a30;
+  border-radius: 7px;
+  background: #261a1d;
+  box-shadow: 0 6px 18px -10px #000;
+  white-space: normal;
+  z-index: 4;
+  /* 只是说明，不要挡住终端上的点击与选中 */
+  pointer-events: none;
 }
 
 /* 串口会话在侧栏里用一个记号区分：终端是普通过程，串口是一条一直开着的线 */
