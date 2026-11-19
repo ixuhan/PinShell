@@ -103,6 +103,7 @@ body.layout-dragging #sess-resizer::after {
 #sidebar.collapsed #sess-head,
 #sidebar.collapsed #sess-list,
 #sidebar.collapsed #sess-hint,
+#sidebar.collapsed #ports-panel,
 #sidebar.collapsed #sess-resizer {
   display: none;
 }
@@ -130,8 +131,32 @@ body.layout-dragging #sess-resizer::after {
   display: none;
 }
 
+#ib-send[hidden],
+#ib-wrap[hidden] {
+  display: none;
+}
+
+.sess-state {
+  flex: none;
+  color: #d6a34a;
+  font-size: 10px;
+}
+
+.sess-state:empty {
+  display: none;
+}
+
+.sess-state.connected {
+  color: #46d19a;
+}
+
+.sess-state.paused {
+  color: #d6a34a;
+}
+
 #sess-list {
   flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 0 6px;
 }
@@ -152,8 +177,25 @@ body.layout-dragging #sess-resizer::after {
 }
 
 .sess-row.active {
-  background: #172536;
-  color: #e8eef7;
+  position: relative;
+  background: #1c3045;
+  color: #f2f7ff;
+  box-shadow: inset 0 0 0 1px #385b7b;
+}
+
+.sess-row.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: #56b4ff;
+}
+
+.sess-row.active .sess-name {
+  font-weight: 600;
 }
 
 .sess-dot {
@@ -164,9 +206,20 @@ body.layout-dragging #sess-resizer::after {
   background: #3c4a5c;
 }
 
-.sess-dot.hot {
+.sess-dot.connected {
   background: #46d19a;
   box-shadow: 0 0 6px -1px #46d19a;
+}
+
+.sess-dot.activity {
+  animation: sess-dot-blink 600ms ease-in-out infinite;
+}
+
+@keyframes sess-dot-blink {
+  50% {
+    opacity: 0.25;
+    box-shadow: 0 0 1px #46d19a;
+  }
 }
 
 .sess-name {
@@ -190,6 +243,26 @@ body.layout-dragging #sess-resizer::after {
   outline: 0;
   color: #e8eef7;
   font: inherit;
+}
+
+.sess-menu-button {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #718198;
+  font-size: 16px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.sess-menu-button:hover,
+.sess-row.active .sess-menu-button {
+  background: #27394d;
+  color: #e8eef7;
 }
 
 .sess-close {
@@ -217,14 +290,200 @@ body.layout-dragging #sess-resizer::after {
   font-size: 10.5px;
 }
 
+#ports-panel {
+  position: relative;
+  flex: none;
+  min-width: 0;
+  height: var(--ports-height, 180px);
+  border-top: 1px solid #24303f;
+}
+
+#ports-resizer {
+  position: absolute;
+  top: -5px;
+  left: 0;
+  right: 0;
+  height: 10px;
+  z-index: 6;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+#ports-resizer::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: transparent;
+}
+
+#ports-resizer:hover::after,
+body.layout-dragging #ports-resizer::after {
+  background: #2c5a46;
+}
+
+#ports-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: calc(100% - 35px);
+}
+
+#ports-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+}
+
+.ports-heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  margin-right: auto;
+  min-width: 0;
+}
+
+#ports-refreshed {
+  color: #65758c;
+  font-size: 10.5px;
+  line-height: 12px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#ports-refreshed[hidden] {
+  display: none;
+}
+
+#ports-refreshed::before,
+#files-refreshed::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: #46d19a;
+  box-shadow: 0 0 5px #46d19a;
+  animation: refresh-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes refresh-pulse {
+  50% { opacity: 0.35; box-shadow: 0 0 1px #46d19a; }
+}
+
+#ports-head button,
+.port-add {
+  flex: none;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #8a9ab0;
+  font: inherit;
+  cursor: pointer;
+}
+
+#ports-head button:hover,
+.port-add:hover {
+  background: #1b2935;
+  color: #e8eef7;
+}
+
+#ports-head .ports-heading #ports-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 0;
+}
+
+#ports-auto.on {
+  background: #1c3a2d;
+  border-color: #2c5a46;
+  color: #70d6a6;
+}
+
+#ports-refresh:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+#ports-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  padding: 0 6px;
+}
+
+.port-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 4px;
+  border-radius: 4px;
+  color: #9aabc2;
+}
+
+.port-row:hover {
+  background: #141c28;
+}
+
+.port-row.sel {
+  background: #1c3045;
+  color: #e8eef7;
+}
+
+.port-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ports-status {
+  padding: 3px 10px 6px;
+  color: #65758c;
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+#ports-status.error {
+  color: #e35d6a;
+}
+
+#ports-panel.collapsed {
+  height: auto;
+}
+
+#ports-panel.collapsed #ports-body,
+#ports-panel.collapsed #ports-resizer,
+#ports-panel.collapsed #ports-refresh,
+#ports-panel.collapsed #ports-auto {
+  display: none;
+}
+
+#ports-panel.collapsed .ports-chevron {
+  transform: rotate(-90deg);
+}
+
 #main {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
   position: relative;
-  /* 终端与覆盖层都不该画到文件面板上：宽度变化时先裁在自己的格子里 */
   overflow: hidden;
+  --inputbar-height: 156px;
 }
 
 #term-host {
@@ -271,19 +530,136 @@ body.layout-dragging #sess-resizer::after {
 }
 
 /* 输入条：常驻可见，状态点说明此刻按键归谁 */
+#inputbar-resizer[hidden],
+#inputbar[hidden] {
+  display: none;
+}
+
+#inputbar-resizer {
+  position: relative;
+  flex: none;
+  height: 8px;
+  margin: 0 10px -4px;
+  opacity: 1;
+  overflow: hidden;
+  transition: none;
+  z-index: 8;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+#inputbar-resizer.direct {
+  height: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#inputbar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: transparent;
+  border-radius: 2px;
+}
+
+#inputbar-resizer:hover::after,
+body.layout-dragging #inputbar-resizer::after {
+  background: #3b8067;
+}
+
+body.layout-dragging {
+  cursor: row-resize;
+  user-select: none;
+}
+
 #inputbar {
   flex: none;
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  height: var(--inputbar-height);
+  min-height: 0;
+  box-sizing: border-box;
+  gap: 0;
   margin: 0 10px 8px;
-  padding: 6px 10px;
+  padding: 8px 10px 7px;
   border: 1px solid #24303f;
-  border-radius: 9px;
+  border-radius: 12px;
   background: linear-gradient(#141b26, #101720);
   font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
   color: #8a9ab0;
+  opacity: 1;
+  overflow: hidden;
+  transition: none;
+}
+
+#inputbar.direct {
+  height: 0;
+  min-height: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#inputbar[hidden],
+#inputbar-resizer[hidden] {
+  display: none;
+}
+
+#ib-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 30px;
+  padding-top: 4px;
+}
+
+#ib-history {
+  flex: none;
+  height: 30px;
+  padding: 4px 9px;
+  background: #131a23;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  color: #8a9ab0;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#ib-history:hover {
+  color: #e8eef7;
+  border-color: #3b8067;
+}
+
+#ib-status {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+#own-label {
+  display: none;
+}
+
+#own-label {
+  display: none;
 }
 
 #inputbar.pass {
@@ -291,6 +667,7 @@ body.layout-dragging #sess-resizer::after {
 }
 
 #own-dot {
+  display: none;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -309,8 +686,8 @@ body.layout-dragging #sess-resizer::after {
 }
 
 #own-label {
+  min-width: 0;
   font-size: 10.5px;
-  letter-spacing: 0.4px;
   color: #65758c;
   white-space: nowrap;
 }
@@ -328,31 +705,40 @@ body.layout-dragging #sess-resizer::after {
   flex: none;
 }
 
-#inputbar.pass #ib-prompt,
-#inputbar.pass #ib-input {
+#inputbar.pass #ib-prompt {
   opacity: 0.45;
 }
+
 
 /* 输入框 + Ghost Text 叠在一起：输入框保持真实文本与光标，建议只画在光标后 */
 #ib-wrap {
   position: relative;
   display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  align-items: center;
-  /* 长建议到输入条右边缘就截住，别溢到外面的提示文案上 */
+  flex: 1 1 0;
+  min-width: 80px;
+  min-height: 0;
+  height: 100%;
+  align-items: stretch;
   overflow: hidden;
 }
 
 #ib-input {
+  display: block;
   flex: 1 1 auto;
-  min-width: 0;
   width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  resize: none;
+  overflow: auto;
+  padding: 4px 0;
+  box-sizing: border-box;
   background: transparent;
   border: 0;
   outline: 0;
   color: #e8eef7;
   font: inherit;
+  line-height: 1.6;
   caret-color: #46d19a;
 }
 
@@ -362,8 +748,8 @@ body.layout-dragging #sess-resizer::after {
 
 #ib-ghost {
   position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 3px;
+  left: 0;
   color: #4b5b70;
   white-space: pre;
   pointer-events: none;
@@ -384,13 +770,20 @@ body.layout-dragging #sess-resizer::after {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 
-#ib-actions button {
+#ib-actions[hidden] {
+  display: none;
+}
+
+#ib-actions button,
+#ib-send {
   flex: none;
-  padding: 1px 7px;
-  background: transparent;
+  min-width: 34px;
+  height: 30px;
+  padding: 4px 9px;
+  background: #131a23;
   border: 1px solid #24303f;
   border-radius: 6px;
   color: #8a9ab0;
@@ -401,9 +794,38 @@ body.layout-dragging #sess-resizer::after {
   cursor: pointer;
 }
 
-#ib-actions button:hover {
+#ib-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  height: 30px;
+  padding: 4px 12px;
+  background: #24674f;
+  border: 1px solid #368568;
+  border-radius: 6px;
   color: #e8eef7;
-  border-color: #31435a;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#ib-send:hover:not(:disabled) {
+  background: #2c8061;
+  border-color: #49a47e;
+}
+
+#ib-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#ib-send[hidden],
+#ib-wrap[hidden],
+#ib-prompt[hidden] {
+  display: none;
 }
 
 /* 直通 / 接管是互斥的锁定态：亮着表示当前锁定在哪一边 */
@@ -421,12 +843,20 @@ body.layout-dragging #sess-resizer::after {
   color: #d6a34a;
 }
 
+#ib-send[hidden],
+#ib-wrap[hidden],
+#ib-prompt[hidden] {
+  display: none;
+}
+
 #ib-paused {
   flex: none;
-  font-size: 10.5px;
-  letter-spacing: 0.4px;
-  color: #d6a34a;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 10.5px;
+  color: #d6a34a;
 }
 
 #inputbar.paused {
@@ -666,7 +1096,7 @@ body.layout-dragging #sess-resizer::after {
   cursor: default;
 }
 
-/* 窗口窄时先砍掉快捷键提示，把位置留给输入框 */
+/* 窗口窄时先收起快捷键提示，把位置留给输入区 */
 @media (max-width: 1000px) {
   #ib-hint {
     display: none;
@@ -689,11 +1119,51 @@ body.layout-dragging #sess-resizer::after {
 }
 
 /* ---------- Ctrl+R：输入条上方的历史检索覆盖层 ---------- */
+/* 新建按钮的终端类型菜单 */
+.sess-new-menu {
+  min-width: 156px;
+}
+
+/* 会话列表右键菜单 */
+.sess-context-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px;
+  background: #111923;
+  border: 1px solid #2a3a4d;
+  border-radius: 7px;
+  box-shadow: 0 8px 24px #0009;
+}
+
+.sess-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: #c5d1e0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sess-context-menu button:hover:not(:disabled) {
+  background: #203044;
+  color: #fff;
+}
+
+.sess-context-menu button:disabled {
+  color: #586779;
+  cursor: default;
+}
+
 #hist-overlay {
   position: absolute;
   left: 10px;
   right: 10px;
-  bottom: 54px;
+  bottom: calc(var(--inputbar-height) + 18px);
   max-height: 58%;
   display: flex;
   flex-direction: column;
@@ -834,6 +1304,98 @@ body.layout-dragging #sess-resizer::after {
   font-size: 10.5px;
 }
 
+/* ---------- 会话快捷指令 ---------- */
+#shortcuts-panel {
+  position: relative;
+  flex: none;
+  height: var(--shortcuts-height, 220px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid #24303f;
+  background: #0b1017;
+}
+
+#shortcuts-resizer {
+  position: absolute;
+  z-index: 5;
+  left: 0;
+  right: 0;
+  bottom: -5px;
+  height: 10px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+#shortcuts-resizer::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: transparent;
+}
+
+#shortcuts-resizer:hover::after,
+body.layout-dragging #shortcuts-resizer::after { background: #2c5a46; }
+#shortcuts-panel.collapsed { height: auto !important; }
+#shortcuts-panel.collapsed #shortcuts-body { display: none; }
+#shortcuts-panel.collapsed #shortcuts-resizer { display: none; }
+
+#shortcuts-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  border-bottom: 1px solid #1b2531;
+}
+
+#shortcuts-head button,
+.shortcut-action {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid #24303f;
+  border-radius: 4px;
+  background: #131a23;
+  color: #93a4b8;
+  font: inherit;
+  cursor: pointer;
+}
+#shortcuts-head button:hover:not(:disabled), .shortcut-action:hover:not(:disabled) { color: #e8eef7; border-color: #3b526b; }
+#shortcuts-toggle { margin-right: auto; }
+#shortcuts-toggle[aria-expanded="true"] { color: #d7e3f0; }
+#shortcuts-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+#shortcuts-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 5px; }
+#shortcuts-status { flex: none; min-height: 15px; padding: 2px 8px; color: #708095; font-size: 10px; overflow-wrap: anywhere; }
+.shortcut-row { display: flex; gap: 3px; align-items: stretch; margin-bottom: 4px; }
+.shortcut-card { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; padding: 5px 7px; border: 1px solid #253244; border-radius: 4px; background: #101720; color: #cbd7e5; text-align: left; font: inherit; cursor: pointer; }
+.shortcut-card:hover:not(:disabled) { border-color: #3a5268; background: #141e29; }
+.shortcut-card:disabled { cursor: default; }
+.shortcut-name { min-width: 0; overflow-wrap: anywhere; font-weight: 600; font-size: 11px; }
+.shortcut-command { grid-column: 1 / -1; grid-row: 2; min-width: 0; color: #8495a9; font-size: 10px; line-height: 1.25; white-space: pre-wrap; overflow-wrap: anywhere; }
+.shortcut-mode { grid-column: 2; grid-row: 1; justify-self: end; align-self: start; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; }
+.shortcut-mode.execute { color: #7de0b7; background: #153226; }
+.shortcut-mode.fill { color: #f0c477; background: #382b16; }
+.shortcut-controls { flex: none; display: flex; flex-direction: column; gap: 2px; }
+.shortcut-action { width: 23px; height: 22px; padding: 0; line-height: 18px; }
+.shortcut-action:disabled { opacity: .3; cursor: default; }
+
+#shortcut-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.58); }
+#shortcut-overlay[hidden] { display: none; }
+#shortcut-form { width: min(480px, 100%); display: grid; gap: 12px; padding: 16px; border: 1px solid #2b3a4d; border-radius: 6px; background: #10161f; color: #d7e3f0; box-shadow: 0 16px 48px rgba(0,0,0,.55); }
+#shortcut-dialog-head, #shortcut-dialog-foot { display: flex; align-items: center; gap: 8px; }
+#shortcut-dialog-head { justify-content: space-between; font-size: 14px; }
+#shortcut-form > label { display: grid; gap: 5px; color: #93a4b8; }
+#shortcut-form input[type="text"], #shortcut-form textarea { box-sizing: border-box; width: 100%; padding: 7px; border: 1px solid #29394d; border-radius: 4px; outline: 0; background: #0b1017; color: #e8eef7; font: inherit; }
+#shortcut-form textarea { resize: vertical; min-height: 100px; font-family: "Cascadia Mono", Consolas, monospace; }
+#shortcut-form input:focus, #shortcut-form textarea:focus { border-color: #46a77f; }
+#shortcut-form fieldset { display: flex; gap: 18px; border: 1px solid #29394d; border-radius: 4px; color: #b9c7d6; }
+#shortcut-form fieldset label { display: inline-flex; align-items: center; gap: 6px; }
+#shortcut-dialog-head button, #shortcut-dialog-foot button { padding: 5px 10px; border: 1px solid #34465b; border-radius: 4px; background: #17212d; color: #d7e3f0; font: inherit; cursor: pointer; }
+#shortcut-error { flex: 1 1 auto; color: #e87c83; }
+
 /* ---------- 文件面板（M4）：跟随焦点会话的 CWD ---------- */
 
 #files {
@@ -951,6 +1513,29 @@ body.layout-dragging {
   border-color: #33465c;
 }
 
+#files-head select {
+  flex: none;
+  min-width: 82px;
+  padding: 2px 5px;
+  border: 1px solid #24303f;
+  border-radius: 6px;
+  background: #131a23;
+  color: #93a4b8;
+  font: inherit;
+  cursor: pointer;
+}
+
+#files-head select:hover,
+#files-head select:focus {
+  color: #d7e3f0;
+  border-color: #33465c;
+}
+
+#files-head select option {
+  background: #131a23;
+  color: #d7e3f0;
+}
+
 #files-head button.on {
   color: #46d19a;
   border-color: #2c5a46;
@@ -973,6 +1558,22 @@ body.layout-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   border-bottom: 1px solid #1b2531;
+}
+
+#files-refreshed {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  color: #6f8a7d;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid #1b2531;
+}
+
+#files-refreshed[hidden] {
+  display: none;
 }
 
 #files-list {

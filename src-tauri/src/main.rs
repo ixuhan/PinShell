@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -29,7 +29,9 @@ use uuid::Uuid;
 mod fsview;
 mod history;
 mod persistence;
+mod profiles;
 mod shellmenu;
+mod shortcut_export;
 mod transport;
 
 /// 一个会话的运行时句柄。输入所有权、状态机等后续模块都挂在这里。
@@ -56,7 +58,6 @@ struct Session {
     /// 刷屏时读循环一秒能读到上千块，逐块发事件会把主线程和前端压满（见 `core_domain::coalesce`）。
     outbox: Arc<OutMailbox>,
 }
-
 /// 合流缓冲 + 发送线程共享的运行标志。读线程结束时 `running` 置 false，
 /// 发送线程把最后一块发出去后自行退出。
 struct OutMailbox {
@@ -88,6 +89,8 @@ struct InputState {
 
 struct AppState {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// 共享滴答线程的退出标记；单一调度器替代每会话一个轮询线程。
+    tick_running: AtomicBool,
     /// 会话树与布局。内存是唯一写入口，落盘由 [`persist_workspace`] 统一做。
     workspace: Mutex<Workspace>,
     /// 解析失败时为 `None`：本版没有必需落盘的状态，不挡启动
@@ -100,6 +103,7 @@ impl AppState {
     fn new(data_dir: Option<PathBuf>, workspace: Workspace) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            tick_running: AtomicBool::new(false),
             workspace: Mutex::new(workspace),
             data_dir,
             history: OnceLock::new(),
@@ -265,6 +269,7 @@ struct SerialPortPayload {
     manufacturer: Option<String>,
     product: Option<String>,
     serial_number: Option<String>,
+    friendly_name: Option<String>,
 }
 
 impl From<transport::PortInfo> for SerialPortPayload {
@@ -277,6 +282,7 @@ impl From<transport::PortInfo> for SerialPortPayload {
             manufacturer: info.manufacturer,
             product: info.product,
             serial_number: info.serial_number,
+            friendly_name: info.friendly_name,
         }
     }
 }
@@ -305,6 +311,8 @@ struct FsEntryPayload {
     size: u64,
     /// UTC 毫秒；文件系统不提供时间时为 null
     modified_ms: Option<i64>,
+    /// UTC 毫秒；文件系统不提供创建时间时为 null
+    created_ms: Option<i64>,
     hidden: bool,
 }
 
@@ -327,6 +335,7 @@ impl From<core_domain::fsview::Entry> for FsEntryPayload {
             link: entry.link,
             size: entry.size,
             modified_ms: entry.modified_ms,
+            created_ms: entry.created_ms,
             hidden: entry.hidden,
         }
     }
@@ -755,11 +764,7 @@ fn seed_scrollback(state: &AppState, session: &Session, id: &str) {
     }
 }
 
-/// 每个会话两条后台线程：
-/// 1. 输出发送线程：每 `OUT_COALESCE_MS` 把合流缓冲攒下的块发一次 `pty:out`；
-/// 2. 滴答线程：静默猜测（只对终端有意义）与空闲落盘。
-///
-/// 两条线程都活在 `Arc<Session>` 上，串口「断开 → 重连」不需要重建它们。
+/// 每个会话一条输出发送线程；所有会话共享一条静默/落盘调度线程。
 fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
     {
         let app_for_out = app.clone();
@@ -786,31 +791,44 @@ fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
         });
     }
 
-    let weak: Weak<Session> = Arc::downgrade(session);
-    let app_for_tick = app.clone();
-    let tick_id = id.to_string();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(300));
-        let Some(session) = weak.upgrade() else { break };
-        let quiet = {
-            let mut input = session.input.lock();
-            let quiet = now_ms().saturating_sub(input.last_output_ms);
-            let at_line_start = input.at_line_start;
-            input.tracker.on_silence(quiet, at_line_start);
-            quiet
-        };
-        push_ownership(&app_for_tick, &session, &tick_id);
-
-        // 只在「有未落盘的新内容」且「已经静默够久」时写一次：
-        // 连续刷屏时不会反复写盘，崩溃时也只丢最后几秒
-        if quiet >= IDLE_FLUSH_MS && session.dirty.swap(false, Ordering::Relaxed) {
-            let state = app_for_tick.state::<AppState>();
-            if !save_session_scrollback(&state, &session, &tick_id) {
-                // 没写成（没有数据目录/磁盘忙）：留到下一个滴答再试
-                session.dirty.store(true, Ordering::Relaxed);
+    let state = app.state::<AppState>();
+    if !state.tick_running.swap(true, Ordering::SeqCst) {
+        let app_for_tick = app.clone();
+        std::thread::spawn(move || {
+            while app_for_tick
+                .state::<AppState>()
+                .tick_running
+                .load(Ordering::Relaxed)
+            {
+                std::thread::sleep(Duration::from_millis(300));
+                let state = app_for_tick.state::<AppState>();
+                let sessions: Vec<(String, Arc<Session>)> = state
+                    .sessions
+                    .lock()
+                    .iter()
+                    .map(|(id, session)| (id.clone(), session.clone()))
+                    .collect();
+                for (id, session) in sessions {
+                    let quiet = {
+                        let mut input = session.input.lock();
+                        let quiet = now_ms().saturating_sub(input.last_output_ms);
+                        let at_line_start = input.at_line_start;
+                        input.tracker.on_silence(quiet, at_line_start);
+                        quiet
+                    };
+                    if session.transport.kind() == TransportKind::Terminal {
+                        push_ownership(&app_for_tick, &session, &id);
+                    }
+                    if quiet >= IDLE_FLUSH_MS
+                        && session.dirty.swap(false, Ordering::Relaxed)
+                        && !save_session_scrollback(&state, &session, &id)
+                    {
+                        session.dirty.store(true, Ordering::Relaxed);
+                    }
+                }
             }
-        }
-    });
+        });
+    }
 }
 
 /// 起一个读线程。终端只会起一次；串口每次「连接」都起一个新的，
@@ -1446,6 +1464,35 @@ fn pty_list(state: State<'_, AppState>) -> Vec<SessionInfo> {
     list
 }
 
+/// 活会话状态批量快照：避免前端每次刷新会话树时对每个会话单独发 IPC。
+#[tauri::command]
+fn session_runtime_states(state: State<'_, AppState>) -> Vec<RuntimeStatePayload> {
+    let sessions = state.sessions.lock();
+    sessions
+        .iter()
+        .map(|(id, session)| RuntimeStatePayload {
+            id: id.clone(),
+            transport: if session.transport.kind() == TransportKind::Serial {
+                "serial"
+            } else {
+                "terminal"
+            },
+            paused: session.paused.load(Ordering::Relaxed)
+                || session.released.load(Ordering::Relaxed),
+            serial: (session.transport.kind() == TransportKind::Serial)
+                .then(|| serial_status_of(id, session)),
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+struct RuntimeStatePayload {
+    id: String,
+    transport: &'static str,
+    paused: bool,
+    serial: Option<SerialStatusPayload>,
+}
+
 /// 完整会话树（含冷会话），顺序即创建顺序。侧栏用它渲染。
 #[tauri::command]
 fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
@@ -1773,6 +1820,7 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(data_dir.ok(), workspace))
         .setup(|app| {
             // 历史库的单写线程要发 `history:append` 事件，所以等 AppHandle 就绪再建
@@ -1821,6 +1869,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            shortcut_export::shortcuts_export_default_path,
+            shortcut_export::shortcuts_export_file,
+            profiles::terminal_profiles,
             spawn_session,
             spawn_serial_session,
             serial_ports,
@@ -1840,6 +1891,7 @@ fn main() {
             history_clear,
             pty_replay,
             pty_list,
+            session_runtime_states,
             session_tree,
             fs_list,
             fs_open,
@@ -1856,6 +1908,7 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
+                state.tick_running.store(false, Ordering::Relaxed);
                 let sessions: Vec<(String, Arc<Session>)> = state
                     .sessions
                     .lock()

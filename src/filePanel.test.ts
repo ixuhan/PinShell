@@ -29,6 +29,7 @@ function entry(overrides: Partial<FsEntry>): FsEntry {
     link: false,
     size: 0,
     modified_ms: null,
+    created_ms: null,
     hidden: false,
     ...overrides
   };

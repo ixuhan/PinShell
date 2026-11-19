@@ -39,6 +39,8 @@ pub struct Entry {
     pub size: u64,
     /// UTC 毫秒；取不到时间（文件系统不支持）时为 `None`
     pub modified_ms: Option<i64>,
+    /// UTC 毫秒；文件系统不提供创建时间时为 `None`
+    pub created_ms: Option<i64>,
     /// 以 `.` 开头或 Windows 隐藏属性
     pub hidden: bool,
 }
@@ -53,6 +55,7 @@ impl Entry {
             link: false,
             size: 0,
             modified_ms: None,
+            created_ms: None,
             hidden,
         }
     }

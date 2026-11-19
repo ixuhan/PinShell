@@ -744,49 +744,42 @@ pub struct PortInfo {
     pub manufacturer: Option<String>,
     pub product: Option<String>,
     pub serial_number: Option<String>,
+    pub friendly_name: Option<String>,
 }
 
 pub fn available_ports() -> Vec<PortInfo> {
+    let friendly_names = windows_port_friendly_names();
     let mut list: Vec<PortInfo> = serialport::available_ports()
         .unwrap_or_default()
         .into_iter()
-        .map(|info| match info.port_type {
-            serialport::SerialPortType::UsbPort(usb) => PortInfo {
-                port: info.port_name,
-                kind: "usb",
-                vid: Some(usb.vid),
-                pid: Some(usb.pid),
-                manufacturer: usb.manufacturer,
-                product: usb.product,
-                serial_number: usb.serial_number,
-            },
-            serialport::SerialPortType::PciPort => PortInfo {
-                port: info.port_name,
-                kind: "pci",
-                vid: None,
-                pid: None,
-                manufacturer: None,
-                product: None,
-                serial_number: None,
-            },
-            serialport::SerialPortType::BluetoothPort => PortInfo {
-                port: info.port_name,
-                kind: "bluetooth",
-                vid: None,
-                pid: None,
-                manufacturer: None,
-                product: None,
-                serial_number: None,
-            },
-            serialport::SerialPortType::Unknown => PortInfo {
-                port: info.port_name,
-                kind: "unknown",
-                vid: None,
-                pid: None,
-                manufacturer: None,
-                product: None,
-                serial_number: None,
-            },
+        .map(|info| {
+            let port = info.port_name;
+            let friendly_name = friendly_names.get(&port.to_ascii_uppercase()).cloned();
+            let (kind, vid, pid, manufacturer, product, serial_number) = match info.port_type {
+                serialport::SerialPortType::UsbPort(usb) => (
+                    "usb",
+                    Some(usb.vid),
+                    Some(usb.pid),
+                    usb.manufacturer,
+                    usb.product,
+                    usb.serial_number,
+                ),
+                serialport::SerialPortType::PciPort => ("pci", None, None, None, None, None),
+                serialport::SerialPortType::BluetoothPort => {
+                    ("bluetooth", None, None, None, None, None)
+                }
+                serialport::SerialPortType::Unknown => ("unknown", None, None, None, None, None),
+            };
+            PortInfo {
+                port,
+                kind,
+                vid,
+                pid,
+                manufacturer,
+                product,
+                serial_number,
+                friendly_name,
+            }
         })
         .collect();
     list.sort_by(|a, b| natural_port_order(&a.port, &b.port));
@@ -802,10 +795,86 @@ pub fn available_ports() -> Vec<PortInfo> {
                 manufacturer: Some("PinShell".into()),
                 product: Some("假串口（回环，仅调试）".into()),
                 serial_number: None,
+                friendly_name: None,
             },
         );
     }
     list
+}
+
+#[cfg(windows)]
+fn windows_port_friendly_names() -> std::collections::HashMap<String, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDeviceRegistryPropertyW, DIGCF_ALLCLASSES, DIGCF_PRESENT, SPDRP_FRIENDLYNAME,
+        SP_DEVINFO_DATA,
+    };
+    struct DeviceInfoSet(windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO);
+    impl Drop for DeviceInfoSet {
+        fn drop(&mut self) {
+            let _ = unsafe { SetupDiDestroyDeviceInfoList(self.0) };
+        }
+    }
+    let mut names = std::collections::HashMap::new();
+    let Ok(devices) = (unsafe {
+        SetupDiGetClassDevsW(None, PCWSTR::null(), None, DIGCF_ALLCLASSES | DIGCF_PRESENT)
+    }) else {
+        return names;
+    };
+    let devices = DeviceInfoSet(devices);
+    let devices = devices.0;
+    let mut index = 0;
+    loop {
+        let mut device = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        if unsafe { SetupDiEnumDeviceInfo(devices, index, &mut device) }.is_err() {
+            break;
+        }
+        index += 1;
+        let mut buffer = [0u8; 2048];
+        if unsafe {
+            SetupDiGetDeviceRegistryPropertyW(
+                devices,
+                &device,
+                SPDRP_FRIENDLYNAME,
+                None,
+                Some(&mut buffer),
+                None,
+            )
+        }
+        .is_err()
+        {
+            continue;
+        }
+        let wide =
+            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u16>(), buffer.len() / 2) };
+        let end = wide
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(wide.len());
+        let Ok(name) = String::from_utf16(&wide[..end]) else {
+            continue;
+        };
+        let Some(start) = name.rfind("(COM") else {
+            continue;
+        };
+        let Some(end) = name[start..].find(')') else {
+            continue;
+        };
+        let port = name[start + 1..start + end].to_ascii_uppercase();
+        if port.len() > 3 && port[3..].chars().all(|ch| ch.is_ascii_digit()) {
+            names.insert(port, name);
+        }
+    }
+    names
+}
+
+#[cfg(not(windows))]
+fn windows_port_friendly_names() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
 }
 
 /// `COM2` 排在 `COM10` 前面（按数字比，不按字符串比）。

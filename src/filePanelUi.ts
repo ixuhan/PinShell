@@ -58,7 +58,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
   const expandBtn = document.getElementById("files-expand") as HTMLButtonElement;
   const collapseBtn = document.getElementById("files-collapse") as HTMLButtonElement;
   const modeBtn = document.getElementById("files-mode") as HTMLButtonElement;
-  const upBtn = document.getElementById("files-up") as HTMLButtonElement;
+  const sortBtn = document.getElementById("files-sort") as HTMLSelectElement;
   const refreshBtn = document.getElementById("files-refresh") as HTMLButtonElement;
   const hiddenBtn = document.getElementById("files-hidden") as HTMLButtonElement;
   const pathEl = document.getElementById("files-path") as HTMLDivElement;
@@ -66,6 +66,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
   const footEl = document.getElementById("files-foot") as HTMLDivElement;
   const resizer = document.getElementById("files-resizer") as HTMLDivElement;
   const autoBtn = document.getElementById("files-auto") as HTMLButtonElement;
+  const refreshedEl = document.getElementById("files-refreshed") as HTMLDivElement;
   // 左栏自己也能拖宽，所以上限要现量它，不能写死 196
   const sidebar = document.getElementById("sidebar");
   const clampWidth = (desired: number) =>
@@ -82,10 +83,11 @@ export function setupFilePanel(deps: FilePanelDeps) {
   let mode: FilePanelMode = defaults.mode;
   let showHidden = defaults.showHidden;
   let auto = defaults.auto;
+  let sortMode: "name" | "created" = localStorage.getItem("pinshell.files.sort") === "created" ? "created" : "name";
   let currentPath: string | null = null;
   let lastListing: FsListing | null = null;
-  /// 头部 ↑ 的目标。列表拉不到时后端给不出 `parent`，这份值由前端按路径算出来，
-  /// 保证「读不出来的目录」也能退出去，不会把人卡在里面。
+  /// 列表拉不到时后端给不出 `parent`，这份值由前端按路径算出来，
+  /// 保证「读不出来的目录」也能通过列表里的 `..` 退出去。
   let upTarget: string | null = null;
   let token = 0;
   let selected: HTMLElement | null = null;
@@ -269,6 +271,8 @@ export function setupFilePanel(deps: FilePanelDeps) {
       persist();
     }
     boundId = id;
+    // 让旧会话尚未返回的目录请求失效，避免覆盖新会话的首屏列表。
+    token++;
     // 新会话沿用最近一次用过的设置，但不继承它的固定路径：从自己的 CWD 起步更合理
     const prefs = (id ? sessions[id] : undefined) ?? { ...defaults, path: null };
     mode = prefs.mode;
@@ -309,6 +313,21 @@ export function setupFilePanel(deps: FilePanelDeps) {
     autoBtn.title = auto
       ? `自动刷新已开：当前目录每 ${seconds} 秒刷新一次，点一下关闭`
       : `自动刷新：每 ${AUTO_REFRESH_MS / 1000} 秒刷新一次（大目录自动放慢），点一下开启`;
+    refreshedEl.dataset.auto = String(auto);
+    refreshedEl.hidden = !auto;
+    if (auto && !refreshedEl.textContent) refreshedEl.textContent = "等待刷新";
+    sortBtn.value = sortMode;
+    sortBtn.title = sortMode === "name" ? "按名称排序" : "按创建时间排序，最新优先";
+    sortBtn.setAttribute("aria-label", sortBtn.title);
+  }
+
+  function showLastRefresh(now: Date) {
+    const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((part) => String(part).padStart(2, "0"))
+      .join(":");
+    refreshedEl.textContent = `刷新于：${time}`;
+    refreshedEl.dataset.auto = String(auto);
+    refreshedEl.hidden = !auto;
   }
 
   function render(listing: FsListing) {
@@ -320,12 +339,21 @@ export function setupFilePanel(deps: FilePanelDeps) {
     const keepSelected = sameDir ? selectedName : null;
 
     lastListing = listing;
+    const entries = [...listing.entries].sort((a, b) => {
+      if (sortMode === "created") {
+        if (a.kind === "dir" && b.kind !== "dir") return -1;
+        if (a.kind !== "dir" && b.kind === "dir") return 1;
+        const timeOrder = (b.created_ms ?? -Infinity) - (a.created_ms ?? -Infinity);
+        const nameOrder = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+        return Number.isNaN(timeOrder) || timeOrder === 0 ? nameOrder : timeOrder;
+      }
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+    });
     // 跟随模式下后端按会话 CWD 解析出了实际路径；固定模式下就是请求的那条
     currentPath = listing.path;
     pathEl.textContent = listing.path;
     pathEl.title = listing.path;
     upTarget = listing.parent;
-    upBtn.disabled = !listing.parent;
 
     listEl.textContent = "";
     selected = null;
@@ -346,7 +374,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       empty.textContent = listing.hidden_count && !showHidden ? "（只有隐藏项）" : "（空目录）";
       listEl.append(empty);
     }
-    for (const entry of listing.entries) {
+    for (const entry of entries) {
       const row = renderRow(listing.path, entry);
       if (entry.name === keepSelected) {
         selected = row;
@@ -496,8 +524,8 @@ export function setupFilePanel(deps: FilePanelDeps) {
   }
 
   /// 拉一次目录。返回 false 表示没拉成（没会话、被更新的请求取代、读盘失败）。
-  async function reload(): Promise<boolean> {
-    const id = deps.sessionId();
+  async function reload(sessionOverride?: string): Promise<boolean> {
+    const id = sessionOverride ?? deps.sessionId();
     // 切了会话就先换上它自己的设置，再按那套设置决定列哪个目录
     bindSession(id);
     if (!id) {
@@ -505,7 +533,6 @@ export function setupFilePanel(deps: FilePanelDeps) {
       listEl.textContent = "";
       footEl.textContent = "";
       upTarget = null;
-      upBtn.disabled = true;
       lastListing = null;
       selected = null;
       selectedName = null;
@@ -521,12 +548,13 @@ export function setupFilePanel(deps: FilePanelDeps) {
         path: target,
         showHidden
       });
-      if (mine !== token) return false; // 期间切了会话或又导航了一次，丢弃过期结果
+      if (mine !== token || id !== boundId || id !== (sessionOverride ?? deps.sessionId())) return false;
       // 内容完全一样就不动 DOM：自动刷新不该每 3 秒把列表重建一遍
       if (!sameListing(lastListing, listing)) render(listing);
+      showLastRefresh(new Date());
       return true;
     } catch (err) {
-      if (mine !== token) return false;
+      if (mine !== token || id !== boundId || id !== (sessionOverride ?? deps.sessionId())) return false;
       lastListing = null;
       selected = null;
       selectedName = null;
@@ -543,7 +571,6 @@ export function setupFilePanel(deps: FilePanelDeps) {
       row.textContent = String(err);
       listEl.append(row);
       footEl.textContent = "";
-      upBtn.disabled = !upTarget;
       return false;
     } finally {
       syncChrome();
@@ -552,9 +579,16 @@ export function setupFilePanel(deps: FilePanelDeps) {
   }
 
   // 面板按钮一律不抢焦点：点完还能接着在终端里敲键盘
-  for (const button of [expandBtn, collapseBtn, modeBtn, upBtn, refreshBtn, hiddenBtn, autoBtn]) {
+  for (const button of [expandBtn, collapseBtn, modeBtn, refreshBtn, hiddenBtn, autoBtn]) {
     button.addEventListener("mousedown", (event) => event.preventDefault());
   }
+
+  sortBtn.addEventListener("change", () => {
+    sortMode = sortBtn.value === "created" ? "created" : "name";
+    localStorage.setItem("pinshell.files.sort", sortMode);
+    syncChrome();
+    if (lastListing) render(lastListing);
+  });
 
   expandBtn.addEventListener("click", () => {
     expanded = true;
@@ -581,9 +615,6 @@ export function setupFilePanel(deps: FilePanelDeps) {
     showHidden = !showHidden;
     save();
     void reload();
-  });
-  upBtn.addEventListener("click", () => {
-    if (upTarget) enter(upTarget);
   });
   modeBtn.addEventListener("click", () => {
     mode = mode === "follow" ? "fixed" : "follow";
@@ -654,6 +685,10 @@ export function setupFilePanel(deps: FilePanelDeps) {
   return {
     /// 会话切换后调用：跟随模式会立刻按新会话的 CWD 重画
     reload,
+    /// 在终端附着开始时切换设置并立刻加载目标会话的文件列表。
+    selectSession(id: string) {
+      void reload(id);
+    },
     /// 收到 `session:cwd` 时调用：只有跟随模式和当前会话才需要动
     onCwd(id: string) {
       if (mode !== "follow" || id !== deps.sessionId()) return;

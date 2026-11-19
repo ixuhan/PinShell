@@ -54,6 +54,11 @@ fn read_entry(item: &std::fs::DirEntry) -> Entry {
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|elapsed| elapsed.as_millis() as i64);
+        entry.created_ms = meta
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as i64);
 
         #[cfg(windows)]
         {
@@ -87,10 +92,8 @@ mod tests {
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "pinshell-fsview-{tag}-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("pinshell-fsview-{tag}-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }
@@ -114,19 +117,30 @@ mod tests {
         fs::write(dir.path().join(".hidden"), b"x").unwrap();
 
         let listing = list(dir.path(), false).expect("list");
-        let names: Vec<&str> = listing.entries.iter().map(|entry| entry.name.as_str()).collect();
+        let names: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
         assert_eq!(names, vec!["z_dir", "b.txt"]);
         assert_eq!(listing.total, 3);
         assert_eq!(listing.hidden_count, 1);
         assert!(!listing.truncated);
         assert!(!listing.entries[1].link);
 
-        let file = listing.entries.iter().find(|entry| entry.name == "b.txt").unwrap();
+        let file = listing
+            .entries
+            .iter()
+            .find(|entry| entry.name == "b.txt")
+            .unwrap();
         assert_eq!(file.kind, EntryKind::File);
         assert_eq!(file.size, 5);
         assert!(file.modified_ms.is_some());
         assert!(listing.entries[0].kind.is_dir());
-        assert_eq!(listing.parent, rules::parent_of(&dir.path().display().to_string()));
+        assert_eq!(
+            listing.parent,
+            rules::parent_of(&dir.path().display().to_string())
+        );
     }
 
     #[test]
@@ -136,7 +150,11 @@ mod tests {
         fs::write(dir.path().join("readme.md"), b"#").unwrap();
 
         let listing = list(dir.path(), true).expect("list");
-        let names: Vec<&str> = listing.entries.iter().map(|entry| entry.name.as_str()).collect();
+        let names: Vec<&str> = listing
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
         assert_eq!(names, vec![".env", "readme.md"]);
         assert_eq!(listing.hidden_count, 1);
     }

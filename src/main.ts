@@ -19,38 +19,42 @@ import {
   type HistorySnapshot
 } from "./historyCache";
 import { stripFocusReports } from "./ptyInput";
+import { normalizeHexInput } from "./hexInput";
 import { keepAfter, type OutChunk } from "./outQueue";
+import { clearDisplayMode } from "./displayClear";
 import { setupFilePanel } from "./filePanelUi";
+import { setupShortcutsUi } from "./shortcutsUi";
 import { DRAGGING_CLASS } from "./resize";
+import { setupInputbarResize } from "./inputbarResize";
 import { setupSidebar } from "./sidebarUi";
 import { setupSerialDialog, type SerialConfig } from "./serialUi";
+import { mergeRuntimeStates, type RuntimeState } from "./runtimeState";
+import { setupSerialPortsPanel } from "./serialPortsPanelUi";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
 const t0 = performance.now();
 const hud = document.getElementById("hud") as HTMLDivElement;
 const bar = document.getElementById("inputbar") as HTMLDivElement;
+const resizer = document.getElementById("inputbar-resizer") as HTMLDivElement;
 const dot = document.getElementById("own-dot") as HTMLSpanElement;
 const ownLabel = document.getElementById("own-label") as HTMLSpanElement;
-const ib = document.getElementById("ib-input") as HTMLInputElement;
+const ib = document.getElementById("ib-input") as HTMLTextAreaElement;
+const ibSend = document.getElementById("ib-send") as HTMLButtonElement;
+const ibHistory = document.getElementById("ib-history") as HTMLButtonElement;
+const ibOverride = document.getElementById("ib-override") as HTMLButtonElement;
 const ghostEl = document.getElementById("ib-ghost") as HTMLSpanElement;
 const sessList = document.getElementById("sess-list") as HTMLDivElement;
 const sessNew = document.getElementById("sess-new") as HTMLButtonElement;
-const sessSerial = document.getElementById("sess-serial") as HTMLButtonElement;
 const histOverlay = document.getElementById("hist-overlay") as HTMLDivElement;
 const histQuery = document.getElementById("hist-query") as HTMLInputElement;
 const histList = document.getElementById("hist-list") as HTMLDivElement;
 const histCount = document.getElementById("hist-count") as HTMLSpanElement;
 const histClearBtn = document.getElementById("hist-clear") as HTMLButtonElement;
 const histCloseBtn = document.getElementById("hist-close") as HTMLButtonElement;
-const ibPause = document.getElementById("ib-pause") as HTMLButtonElement;
-const ibClear = document.getElementById("ib-clear") as HTMLButtonElement;
-const ibPass = document.getElementById("ib-pass") as HTMLButtonElement;
-const ibTake = document.getElementById("ib-take") as HTMLButtonElement;
 const ibPaused = document.getElementById("ib-paused") as HTMLSpanElement;
 const ibHex = document.getElementById("ib-hex") as HTMLButtonElement;
 const ibLog = document.getElementById("ib-log") as HTMLButtonElement;
-const ibHint = document.getElementById("ib-hint") as HTMLSpanElement;
 
 function log(msg: string) {
   hud.textContent = msg;
@@ -138,9 +142,12 @@ try {
 }
 
 let sessionId = "";
+let requestedSessionId = "";
+let sessionSwitchToken = 0;
 let bytes = 0;
 /// 文件面板的句柄：监听器可能先于 setup 收到事件，所以允许为空
 let filePanel: ReturnType<typeof setupFilePanel> | null = null;
+let shortcutsUi: ReturnType<typeof setupShortcutsUi> | null = null;
 /// 新建串口会话的对话框：按钮在装配前就可能被点到（理论上不会），所以允许为空
 let serialDialog: ReturnType<typeof setupSerialDialog> | null = null;
 let benchTerm: Terminal | null = null;
@@ -313,6 +320,9 @@ async function resyncScreen(id: string): Promise<boolean> {
 
 async function attach(id: string) {
   sessionId = id;
+  requestedSessionId = id;
+  filePanel?.selectSession(id);
+  shortcutsUi?.selectSession(id);
   lastSeq = 0;
   pending = [];
   attaching = false;
@@ -325,17 +335,19 @@ async function attach(id: string) {
   window.clearTimeout(noticeTimer);
   ibHex.hidden = !serialKind;
   ibLog.hidden = !serialKind;
+  document.getElementById("ib-actions")!.hidden = !serialKind;
   ibHex.classList.toggle("on", hexMode);
   ibHex.disabled = false;
   ibLog.disabled = true;
-  ibHint.textContent = serialKind ? "↑ 发送历史" : "↑ 历史 · Ctrl+R 检索";
   ib.placeholder = serialKind
-    ? "输入要发送的内容"
-    : "提示符就绪后可在这里输入";
+    ? hexMode ? "HEX：48 65 6C 6C 6F" : "输入要发送的内容"
+    : "输入命令";
   // 历史覆盖层、输入草稿、↑↓ 游标都属于上一个会话：切走时一起丢掉，
   // 否则旧会话里敲了一半的命令会被回车发到新会话去。
   if (!histOverlay.hidden) closeHistoryOverlay(false, false);
   ib.value = "";
+  renderSendAvailability();
+  autoGrow();
   overlayDraft = "";
   histIdx = -1;
   histDraft = "";
@@ -360,8 +372,8 @@ async function attach(id: string) {
   if (serialKind) await syncSerial(id);
   else await syncPaused(id);
   void rebuildHistory(id);
-  // 文件面板跟随会话：切到哪儿就跟到哪儿（固定模式下它自己会忽略这次刷新）
-  filePanel?.reload();
+  // 面板已在附着开始时按目标会话加载；附着完成后再校正一次 CWD。
+  await filePanel?.reload();
 }
 
 // 会话树：行来自后端工作区（含冷会话），热/冷对照 pty_list 里的活会话
@@ -377,6 +389,14 @@ interface TreeSession {
   serial: SerialConfig | null;
 }
 
+const pausedBySession = new Map<string, boolean>();
+const pauseStateRevision = new Map<string, number>();
+const pauseOperations = new Set<string>();
+const serialStatusBySession = new Map<string, SerialStatus>();
+const activityUntilBySession = new Map<string, number>();
+const activityTimers = new Map<string, number>();
+const SESSION_ACTIVITY_MS = 900;
+
 /// `serial:status` 的载荷（串口会话才有）。`status` 三态：
 /// open = 端口握在手里；released = 已主动断开（还能「连接」）；
 /// failed = 读写出错（拔线、端口被系统收走），同样可以重连。
@@ -391,34 +411,171 @@ interface SerialStatus {
 }
 
 async function refreshTree() {
+  const revisions = new Map(pauseStateRevision);
   try {
-    const [sessions, lives] = await Promise.all([
+    const [sessions, lives, runtimeStates] = await Promise.all([
       invoke<TreeSession[]>("session_tree"),
-      invoke<SessionInfo[]>("pty_list")
+      invoke<SessionInfo[]>("pty_list"),
+      invoke<RuntimeState[]>("session_runtime_states")
     ]);
     tree = sessions;
     live = new Map(lives.map((s) => [s.id, s]));
+    const merged = mergeRuntimeStates(
+      { paused: pausedBySession, serial: serialStatusBySession },
+      runtimeStates,
+      revisions,
+      pauseStateRevision,
+      new Set(lives.map((s) => s.id))
+    );
+    pausedBySession.clear();
+    serialStatusBySession.clear();
+    for (const [id, value] of merged.paused) pausedBySession.set(id, value);
+    for (const [id, value] of merged.serial) serialStatusBySession.set(id, value as SerialStatus);
   } catch (err) {
     console.warn(`[tree] ${String(err)}`);
   }
   renderTree();
 }
 
-/// 正在改名的会话 id。改名是就地编辑，不弹框：双击名字进入，回车提交、Esc 放弃。
+/// 正在改名的会话 id。改名从会话操作菜单进入，回车提交、Esc 放弃。
 let renaming: string | null = null;
+let contextMenu: HTMLDivElement | null = null;
+
+function closeSessionMenu() {
+  contextMenu?.remove();
+  contextMenu = null;
+}
+
+function showSessionMenu(session: TreeSession, x: number, y: number) {
+  closeSessionMenu();
+  const menu = document.createElement("div");
+  menu.className = "sess-context-menu";
+  menu.setAttribute("role", "menu");
+  contextMenu = menu;
+
+  const isLive = live.has(session.id);
+  const serial = session.transport === "serial";
+  const cachedStatus = serial ? serialStatusBySession.get(session.id) : undefined;
+  const pausedNow = serial
+    ? cachedStatus
+      ? cachedStatus.paused || cachedStatus.status !== "open"
+      : session.id === sessionId
+        ? !serialStatus || serialStatus.paused || serialStatus.status !== "open"
+        : true
+    : session.id === sessionId ? paused : pausedBySession.get(session.id) ?? false;
+  const pauseItem = document.createElement("button");
+  pauseItem.textContent = serial ? (pausedNow ? "连接" : "断开") : (pausedNow ? "继续" : "暂停");
+  pauseItem.disabled = !isLive;
+  if (isLive && session.id !== sessionId) {
+    const stateCommand = serial ? "serial_status" : "pty_paused";
+    void invoke<boolean | SerialStatus>(stateCommand, { id: session.id }).then((state) => {
+      if (contextMenu !== menu) return;
+      const down = serial
+        ? (state as SerialStatus).paused || (state as SerialStatus).status !== "open"
+        : state as boolean;
+      pauseItem.textContent = serial ? (down ? "连接" : "断开") : (down ? "继续" : "暂停");
+    }).catch(() => {});
+  }
+  pauseItem.addEventListener("click", () => {
+    closeSessionMenu();
+    void togglePauseFor(session.id, session.transport);
+  });
+  menu.append(pauseItem);
+
+  const clearItem = document.createElement("button");
+  clearItem.textContent = "清屏";
+  clearItem.disabled = !isLive;
+  clearItem.addEventListener("click", () => {
+    closeSessionMenu();
+    void clearScreenFor(session.id);
+  });
+  menu.append(clearItem);
+
+  const currentOverride = session.id === sessionId
+    ? own?.override ?? "none"
+    : "none";
+  const overrideItem = document.createElement("button");
+  const overridePending = isLive && session.id !== sessionId;
+  overrideItem.textContent = overridePending ? "读取中…" : currentOverride === "passthrough" ? "接管" : "直通";
+  overrideItem.disabled = !isLive || overridePending;
+  if (currentOverride === "passthrough") {
+    overrideItem.title = "当前直通，点击切换到接管";
+  } else if (currentOverride === "input_bar") {
+    overrideItem.title = "当前接管，点击切换到直通";
+  } else {
+    overrideItem.title = "当前自动，点击锁定直通";
+  }
+  if (isLive && session.id !== sessionId) {
+    void invoke<Ownership>("pty_ownership", { id: session.id }).then((ownership) => {
+      if (contextMenu === menu) {
+        overrideItem.textContent = ownership.override === "passthrough" ? "接管" : "直通";
+        overrideItem.dataset.mode = ownership.override;
+        overrideItem.disabled = false;
+      }
+    }).catch(() => {});
+  }
+  overrideItem.dataset.mode = currentOverride;
+  overrideItem.addEventListener("click", () => {
+    closeSessionMenu();
+    const mode = overrideItem.dataset.mode === "passthrough" ? "input_bar" : "passthrough";
+    void setOverrideFor(session.id, mode);
+  });
+  menu.append(overrideItem);
+
+  const renameItem = document.createElement("button");
+  renameItem.textContent = "重命名";
+  renameItem.addEventListener("click", () => {
+    closeSessionMenu();
+    renaming = session.id;
+    renderTree();
+  });
+  menu.append(renameItem);
+
+  const closeItem = document.createElement("button");
+  closeItem.textContent = "关闭会话";
+  closeItem.disabled = !isLive;
+  closeItem.addEventListener("click", () => {
+    closeSessionMenu();
+    void closeSession(session.id);
+  });
+  menu.append(closeItem);
+
+  document.body.append(menu);
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - menu.offsetWidth - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - menu.offsetHeight - 4))}px`;
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (contextMenu && !contextMenu.contains(event.target as Node)) closeSessionMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && contextMenu) closeSessionMenu();
+});
 
 function renderTree() {
   sessList.textContent = "";
   for (const session of tree) {
     const row = document.createElement("div");
-    row.className = "sess-row" + (session.id === sessionId ? " active" : "");
+    row.className = "sess-row" + ((requestedSessionId || sessionId) === session.id ? " active" : "");
+    row.dataset.sessionId = session.id;
     const detail = session.transport === "serial" && session.serial
       ? `串口 ${session.serial.port} · ${session.serial.baud}`
       : session.cwd ?? "";
     row.title = `${session.title} · ${session.id.slice(0, 8)}${detail ? ` · ${detail}` : ""}`;
 
     const dot = document.createElement("span");
-    dot.className = "sess-dot" + (live.has(session.id) ? " hot" : "");
+    dot.className = "sess-dot";
+    const status = session.transport === "serial"
+      ? serialStatusBySession.get(session.id)
+      : null;
+    const isPaused = session.transport === "serial"
+      ? !status || status.paused || status.status !== "open"
+      : pausedBySession.get(session.id) ?? false;
+    const connected = live.has(session.id) && !isPaused;
+    if (connected) dot.classList.add("connected");
+    if (connected && (activityUntilBySession.get(session.id) ?? 0) > Date.now()) {
+      dot.classList.add("activity");
+    }
 
     // 串口会话在行上加一个记号：终端是「跑一个进程」，串口是「占一条线」，
     // 两者共用同一套会话模型，但一眼就该分得出来（ADR 0001）。
@@ -428,6 +585,18 @@ function renderTree() {
       mark.className = "sess-serial-mark";
       mark.textContent = "⌁";
       mark.title = "串口会话";
+    }
+
+  const state = document.createElement("span");
+    state.className = "sess-state";
+    if (live.has(session.id)) {
+      state.textContent = session.transport === "serial"
+        ? status?.status === "failed" ? "失败" : isPaused ? "已断开" : "已连接"
+        : isPaused ? "暂停中" : "运行中";
+      state.classList.add(isPaused ? "paused" : "connected");
+      state.title = session.transport === "serial"
+        ? `${status?.error ?? (isPaused ? "串口已断开" : "串口已连接")} · 双击此处切换连接状态`
+        : isPaused ? "输出已暂停 · 双击切换暂停状态" : "会话运行中 · 双击切换暂停状态";
     }
 
     const name = document.createElement("span");
@@ -471,36 +640,127 @@ function renderTree() {
       });
     } else {
       name.textContent = `${session.title} · ${session.id.slice(0, 4)}`;
-      name.title = "双击重命名";
+      name.title = session.transport === "serial" ? "双击切换连接状态" : "双击切换暂停状态";
       name.addEventListener("dblclick", (e) => {
         e.stopPropagation();
-        renaming = session.id;
-        renderTree();
       });
     }
 
-    const close = document.createElement("button");
-    close.className = "sess-close";
-    close.textContent = "✕";
-    close.title = "关闭会话";
-    close.addEventListener("click", (e) => {
+    const menuButton = document.createElement("button");
+    menuButton.className = "sess-menu-button";
+    menuButton.type = "button";
+    menuButton.textContent = "⋯";
+    menuButton.title = "会话操作";
+    menuButton.setAttribute("aria-label", `${session.title} 操作菜单`);
+    menuButton.addEventListener("click", (e) => {
       e.stopPropagation();
-      void closeSession(session.id);
+      const bounds = menuButton.getBoundingClientRect();
+      showSessionMenu(session, bounds.right, bounds.bottom);
     });
 
     row.append(dot);
     if (mark) row.append(mark);
-    row.append(name, close);
+    row.append(name, state, menuButton);
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showSessionMenu(session, e.clientX, e.clientY);
+    });
     row.addEventListener("click", (e) => {
-      if (e.detail > 1) return; // 双击的第二下属于改名，不该顺带切换会话
+      closeSessionMenu();
+      const clicks = e.detail;
+      if (clicks > 1) {
+        if (clicks === 2 && live.has(session.id)) {
+          e.preventDefault();
+          void togglePauseFor(session.id, session.transport);
+        }
+        return; // 双击名称仍交给上面的重命名处理器；会话行双击切换状态
+      }
       void openSession(session.id);
     });
     sessList.append(row);
   }
 }
 
+function markSessionActivity(id: string) {
+  const session = tree.find((item) => item.id === id);
+  if (!session || !live.has(id)) return;
+  const connected = session.transport === "serial"
+    ? (() => {
+        const status = serialStatusBySession.get(id);
+        return !!status && !status.paused && status.status === "open";
+      })()
+    : !(pausedBySession.get(id) ?? false);
+  if (!connected) return;
+
+  activityUntilBySession.set(id, Date.now() + SESSION_ACTIVITY_MS);
+  const dot = [...sessList.querySelectorAll<HTMLElement>(".sess-row")]
+    .find((row) => row.dataset.sessionId === id)?.querySelector<HTMLElement>(".sess-dot");
+  dot?.classList.add("activity");
+
+  const previous = activityTimers.get(id);
+  if (previous !== undefined) window.clearTimeout(previous);
+  activityTimers.set(id, window.setTimeout(() => {
+    activityUntilBySession.delete(id);
+    activityTimers.delete(id);
+    [...sessList.querySelectorAll<HTMLElement>(".sess-row")]
+      .find((row) => row.dataset.sessionId === id)?.querySelector<HTMLElement>(".sess-dot")
+      ?.classList.remove("activity");
+  }, SESSION_ACTIVITY_MS));
+}
+
+interface TerminalProfile {
+  id: string;
+  title: string;
+  command: string;
+}
+
+let terminalProfiles: TerminalProfile[] = [];
+let newMenu: HTMLDivElement | null = null;
+
+function closeNewMenu() {
+  newMenu?.remove();
+  newMenu = null;
+}
+
+async function showNewMenu() {
+  closeNewMenu();
+  try {
+    terminalProfiles = await invoke<TerminalProfile[]>("terminal_profiles");
+  } catch (err) {
+    console.warn(`[terminal-profiles] ${String(err)}`);
+    terminalProfiles = [];
+  }
+  const menu = document.createElement("div");
+  menu.className = "sess-context-menu sess-new-menu";
+  menu.setAttribute("role", "menu");
+  newMenu = menu;
+  for (const profile of terminalProfiles) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.textContent = profile.title;
+    item.setAttribute("role", "menuitem");
+    item.addEventListener("click", () => {
+      closeNewMenu();
+      void newSession(profile.command);
+    });
+    menu.append(item);
+  }
+  document.body.append(menu);
+  const bounds = sessNew.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(bounds.left, window.innerWidth - menu.offsetWidth - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(bounds.bottom + 4, window.innerHeight - menu.offsetHeight - 4))}px`;
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (newMenu && !newMenu.contains(event.target as Node) && event.target !== sessNew) closeNewMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeNewMenu();
+});
+
 /// 第一次拉起的会话才量冷启动；之后新开的会话不重写这组数字
-async function spawn(id: string | null, cwd: string | null = null): Promise<string> {
+async function spawn(id: string | null, cwd: string | null = null, shell: string | null = null): Promise<string> {
   const first = coldStart.pending;
   if (first) {
     coldStart.pending = false;
@@ -512,7 +772,7 @@ async function spawn(id: string | null, cwd: string | null = null): Promise<stri
     spawned = await invoke<string>("spawn_session", {
       cols: term.cols,
       rows: term.rows,
-      shell: null,
+      shell,
       cwd,
       sessionId: id
     });
@@ -535,6 +795,10 @@ async function spawn(id: string | null, cwd: string | null = null): Promise<stri
 }
 
 async function openSession(id: string) {
+  const token = ++sessionSwitchToken;
+  requestedSessionId = id;
+  renderTree();
+  filePanel?.selectSession(id);
   if (id === sessionId && live.has(id)) {
     term.focus();
     return;
@@ -552,20 +816,22 @@ async function openSession(id: string) {
     } else {
       // 后端记住了上次的 CWD，从这里接着开；目录已经不在了就退回默认目录。
       try {
-        await spawn(id, known?.cwd ?? null);
+        await spawn(id, known?.cwd ?? null, known?.shell ?? null);
       } catch (err) {
         console.warn(`[open] ${String(err)}，退回默认目录`);
-        await spawn(id, null);
+        await spawn(id, null, known?.shell ?? null);
       }
     }
+    if (token !== sessionSwitchToken || requestedSessionId !== id) return;
     await refreshTree();
   }
+  if (token !== sessionSwitchToken || requestedSessionId !== id) return;
   await attach(id);
   renderTree();
 }
 
-async function newSession() {
-  const id = await spawn(null);
+async function newSession(shell: string | null = null) {
+  const id = await spawn(null, null, shell);
   await refreshTree();
   await attach(id);
   renderTree();
@@ -599,13 +865,16 @@ async function boot() {
     await newSession();
     return;
   }
-  const last = tree[tree.length - 1];
+  const last = [...tree].reverse().find((session) => session.transport === "terminal");
+  if (!last) {
+    await newSession();
+    return;
+  }
   await openSession(last.id);
   log(`会话 ${tree.length} 个 · 当前 ${last.title}`);
 }
 
-sessNew.addEventListener("click", () => void newSession());
-sessSerial.addEventListener("click", () => serialDialog?.open());
+sessNew.addEventListener("click", () => void showNewMenu());
 
 
 /// xterm 的 onData 里有真按键，也有终端回报。焦点报告（`ESC[I` / `ESC[O`）不是用户输入：
@@ -621,10 +890,8 @@ term.onData((data) => {
 term.onBell(() => trace("BEL fired in xterm"));
 
 let resizeTimer: number | undefined;
-/// 布局变了：先把画布 fit 到当前容器（同步做，等防抖会晚一帧），再把新尺寸防抖下给 PTY。
+/// 布局变化后同步终端尺寸；输入条切换采用瞬时布局，避免动画期间反复触发重排。
 function syncSize() {
-  // 拖左栏或文件面板期间不重排终端：每跨一列就整屏重画一次，看起来就是会话区在闪。
-  // 那时画布保持原尺寸、由 #term-host 裁掉多出来的部分，松手时 layoutChanged 再重排一次。
   if (document.body.classList.contains(DRAGGING_CLASS)) return;
   fit.fit();
   if (!sessionId) return;
@@ -656,11 +923,11 @@ interface Ownership {
 }
 
 const STATE_TEXT: Record<TermState, string> = {
-  unknown: "未知 · 直通",
-  prompt_guess: "猜测 · 直通",
-  prompt_ready: "提示符就绪 · 可接管",
-  running: "运行中 · 直通",
-  alt_screen: "备用屏 · 直通"
+  unknown: "",
+  prompt_guess: "",
+  prompt_ready: "",
+  running: "",
+  alt_screen: ""
 };
 
 let own: Ownership | null = null;
@@ -843,6 +1110,7 @@ function fillInputBar(text: string) {
   ib.setSelectionRange(end, end);
   histIdx = -1; // 填进来的这条不算 ↑↓ 导航的起点
   histDraft = "";
+  renderSendAvailability();
   updateGhost();
   if (!ib.disabled) ib.focus();
 }
@@ -883,7 +1151,10 @@ function closeHistoryOverlay(restoreDraft: boolean, focusInput = true) {
   window.clearTimeout(searchTimer);
   searchToken++; // 让在途的检索结果作废
   historySel = -1;
-  if (restoreDraft) ib.value = overlayDraft;
+  if (restoreDraft) {
+    ib.value = overlayDraft;
+    autoGrow();
+  }
   if (!focusInput) return;
   ib.focus();
   const end = ib.value.length;
@@ -982,8 +1253,6 @@ function applyOwnership(next: Ownership) {
 
   dot.className = guess ? "guess" : takes ? "ok" : "";
   bar.className = takes ? "ok" : guess ? "guess" : "pass";
-  ibPass.classList.toggle("on", next.override === "passthrough");
-  ibTake.classList.toggle("on", next.override === "input_bar");
   // 串口的状态点、按钮文案、错误提示都挂在同一条输入条上：统一由 renderBarStatus 画，
   // 免得重设 className 抹掉暂停 / 断开这些不是所有权的一部分的状态。
   renderBarStatus();
@@ -1000,6 +1269,8 @@ function applyOwnership(next: Ownership) {
   }
 
   ib.disabled = !takes;
+  renderSendAvailability();
+  renderTree();
   // 只在本应用的两个焦点之间搬动，别抢别的控件
   const active = document.activeElement;
   if (active === ib || active === document.body || active === term.textarea) {
@@ -1012,13 +1283,26 @@ function applyOwnership(next: Ownership) {
   updateGhost();
 }
 
-function setOverride(mode: OverrideMode) {
-  if (!sessionId) return;
-  void invoke("pty_set_override", { id: sessionId, mode });
+async function setOverrideFor(id: string, mode: Exclude<OverrideMode, "none">) {
+  let current: OverrideMode = id === sessionId && own?.id === id ? own.override : "none";
+  if (id !== sessionId) {
+    try {
+      current = (await invoke<Ownership>("pty_ownership", { id })).override;
+    } catch (err) {
+      console.warn(`[ownership] ${String(err)}`);
+      return;
+    }
+  }
+  try {
+    await invoke("pty_set_override", { id, mode: current === mode ? "none" : mode });
+    if (id === sessionId) applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
+  } catch (err) {
+    console.warn(`[ownership] ${String(err)}`);
+  }
 }
 
 function toggleOverride(mode: Exclude<OverrideMode, "none">) {
-  setOverride(own?.override === mode ? "none" : mode);
+  if (sessionId) void setOverrideFor(sessionId, mode);
 }
 
 // ---------- 输入条按钮：暂停 / 断开 / 清屏 / 直通 / 接管 ----------
@@ -1080,16 +1364,19 @@ function renderBarStatus() {
     if (!serialStatus) {
       labelText = "串口 · 连接中";
     } else if (serialStatus.status === "failed") {
-      labelText = `串口 ${serialStatus.config.port} · 连接失败`;
+      labelText = `${serialStatus.config.port} · 失败`;
     } else if (serialStatus.paused || serialStatus.status === "released") {
-      labelText = `串口 ${serialStatus.config.port} · 已断开`;
+      labelText = `${serialStatus.config.port} · 断开`;
     } else {
-      labelText = `串口 ${serialStatus.config.port} · ${serialStatus.summary}`;
+      labelText = `${serialStatus.config.port} · ${serialStatus.config.baud}`;
     }
   } else {
     labelText = STATE_TEXT[own?.state ?? "unknown"];
   }
   ownLabel.textContent = labelText;
+  ownLabel.hidden = true;
+  ibOverride.textContent = own?.override === "passthrough" ? "接管" : "直通";
+  ibOverride.title = own?.override === "passthrough" ? "切换到接管输入" : "切换到直通输入";
 
   // 同一格文案的优先级：临时错误 > 串口失败 > 串口断开 > 终端暂停中
   if (notice) {
@@ -1116,23 +1403,12 @@ function renderBarStatus() {
     ibPaused.hidden = true;
   }
 
-  // 暂停按钮在串口会话里就是「断开 / 连接」：暂停的语义是真正释放端口（M5）
   if (serialKind) {
-    const down = !serialStatus || serialStatus.paused || serialStatus.status === "released" || serialStatus.status === "failed";
-    ibPause.classList.toggle("on", down);
-    ibPause.textContent = down ? "连接" : "断开";
-    ibPause.title = down
-      ? "按原配置重新打开端口 · 同一串口不允许两个热会话"
-      : "真正释放端口：关闭句柄后别的程序也能用它；会话、回放与历史都保留";
-    ibHex.disabled = false;
     ibLog.disabled = !serialStatus?.log;
     ibLog.title = serialStatus?.log
       ? `打开 ${serialStatus.log}`
       : "本次会话没有日志文件";
   } else {
-    ibPause.classList.toggle("on", paused);
-    ibPause.textContent = paused ? "继续" : "暂停";
-    ibPause.title = "暂停接收输出 · Ctrl+Shift+Space\n暂停期间不再刷新屏幕，输出仍记进回放缓冲；继续时按回放整屏重画";
     ibLog.disabled = true;
   }
 }
@@ -1140,14 +1416,17 @@ function renderBarStatus() {
 /// 切会话/切回来时按后端的真实状态复原按钮：暂停是后端的开关，
 /// 前端只记「当前会话」的那一份，不能凭上一个会话的记忆画按钮。
 async function syncPaused(id: string) {
+  const revision = pauseStateRevision.get(id) ?? 0;
   let next = false;
   try {
     next = await invoke<boolean>("pty_paused", { id });
   } catch (err) {
     console.warn(`[pause] ${String(err)}`);
   }
-  if (sessionId !== id) return; // 查的途中又切走了
+  if (sessionId !== id || (pauseStateRevision.get(id) ?? 0) !== revision) return;
+  pausedBySession.set(id, next);
   paused = next;
+  renderTree();
   renderBarStatus();
 }
 
@@ -1155,15 +1434,18 @@ async function syncPaused(id: string) {
 async function syncSerial(id: string) {
   try {
     const next = await invoke<SerialStatus>("serial_status", { id });
-    if (sessionId !== id) return;
-    serialStatus = next;
-    paused = next.paused;
+    serialStatusBySession.set(id, next);
+    if (sessionId === id) {
+      serialStatus = next;
+      paused = next.paused;
+    }
   } catch (err) {
-    if (sessionId !== id) return;
-    console.warn(`[serial] 状态: ${String(err)}`);
-    serialStatus = null;
+    console.warn(`[serial] ${String(err)}`);
+    serialStatusBySession.delete(id);
+    if (sessionId === id) serialStatus = null;
   }
-  renderBarStatus();
+  renderTree();
+  if (sessionId === id) renderBarStatus();
 }
 
 /// 暂停 = 冻结画面但不丢数据：后端照常把输出记进回放缓冲，只是不再推事件。
@@ -1172,57 +1454,75 @@ async function syncSerial(id: string) {
 ///
 /// 串口会话的同一个按钮是「断开 / 连接」：断开真的关掉端口句柄（别的程序能用），
 /// 连接按原配置重开并起新的读线程。回放与历史都不动，所以不必重画屏幕。
-async function togglePause() {
-  const id = sessionId;
-  if (!id) return;
-
-  if (serialKind) {
-    const down =
-      !serialStatus || serialStatus.paused || serialStatus.status === "released" || serialStatus.status === "failed";
+async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
+  if (transport === "serial") {
+    let status = id === sessionId ? serialStatus : null;
+    if (!status) {
+      try {
+        status = await invoke<SerialStatus>("serial_status", { id });
+      } catch (err) {
+        showNotice(`读取串口状态失败：${String(err)}`, true);
+        return;
+      }
+    }
+    const down = status.paused || status.status !== "open";
     try {
       if (down) await invoke("serial_connect", { id });
       else await invoke("serial_disconnect", { id });
-      // 端口状态刚刚变了，上一条「端口已断开」「连接失败」的提示就过期了。
-      // 不清掉会出现「状态点已经绿的、提示还写着已断开」的自相矛盾画面（M5 验收）。
-      if (sessionId === id) {
-        notice = "";
-        noticeIsError = false;
-        window.clearTimeout(noticeTimer);
-      }
     } catch (err) {
-      if (sessionId === id) showNotice(`连接失败：${String(err)}`, true, 8000);
+      if (id === sessionId) showNotice(`连接失败：${String(err)}`, true, 8000);
+      else console.warn(`[serial] ${String(err)}`);
     }
-    if (sessionId === id) await syncSerial(id);
+    if (id === sessionId) await syncSerial(id);
+    else {
+      try {
+        const updated = await invoke<SerialStatus>("serial_status", { id });
+        serialStatusBySession.set(id, updated);
+      } catch (err) {
+        console.warn(`[serial] ${String(err)}`);
+      }
+    }
+    renderTree();
+    await refreshTree();
     return;
   }
-
-  const next = !paused;
-  if (next) flushOut(); // 暂停前已经到手的块属于「暂停前」，先画完再冻结
-  paused = next;
-  renderBarStatus();
+  const operationKey = id;
+  if (pauseOperations.has(operationKey)) return;
+  pauseOperations.add(operationKey);
+  const revision = (pauseStateRevision.get(id) ?? 0) + 1;
+  pauseStateRevision.set(id, revision);
   try {
-    await invoke("pty_set_paused", { id, paused: next });
+    const current = await invoke<boolean>("pty_paused", { id });
+    if ((pauseStateRevision.get(id) ?? 0) !== revision) return;
+    const next = !current;
+    await invoke<boolean>("pty_set_paused", { id, paused: next });
+    if ((pauseStateRevision.get(id) ?? 0) !== revision) return;
+    pausedBySession.set(id, next);
+    renderTree();
+    if (id === sessionId) {
+      paused = next;
+      renderBarStatus();
+      if (next) flushOut();
+      else await resyncScreen(id);
+    }
   } catch (err) {
-    paused = !next;
-    renderBarStatus();
     console.warn(`[pause] ${String(err)}`);
-    return;
+  } finally {
+    pauseOperations.delete(operationKey);
   }
-  // 继续：只重画屏幕，保住输入草稿、历史缓存与覆盖层（切会话才丢这些）
-  if (!next && sessionId === id) {
-    await resyncScreen(id);
-    await syncPaused(id);
-  }
+}
+
+async function togglePause() {
+  if (!sessionId) return;
+  await togglePauseFor(sessionId, serialKind ? "serial" : "terminal");
 }
 
 /// 清窗口：屏幕、回放缓冲、磁盘上的卷轴快照一起清，进程与命令历史不动。
 /// 不往 Shell 发 Ctrl+L：跑着 logcat 之类时那不是「清屏」而是往 stdin 塞控制字符。
 /// 代价是 Shell 仍以为屏幕上有内容，全屏程序（vim / less）要它们自己的 Ctrl+L 重画。
-async function clearScreen() {
-  const id = sessionId;
+async function clearScreenFor(id: string) {
   if (!id) return;
-  // 先让后端清回放，再清前端：清屏前读到的块可能已经在 IPC 路上，用返回的序号
-  // 把它们拦在空屏之外；反过来先清前端的话，这些块会再画一遍。
+  const wasActive = id === sessionId;
   let lastCleared = 0;
   try {
     lastCleared = await invoke<number>("pty_clear", { id });
@@ -1230,22 +1530,27 @@ async function clearScreen() {
     console.warn(`[clear] ${String(err)}`);
     return;
   }
-  if (sessionId !== id) return; // 清后端的时候又切走了：别把新会话的屏幕清了
-  dropOutQueue(); // 队列里全是清屏前的块，序号都小于等于 outFloor，留着也不会画
+  if (!wasActive || sessionId !== id) return;
+  dropOutQueue();
   outFloor = Math.max(outFloor, lastCleared);
   lastSeq = Math.max(lastSeq, lastCleared);
   noteAnswered(id, lastCleared);
-  term.clear(); // 与 `clear` 指令一致：当前行提到首行，历史一起丢
+  const transport = tree.find((session) => session.id === id)?.transport ?? "terminal";
+  if (clearDisplayMode(transport) === "reset") {
+    term.reset();
+    resyncBackgrounds();
+  } else {
+    term.clear();
+  }
 }
 
-for (const btn of [ibPause, ibClear, ibPass, ibTake, ibHex, ibLog]) {
-  // 不抢焦点：点在按钮上等同于按快捷键
+async function clearScreen() {
+  if (sessionId) await clearScreenFor(sessionId);
+}
+
+for (const btn of [ibHex, ibLog]) {
   btn.addEventListener("mousedown", (e) => e.preventDefault());
 }
-ibPause.addEventListener("click", () => void togglePause());
-ibClear.addEventListener("click", () => void clearScreen());
-ibPass.addEventListener("click", () => toggleOverride("passthrough"));
-ibTake.addEventListener("click", () => toggleOverride("input_bar"));
 
 /// HEX 模式：只改「这次发送怎么读」，不改变输入内容。解析与拒绝原因都在核心。
 ibHex.addEventListener("click", () => {
@@ -1253,9 +1558,14 @@ ibHex.addEventListener("click", () => {
   hexMode = !hexMode;
   hexBySession.set(sessionId, hexMode);
   ibHex.classList.toggle("on", hexMode);
-  ib.placeholder = hexMode
-    ? "HEX：48 65 6C 6C 6F（整行发送，不追加行结束符）"
-    : "输入要发送的内容";
+  ib.placeholder = serialKind
+    ? hexMode ? "HEX：48 65 6C 6C 6F" : "输入要发送的内容"
+    : "提示符就绪后可在这里输入";
+  if (hexMode) {
+    ib.value = normalizeHexInput(ib.value);
+    autoGrow();
+    ib.setSelectionRange(ib.value.length, ib.value.length);
+  }
   ib.focus();
   updateGhost();
 });
@@ -1291,7 +1601,8 @@ window.addEventListener(
     // 这里拦下来的只是本应用的开关，不会再触发页面重载。
     if (e.ctrlKey && !e.shiftKey && matchesKey(e, "KeyR", "r")) {
       // 串口没有命令历史与检索能力（`caps.history = false`），Ctrl+R 什么都不做
-      if (!serialKind && (own?.owner === "input_bar" || !histOverlay.hidden)) {
+      const activeSession = tree.some((session) => session.id === sessionId) && live.has(sessionId);
+      if (!serialKind && (!activeSession || own?.owner === "input_bar" || !histOverlay.hidden)) {
         e.preventDefault();
         e.stopPropagation();
         if (e.repeat) return; // 长按只开/关一次，别让覆盖层闪成跑马灯
@@ -1329,6 +1640,17 @@ window.addEventListener(
 function sendLine(line: string) {
   const id = sessionId;
   if (!id) return;
+  if (serialKind && hexMode) {
+    const clean = normalizeHexInput(line).replaceAll(" ", "");
+    if (clean.length % 2 !== 0) {
+      ib.value = line;
+      autoGrow();
+      ib.setSelectionRange(ib.value.length, ib.value.length);
+      showNotice("HEX 字符数必须为偶数，每个字节需要两位", true);
+      return;
+    }
+    line = normalizeHexInput(clean);
+  }
   const hex = serialKind && hexMode;
   void invoke("pty_send_line", { id, line, hex }).then(
     () => {
@@ -1342,12 +1664,95 @@ function sendLine(line: string) {
     (err) => {
       if (sessionId !== id) return;
       if (!ib.value) ib.value = line;
+      renderSendAvailability();
+      autoGrow();
       ib.setSelectionRange(ib.value.length, ib.value.length);
       showNotice(String(err), true, 8000);
       if (serialKind) void syncSerial(id);
     }
   );
 }
+
+async function executeShortcut(command: string): Promise<void> {
+  const id = sessionId;
+  if (!id) throw new Error("当前没有会话");
+  const transport = serialKind ? "serial" : "terminal";
+  const isPaused = serialKind
+    ? !!serialStatus?.paused || serialStatus?.status !== "open"
+    : paused;
+  if (isPaused) {
+    await togglePauseFor(id, transport);
+    const stillPaused = serialKind
+      ? !!serialStatus?.paused || serialStatus?.status !== "open"
+      : paused;
+    if (stillPaused || sessionId !== id) throw new Error("会话恢复失败，指令未发送");
+  }
+  await invoke("pty_write", { id, data: `${command}\r` });
+}
+
+function fillShortcut(command: string) {
+  const id = sessionId;
+  if (!id) return;
+  const applyFill = () => fillInputBar(command);
+  if (own?.id === id && own.override === "passthrough") {
+    void invoke("pty_set_override", { id, mode: "input_bar" })
+      .then(() => invoke<Ownership>("pty_ownership", { id }))
+      .then((ownership) => { if (sessionId === id) { applyOwnership(ownership); applyFill(); } })
+      .catch((err) => showNotice(`切回输入模式失败：${String(err)}`, true));
+    return;
+  }
+  applyFill();
+}
+
+async function sendInput() {
+  const line = ib.value;
+  if (!line.trim()) return; // 空白回车不发：后端本来也不记，只是白多打一次提示符
+
+  const id = sessionId;
+  if (!id) return;
+  const transport = serialKind ? "serial" : "terminal";
+  const isPaused = serialKind
+    ? !!serialStatus?.paused || serialStatus?.status !== "open"
+    : paused;
+  if (isPaused) {
+    await togglePauseFor(id, transport);
+    const stillPaused = serialKind
+      ? !!serialStatus?.paused || serialStatus?.status !== "open"
+      : paused;
+    if (stillPaused || sessionId !== id) return;
+  }
+
+  ib.value = "";
+  renderSendAvailability();
+  autoGrow();
+  histIdx = -1;
+  histDraft = "";
+  sendLine(line);
+  updateGhost();
+}
+
+function autoGrow() {
+  // Input height is controlled by the draggable bar, not by content updates.
+}
+
+function renderSendAvailability() {
+  ibSend.disabled = ib.disabled || !ib.value.trim();
+  const lockedAway = own?.override === "passthrough";
+  bar.classList.toggle("direct", lockedAway);
+  resizer.classList.toggle("direct", lockedAway);
+}
+
+ibSend.addEventListener("click", () => sendInput());
+ibSend.addEventListener("mousedown", (e) => e.preventDefault());
+ibHistory.addEventListener("click", () => {
+  if (histOverlay.hidden) openHistoryOverlay();
+  else closeHistoryOverlay(true);
+});
+ibHistory.addEventListener("mousedown", (e) => e.preventDefault());
+ibOverride.addEventListener("click", () => {
+  toggleOverride(own?.override === "passthrough" ? "input_bar" : "passthrough");
+});
+ibOverride.addEventListener("mousedown", (e) => e.preventDefault());
 
 ib.addEventListener("keydown", (e) => {
   // 输入法组合期间（拼音选字）不响应 Enter / 方向键，否则会把半截拼音当成命令发出去
@@ -1364,19 +1769,19 @@ ib.addEventListener("keydown", (e) => {
   ) {
     e.preventDefault();
     ib.value += currentGhost;
+    autoGrow();
     currentGhost = "";
     ghostEl.textContent = "";
     return;
   }
-  if (e.key === "Enter") {
+  if (e.ctrlKey && e.key === "Enter") {
     e.preventDefault();
-    const line = ib.value;
-    if (!line.trim()) return; // 空白回车不发：后端本来也不记，只是白多打一次提示符
-    ib.value = "";
-    histIdx = -1;
-    histDraft = "";
-    sendLine(line);
-    updateGhost();
+    sendInput();
+  } else if (e.key === "Enter" && !e.shiftKey) {
+    if (serialKind || !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      sendInput();
+    }
   } else if (e.key === "ArrowUp") {
     if (!hist.length) return;
     e.preventDefault();
@@ -1387,6 +1792,8 @@ ib.addEventListener("keydown", (e) => {
       histIdx--;
     }
     ib.value = hist[histIdx] ?? "";
+    renderSendAvailability();
+    autoGrow();
     ib.setSelectionRange(ib.value.length, ib.value.length);
     updateGhost();
   } else if (e.key === "ArrowDown") {
@@ -1400,11 +1807,15 @@ ib.addEventListener("keydown", (e) => {
       ib.value = histDraft;
       histDraft = "";
     }
+    renderSendAvailability();
+    autoGrow();
     ib.setSelectionRange(ib.value.length, ib.value.length);
     updateGhost();
   } else if (e.key === "Escape") {
     e.preventDefault();
     ib.value = "";
+    renderSendAvailability();
+    autoGrow();
     histIdx = -1;
     histDraft = "";
     updateGhost();
@@ -1417,6 +1828,18 @@ ib.addEventListener("keydown", (e) => {
 // Ghost Text 跟着文本、光标与焦点走；建议本身不可选中
 // 手动改过文本就不再算「正在翻历史」：↑↓ 游标归位，否则下一次 ↑ 会从旧位置继续跳条。
 ib.addEventListener("input", () => {
+  renderSendAvailability();
+  autoGrow();
+  if (serialKind && hexMode) {
+    const start = ib.selectionStart ?? ib.value.length;
+    const normalized = normalizeHexInput(ib.value);
+    if (normalized !== ib.value) {
+      const before = normalizeHexInput(ib.value.slice(0, start));
+      ib.value = normalized;
+      const caret = before.length;
+      ib.setSelectionRange(caret, caret);
+    }
+  }
   histIdx = -1;
   histDraft = "";
   updateGhost();
@@ -1489,6 +1912,7 @@ function queueOut(data: string, seq: number) {
 
 const listenOut = listen<{ id: string; seq: number; data: string }>("pty:out", (event) => {
   const payload = event.payload;
+  markSessionActivity(payload.id);
   if (payload.id !== sessionId) return;
   // 先在本地排队，等回放落地再按 seq 去重补上
   if (attaching) {
@@ -1507,7 +1931,7 @@ function noteFirstOutput() {
   if (coldStart.firstOutputAt || !coldStart.measuring || sessionId !== coldStart.session) return;
   coldStart.firstOutputAt = performance.now();
   log(`session ${sessionId.slice(0, 8)} · 首个字节 ${Math.round(coldStart.firstOutputAt - t0)}ms`);
-  if (!benchScheduled) {
+  if (location.hash === "#bench" && !benchScheduled) {
     benchScheduled = true;
     window.setTimeout(() => void runBench(), 1500);
   }
@@ -1530,10 +1954,13 @@ const listenOwn = listen<Ownership>("pty:ownership", (event) => {
 
 // 串口状态：连上 / 主动断开 / 读写失败。后端只在变化时发，前端只负责画。
 const listenSerial = listen<SerialStatus>("serial:status", (event) => {
-  if (event.payload.id !== sessionId) return;
-  serialStatus = event.payload;
-  paused = event.payload.paused;
-  renderBarStatus();
+  serialStatusBySession.set(event.payload.id, event.payload);
+  if (event.payload.id === sessionId) {
+    serialStatus = event.payload;
+    paused = event.payload.paused;
+    renderBarStatus();
+  }
+  renderTree();
 });
 
 // 会话 CWD 变了（Shell 每次提示符上报 OSC 7）。只有真变化后端才发，不是每个回车一帧。
@@ -1640,11 +2067,19 @@ async function runBench() {
 
 // 左栏先装配：文件面板的宽度上限要量它当前多宽，顺序反了第一帧会算错
 setupSidebar({ layoutChanged: () => syncSize() });
+setupInputbarResize({ layoutChanged: () => syncSize() });
 
 filePanel = setupFilePanel({
   sessionId: () => sessionId,
   cwdOf: (id) => tree.find((session) => session.id === id)?.cwd ?? null,
   fillInput: (text) => fillInputBar(text),
+  layoutChanged: () => syncSize()
+});
+
+shortcutsUi = setupShortcutsUi({
+  sessionId: () => sessionId,
+  fill: fillShortcut,
+  execute: executeShortcut,
   layoutChanged: () => syncSize()
 });
 
@@ -1659,6 +2094,8 @@ serialDialog = setupSerialDialog({
     return "";
   }
 });
+
+setupSerialPortsPanel({ open: (port) => serialDialog?.open(port) });
 
 void Promise.all([
   listenOut,

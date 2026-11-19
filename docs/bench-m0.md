@@ -1,5 +1,9 @@
 # M0 基准实测
 
+> 当前诊断入口：启动应用后以 `#bench` 打开（例如开发期 `http://localhost:1420/#bench`），不再在普通启动时自动压测。
+> 现有历史数字仍是 2026-11-16 的 debug 基准；不能作为本次 release 性能验收结果。
+> 当前 harness 的 1 MB 写入使用离屏 xterm，不包含可见 WebView 合成；端到端按键 p99 和多会话空闲 CPU 尚未自动采集。
+
 > 机器：Windows 11 + pwsh 7.6.6 + WebView2 157 + Tauri 2.12.5 + xterm.js 6.0.0（WebGL on）
 > 时间：2026-11-16 20:23，`tauri dev`，debug 构建（未优化，release 会更快）
 > 复现：`npm run app:dev`，前端启动 1.5 秒后自动跑基准并把结果打到 stdout（`[bench]` 行）

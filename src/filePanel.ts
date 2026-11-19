@@ -74,6 +74,7 @@ export interface FsEntry {
   link: boolean;
   size: number;
   modified_ms: number | null;
+  created_ms: number | null;
   hidden: boolean;
 }
 

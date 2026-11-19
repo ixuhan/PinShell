@@ -27,6 +27,7 @@ export interface SerialPort {
   manufacturer: string | null;
   product: string | null;
   serial_number: string | null;
+  friendly_name?: string | null;
 }
 
 export interface SerialDialogDeps {
@@ -38,13 +39,13 @@ const KIND_LABEL: Record<SerialPort["kind"], string> = {
   usb: "USB",
   pci: "PCI",
   bluetooth: "蓝牙",
-  unknown: "未知",
+  unknown: "串口设备",
   virtual: "虚拟"
 };
 
 /// 端口下拉里的一行文案：`COM3 · USB 串行设备`。
 export function portLabel(port: SerialPort): string {
-  const detail = port.product || port.manufacturer || KIND_LABEL[port.kind] || port.kind;
+  const detail = port.friendly_name || port.product || port.manufacturer || KIND_LABEL[port.kind] || port.kind;
   return `${port.port} · ${detail}`;
 }
 
@@ -80,7 +81,12 @@ export function setupSerialDialog(deps: SerialDialogDeps) {
     return !overlay.hidden;
   }
 
-  function open() {
+  function open(port?: string) {
+    if (busy) return;
+    if (port !== undefined) {
+      portInput.value = port;
+      setError("");
+    }
     if (isOpen()) return;
     setError("");
     overlay.hidden = false;

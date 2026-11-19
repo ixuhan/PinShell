@@ -100,10 +100,7 @@ impl Store {
 
         let recovered = quarantine(&path);
         match &recovered {
-            Some(dest) => println!(
-                "[data] history.db unreadable, moved to {}",
-                dest.display()
-            ),
+            Some(dest) => println!("[data] history.db unreadable, moved to {}", dest.display()),
             None => eprintln!("[data] history.db unreadable and could not be renamed"),
         }
 
@@ -243,8 +240,7 @@ impl Store {
 
 fn open_db(path: &Path) -> Result<Connection, String> {
     if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("create {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
     let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     conn.execute_batch(
@@ -253,7 +249,8 @@ fn open_db(path: &Path) -> Result<Connection, String> {
          PRAGMA busy_timeout = 2000;",
     )
     .map_err(|e| format!("pragmas: {e}"))?;
-    conn.execute_batch(SCHEMA).map_err(|e| format!("schema: {e}"))?;
+    conn.execute_batch(SCHEMA)
+        .map_err(|e| format!("schema: {e}"))?;
 
     // 半截写入或外部损坏：quick_check 是最便宜的整体校验
     let check: String = conn
@@ -290,7 +287,10 @@ fn quarantine(path: &Path) -> Option<PathBuf> {
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(suffix);
     path.with_file_name(name)
 }
@@ -556,10 +556,8 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "pinshell-history-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pinshell-history-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -597,7 +595,10 @@ mod tests {
 
         store.clear("a");
         assert!(store.snapshot("a", HISTORY_WINDOW).0.is_empty());
-        assert_eq!(commands(&store.snapshot("b", HISTORY_WINDOW).0), vec!["other"]);
+        assert_eq!(
+            commands(&store.snapshot("b", HISTORY_WINDOW).0),
+            vec!["other"]
+        );
 
         // 清空后 id 继续变大，前端不会把它当成重复事件
         let next = store.record("a", "three", 4).unwrap();

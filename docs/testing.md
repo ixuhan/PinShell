@@ -119,7 +119,10 @@
 | IPC 往返 | p50 < 2 ms、p99 < 5 ms | `bench_ping` × 300 | 记录趋势 |
 | 常驻内存（单会话） | 待实测后定 | 进程工作集 | 记录趋势 |
 
-- 门禁用 **release** 构建；debug 只记趋势，不判定。
+- 性能数字应使用 release 构建，并记录机器、Shell、会话数和运行条件；开发构建只用于趋势观察。
+- 当前 `src/main.ts` 基准仅在 URL hash 为 `#bench` 时启动，普通启动不执行额外 IPC 循环或离屏 xterm 写入。它测得的 1 MB 指标是离屏 xterm 解析/写入时间，不代表可见 WebView 的帧率；按键端到端延迟与 1/5/10 会话空闲 CPU 仍需桌面采样。
+- `refreshTree()` 获取活会话运行状态使用批量 `session_runtime_states` 命令，不应恢复为逐会话 IPC 查询；测试应覆盖暂停状态 revision 并发保护。
+- 后端静默猜测与卷轴落盘由共享调度线程维护。多会话空闲 CPU 与线程数必须实测，避免把线程数下降误报为 CPU 或响应时间已改善。
 - 同一台机连跑 5 次取中位数；单次偏离中位数 > 20% 视为噪声样本，重跑一次再判。
 - 采集结果写成 JSON（`tests/report/latest.json`），不靠人读 HUD。性能数字仍由 `[bench]` stdout 行提供（`input-ready` 一行给「可输入」），脚本化采集待补。
 

@@ -23,12 +23,20 @@ describe("端口下拉的文案（portLabel）", () => {
     expect(portLabel(port({ kind: "bluetooth" }))).toBe("COM3 · 蓝牙");
   });
 
+  it("优先使用设备管理器友好名，而不是 Unknown 分类或产品名", () => {
+    expect(portLabel(port({
+      kind: "unknown",
+      product: "USB Serial",
+      friendly_name: "USB-SERIAL CH340 (COM3)"
+    }))).toBe("COM3 · USB-SERIAL CH340 (COM3)");
+  });
+
   it("假串口带自己的标签，不与真设备混淆", () => {
     const fake = port({ port: "PINSHELL_LOOP", kind: "virtual", product: "假串口（回环，仅调试）" });
     expect(portLabel(fake)).toBe("PINSHELL_LOOP · 假串口（回环，仅调试）");
   });
 
   it("空字符串的详情也当没有，不会画出「COM3 · 」这种半截文案", () => {
-    expect(portLabel(port({ product: "", manufacturer: "" }))).toBe("COM3 · 未知");
+    expect(portLabel(port({ product: "", manufacturer: "" }))).toBe("COM3 · 串口设备");
   });
 });
