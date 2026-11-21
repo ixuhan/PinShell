@@ -99,7 +99,9 @@ struct InputState {
 struct AppState {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// 共享滴答线程的退出标记；单一调度器替代每会话一个轮询线程。
-    tick_running: AtomicBool,
+    /// 用 `Arc` 包一层：滴答线程顶层的 `TickGuard` 需要 own 一份克隆，
+    /// 保证任何退出路径（含 catch_unwind 外再 panic）都能把它置回 false。
+    tick_running: Arc<AtomicBool>,
     /// 会话树与布局。内存是唯一写入口，落盘由 [`persist_workspace`] 统一做。
     workspace: Mutex<Workspace>,
     /// 解析失败时为 `None`：本版没有必需落盘的状态，不挡启动
@@ -114,7 +116,7 @@ impl AppState {
     fn new(data_dir: Option<PathBuf>, workspace: Workspace, workspace_writable: bool) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            tick_running: AtomicBool::new(false),
+            tick_running: Arc::new(AtomicBool::new(false)),
             workspace: Mutex::new(workspace),
             data_dir,
             workspace_writable,
@@ -717,6 +719,26 @@ impl Drop for ChildGuard {
     }
 }
 
+/// 滴答线程的退出保险丝：线程函数最顶层构造，任何退出路径（正常 `Ok(())`、
+/// 放弃重启、乃至 `catch_unwind` 之外再 panic）只要离开线程函数，`Drop` 就把
+/// `tick_running` 置回 `false`——否则它会卡在 `true`，下一个会话的
+/// `swap(true)` 永远拿不到启动权。
+struct TickGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl TickGuard {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for TickGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 fn spawn_session(
     app: AppHandle,
@@ -922,6 +944,9 @@ fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
     if !state.tick_running.swap(true, Ordering::SeqCst) {
         let app_for_tick = app.clone();
         std::thread::spawn(move || {
+            // 退出保险丝：线程函数内任何退出路径都会经由 Drop 把 tick_running
+            // 置回 false，交给下一次会话启动的 swap(true) 重新拉起。
+            let _tick_guard = TickGuard::new(app_for_tick.state::<AppState>().tick_running.clone());
             // panic 退避参数：连续崩溃风暴只拦连续的——稳定运行 60 秒后计数归零。
             const TICK_BACKOFF_MS: u64 = 300;
             const TICK_BACKOFF_CAP_MS: u64 = 5_000;
@@ -934,7 +959,7 @@ fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
                     while app_for_tick
                         .state::<AppState>()
                         .tick_running
-                        .load(Ordering::Relaxed)
+                        .load(Ordering::SeqCst)
                     {
                         std::thread::sleep(Duration::from_millis(300));
                         let state = app_for_tick.state::<AppState>();
@@ -996,17 +1021,13 @@ fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
                         if !app_for_tick
                             .state::<AppState>()
                             .tick_running
-                            .load(Ordering::Relaxed)
+                            .load(Ordering::SeqCst)
                         {
                             break;
                         }
-                        // 连续 5 次：置回 false 让下一次会话启动的 swap(true) 重试，
-                        // 本线程放弃。若不置 false，tick_running 卡在 true，线程永远起不来。
+                        // 连续 5 次：本线程放弃。TickGuard 在线程函数退出时把
+                        // tick_running 置回 false，下一次会话启动的 swap(true) 重试。
                         if consecutive_panics >= TICK_PANIC_GIVE_UP_AFTER {
-                            app_for_tick
-                                .state::<AppState>()
-                                .tick_running
-                                .store(false, Ordering::SeqCst);
                             eprintln!(
                                 "[tick] 连续 panic {consecutive_panics} 次，调度线程放弃；\
                                  下一个会话启动时会重新拉起"
@@ -1058,15 +1079,10 @@ fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
                                 .unwrap_or(decoded);
                             let seq = thread_session.replay.lock().push(&text).unwrap_or_default();
                             thread_session.dirty.store(true, Ordering::Relaxed);
-                            if thread_session.paused.load(Ordering::Relaxed) {
-                                thread_session
-                                    .outbox
-                                    .pending
-                                    .lock()
-                                    .push_capped(&text, seq, OUTBOX_CAP_BYTES);
-                            } else {
-                                thread_session.outbox.pending.lock().push(&text, seq);
-                            }
+                            // 串口不走暂停兜底：串口「暂停」就是物理断开端口并 join 读线程
+                            //（见 disconnect_serial），读线程活着时 paused 恒为 false，
+                            // 直接 push，语义与终端未暂停态一致。
+                            thread_session.outbox.pending.lock().push(&text, seq);
                         }
                         continue;
                     }
@@ -1118,8 +1134,10 @@ fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
                         // 刷屏时这里一秒会跑上千次，逐块发 IPC 的代价全落在主线程与前端。
                         //
                         // 暂停时用带上限的 push_capped：pump 线程照常取走并丢弃，缓冲平时
-                        // 只有几 KB；上限只是 pump 失效时的兜底（超限丢的块已在回放里，
-                        // 继续时整屏重画覆盖，不缺字）。未暂停时绝不丢块——seq 协议靠它。
+                        // 只有几 KB。OUTBOX_CAP_BYTES 只保护「暂停 + pump 线程失效」这一
+                        // 组合（超限丢的块已在回放里，继续时整屏重画覆盖，不缺字）；
+                        // 未暂停时走下面的 push、绝不丢块——seq 协议靠它，pump 失效时
+                        // 缓冲无界是该约束的已知代价。
                         if thread_session.paused.load(Ordering::Relaxed) {
                             thread_session
                                 .outbox
@@ -2405,7 +2423,7 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
-                state.tick_running.store(false, Ordering::Relaxed);
+                state.tick_running.store(false, Ordering::SeqCst);
                 let sessions: Vec<(String, Arc<Session>)> = state
                     .sessions
                     .lock()
