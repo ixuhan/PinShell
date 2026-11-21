@@ -100,7 +100,35 @@ impl ReplayBuffer {
     /// - **没画过的块**（`seq > answered_seq`）：包括「会话已启动、前端还没附着」这段输出。
     ///   没人答过这些查询，而 Shell 很可能正卡在那儿等应答（pwsh 启动第一条就是 `CSI 6 n`）。
     ///   必须原样交给终端——删掉它，Shell 会一直停在「直通模式」不动。
+    ///
+    /// 单次遍历拼装：先按最坏情况（residue + 全部块）预分配，已答块就地剥查询，
+    /// 不再先做完整 `snapshot()` 再丢弃重拼——那会多一次 256KB 级分配与一次全量扫描。
+    /// 语义与 [`Self::snapshot_for_attach_legacy`] 逐字节等价（对照测试保证）。
     pub fn snapshot_for_attach(&self, answered_seq: u64) -> Snapshot {
+        let seq = self.chunks.back().map(|c| c.seq).unwrap_or(0);
+        let mut text = String::with_capacity(self.residue.len() + self.bytes);
+        // 保留行是清屏前就已经画过的：里面的终端查询早答过了，重画只会让终端再答一遍
+        text.push_str(&crate::scrollback::without_host_queries(&self.residue));
+        for chunk in &self.chunks {
+            if chunk.seq <= answered_seq {
+                text.push_str(&crate::scrollback::without_host_queries(&chunk.text));
+            } else {
+                text.push_str(&chunk.text);
+            }
+        }
+        Snapshot {
+            seq,
+            text,
+            dropped_bytes: self.dropped_bytes,
+        }
+    }
+
+    /// 优化前的旧实现：先做完整 `snapshot()` 再按需丢弃重拼。
+    /// 仅供等价对照测试使用（见下方 `snapshot_for_attach_matches_legacy`），
+    /// 生产代码一律走上面的单次拼装版本。
+    /// 非测试编译下无调用方，压掉 dead_code 警告。
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn snapshot_for_attach_legacy(&self, answered_seq: u64) -> Snapshot {
         let mut snapshot = self.snapshot();
         if answered_seq == 0 && self.residue.is_empty() {
             return snapshot;
@@ -374,5 +402,100 @@ mod tests {
         buf.push("PS> \x1b[5n"); // seq 2：断线期间来的
         let snap = buf.snapshot_for_attach(1);
         assert_eq!(snap.text, "PS> \x1b[5n");
+    }
+
+    // ---------- 单次拼装优化：与旧实现逐字节等价（Batch C #9） ----------
+
+    /// 混合缓冲 × 每个 answered_seq 边界：新实现的 text / seq / dropped_bytes
+    /// 必须与优化前的 `snapshot_for_attach_legacy` 完全一致。
+    /// 覆盖：已终结 OSC、完整 DSR、被切成两块的 CSI、空块、清屏保留行（含查询）、
+    /// 清屏后未答的颜色查询（OSC `?` 结尾）、普通文本。
+    #[test]
+    fn snapshot_for_attach_matches_legacy() {
+        let mut buf = ReplayBuffer::new(64 * 1024);
+        buf.push("\x1b]0;title\x07PS> "); // seq 1：含已终结 OSC
+        buf.push("\x1b[6n"); // seq 2：完整 DSR 查询
+        buf.push(""); // 空块：不占序号
+        buf.push("\x1b["); // seq 3：CSI 被切在半路
+        buf.push("38;5;245m\x1b[?25h"); // seq 4：接上文 + 完整查询
+        buf.push("output\r\n"); // seq 5：普通文本
+        buf.clear(); // 保留行：清屏前画过的内容（查询已答）
+        buf.push("\x1b]11;?\x07"); // seq 6：清屏后的颜色查询，未答
+        buf.push("more"); // seq 7
+        for answered in 0..=7u64 {
+            let new = buf.snapshot_for_attach(answered);
+            let old = buf.snapshot_for_attach_legacy(answered);
+            assert_eq!(new.text, old.text, "answered_seq={answered}");
+            assert_eq!(new.seq, old.seq, "answered_seq={answered}");
+            assert_eq!(new.dropped_bytes, old.dropped_bytes, "answered_seq={answered}");
+        }
+    }
+
+    /// 非空保留行 + `answered_seq == 0`：不能走「全原样」快路径——
+    /// 保留行里的查询是清屏前答过的，只有清屏后的块才原样保留。
+    #[test]
+    fn attach_with_residue_and_zero_answered_strips_only_residue_queries() {
+        let mut buf = ReplayBuffer::new(1024);
+        buf.push("old \x1b[6n\r\nPS> ");
+        buf.clear();
+        buf.push("\x1b[5nnew"); // 清屏后、未画过：查询必须保留
+        let snap = buf.snapshot_for_attach(0);
+        assert_eq!(snap.text, "PS> \x1b[5nnew");
+        assert_eq!(snap.seq, 2);
+        assert_eq!(snap.text, buf.snapshot_for_attach_legacy(0).text);
+    }
+
+    /// 查询序列被切成两块时按块独立扫描：半条序列宁可整段保留也不吃掉后面的字。
+    /// 这正是旧实现的行为，单次拼装必须保持同一结果。
+    #[test]
+    fn attach_keeps_a_query_split_across_chunks_untouched() {
+        let mut buf = ReplayBuffer::new(1024);
+        buf.push("pre\x1b["); // seq 1：CSI 被切在半路
+        buf.push("6npost"); // seq 2：前半截已经画过
+        let snap = buf.snapshot_for_attach(2);
+        assert_eq!(snap.text, "pre\x1b[6npost");
+        assert_eq!(snap.text, buf.snapshot_for_attach_legacy(2).text);
+    }
+
+    /// 256KB 快照微基准：新旧实现计时对比。只要求新实现不慢于旧实现
+    /// （10% 余量防 CI 抖动）；具体数字见提交说明的性能对比。
+    #[test]
+    fn snapshot_for_attach_is_not_slower_than_legacy() {
+        use std::time::{Duration, Instant};
+        let cap = 256 * 1024;
+        let mut buf = ReplayBuffer::new(cap);
+        // 512B 一块共 512 块（约 256KB），逢 8 的倍数塞一条 DSR：
+        // 已答与未答两种附着都要扫到查询。
+        let unit = "x".repeat(500);
+        for i in 0..512 {
+            let text = if i % 8 == 0 {
+                format!("{unit}\x1b[6n")
+            } else {
+                unit.clone()
+            };
+            buf.push(&text);
+        }
+        assert!(buf.len_bytes() > cap * 9 / 10, "缓冲应接近 256KB");
+        let mut new_total = Duration::ZERO;
+        let mut old_total = Duration::ZERO;
+        for answered in [0u64, 256, 512] {
+            let t = Instant::now();
+            for _ in 0..200 {
+                std::hint::black_box(buf.snapshot_for_attach(answered));
+            }
+            new_total += t.elapsed();
+            let t = Instant::now();
+            for _ in 0..200 {
+                std::hint::black_box(buf.snapshot_for_attach_legacy(answered));
+            }
+            old_total += t.elapsed();
+        }
+        assert!(
+            new_total <= old_total * 110 / 100,
+            "新实现 {new_total:?} 明显慢于旧实现 {old_total:?}"
+        );
+        println!(
+            "[bench] 256KB snapshot_for_attach ×600: new={new_total:?} old={old_total:?}"
+        );
     }
 }
