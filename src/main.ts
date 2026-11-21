@@ -206,6 +206,7 @@ function applyFontSize(size: number) {
   const next = clampFontSize(size);
   if (term.options.fontSize === next) return;
   term.options.fontSize = next;
+  invalidateGhostMetrics();
   fit.fit();
   syncSize();
 }
@@ -214,6 +215,7 @@ function applyFontSize(size: number) {
 /// 只改 `theme` 不会重绘已有内容，所以补一次整屏 refresh。
 function applyTermTheme() {
   term.options.theme = xtermTheme(readTheme());
+  invalidateGhostMetrics();
   term.refresh(0, term.rows - 1);
 }
 
@@ -222,6 +224,7 @@ function applyTermTheme() {
 /// 这里再补上会话树与输入条状态——它们是本文件直接画的。
 function refreshChromeText() {
   applyStaticI18n(document);
+  invalidateGhostMetrics();
   renderTree();
   renderBarStatus();
 }
@@ -1238,7 +1241,10 @@ function syncSize() {
 // 绘制前触发，正好补上这个空档，也比在每个改布局的地方各挂一次 fit 更不容易漏。
 new ResizeObserver(() => syncSize()).observe(document.getElementById("term-host") as HTMLElement);
 
-window.addEventListener("resize", syncSize);
+window.addEventListener("resize", () => {
+  invalidateGhostMetrics();
+  syncSize();
+});
 
 // ---------- 输入所有权：裁定在 Rust，前端只按结果切换焦点 ----------
 type Owner = "input_bar" | "channel";
@@ -1300,6 +1306,18 @@ let currentGhost = "";
 /// 输入法正在组合（拼音选字）：这段时间既不画建议，也不响应 → 与 Enter
 let composing = false;
 
+/// ib 的字体度量缓存：`#ib-input` 是 `font: inherit`，运行时近乎恒定。
+/// 每键 `getComputedStyle` 会触发强制样式重算（打字热路径上最贵的一笔），
+/// 缓存后只在真正会改字体的时机失效重算（见下方各失效点）。
+/// `ghostRuler` 仅服务 Ghost Text，字体命中时无需重赋。
+let ghostMetrics: { font: string; paddingLeft: string } | null = null;
+
+/// 字体/度量可能变化的时机（字号、主题、语言、窗口尺寸、输入条高度）统一清缓存。
+/// 下一次 `updateGhost` 未命中时重算一次，其余打字键全部走缓存。
+function invalidateGhostMetrics() {
+  ghostMetrics = null;
+}
+
 function updateGhost() {
   // 组合期间输入框里是拼音而不是命令：留着上一条建议会看着像已经匹配了
   if (composing) {
@@ -1325,11 +1343,18 @@ function updateGhost() {
   currentGhost = suggestion.slice(value.length);
   ghostEl.textContent = currentGhost;
   if (ghostRuler) {
-    const cs = getComputedStyle(ib);
-    ghostRuler.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    let metrics = ghostMetrics;
+    if (!metrics) {
+      // 缓存未命中才做一次强制样式重算：这就是打字路径上省掉的那笔
+      const cs = getComputedStyle(ib);
+      const font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      metrics = { font, paddingLeft: cs.paddingLeft || "0" };
+      ghostMetrics = metrics;
+      ghostRuler.font = font;
+    }
     const width = ghostRuler.measureText(value).width;
     // 长命令会把输入框滚起来：建议要跟着可见文本的末端走，不能按逻辑行首定位
-    ghostEl.style.left = `${ib.offsetLeft + parseFloat(cs.paddingLeft || "0") + width - ib.scrollLeft}px`;
+    ghostEl.style.left = `${ib.offsetLeft + parseFloat(metrics.paddingLeft) + width - ib.scrollLeft}px`;
   }
 }
 
@@ -2405,7 +2430,13 @@ async function runBench() {
 
 // 左栏先装配：文件面板的宽度上限要量它当前多宽，顺序反了第一帧会算错
 setupSidebarHandle = setupSidebar({ layoutChanged: () => syncSize() });
-setupInputbarResize({ layoutChanged: () => syncSize() });
+setupInputbarResize({
+  // 拖高/双击重置/窗口缩放后回调：输入条高度变了，Ghost Text 的定位度量一并失效
+  layoutChanged: () => {
+    invalidateGhostMetrics();
+    syncSize();
+  }
+});
 
 filePanel = setupFilePanel({
   sessionId: () => sessionId,
