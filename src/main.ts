@@ -2275,7 +2275,13 @@ const listenExit = listen<{ id: string }>("pty:exit", (event) => {
     return;
   }
   flushOut();
-  term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
+  // 附着途中（sessionId 已换、整屏还在 reset/回放）不要把退出提示写进正在
+  // 搭建的新屏幕：等回放完成后由 refreshTree 标冷呈现，这里只用 HUD 提一句。
+  if (attaching) {
+    log(`session ${event.payload.id.slice(0, 8)} · 进程已退出`);
+  } else {
+    term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
+  }
   void refreshTree();
 });
 
