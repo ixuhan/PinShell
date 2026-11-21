@@ -10,15 +10,42 @@ use chrono::{
 use core_domain::workspace::SessionSettings;
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// 运行日志的定期落盘间隔。`write_all` 直达 OS 页缓存（tail 等读取立即可见），
-/// std 的 `File::flush()` 在 Windows 上是 no-op——真正昂贵的 `FlushFileBuffers`
-/// 只能通过 `sync_data`（见 `flush_pending`）触发。满 500ms 由滴答线程统一落盘：
-/// 进程异常崩溃不丢字节（页缓存还在），掉电最多丢约 500ms 的日志。
+/// 运行日志的定期刷盘间隔。句柄是 `BufWriter<File>`（16KB 用户态缓冲）：
+/// 每块 `write_all` 只进缓冲、攒满 16KB 或满 500ms 才刷一次 `WriteFile` 进页缓存，
+/// 消除刷屏时每秒上千次系统调用；用户态缓冲刷入页缓存是微秒级操作，
+/// 不涉及 `FlushFileBuffers`，不引入物理落盘阻塞。
+/// 进程异常崩溃不丢字节（页缓存还在），掉电最多丢最后约 500ms 的日志。
 const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 用户态缓冲大小：约 30 条百字节日志，或者一条 16KB 的进度条大块。
+const WRITE_BUFFER_BYTES: usize = 16 * 1024;
+
+/// 日志句柄：用户态缓冲 + 文件。测试里用 `from_parts` 注入自定义底层句柄。
+struct LogFile {
+    writer: BufWriter<File>,
+}
+
+impl LogFile {
+    /// 供测试注入任意底层句柄（如只读句柄构造必败的 flush）。
+    #[cfg(test)]
+    fn from_parts(writer: BufWriter<File>) -> Self {
+        Self { writer }
+    }
+}
+
+impl Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writer.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Escape {
@@ -113,7 +140,8 @@ impl LineState {
 
 pub struct RuntimeLog {
     settings: SessionSettings,
-    file: Option<File>,
+    /// 用户态缓冲的日志句柄：`write_all` 进缓冲，`flush` 才发出 `WriteFile`。
+    file: Option<LogFile>,
     path: Option<PathBuf>,
     display: LineState,
     logged: LineState,
@@ -133,7 +161,7 @@ impl RuntimeLog {
         validate(&settings)?;
         let (file, path) = if settings.logging {
             let (file, path) = open_log(&settings)?;
-            (Some(file), Some(path))
+            (Some(LogFile { writer: file }), Some(path))
         } else {
             (None, None)
         };
@@ -171,8 +199,8 @@ impl RuntimeLog {
         }
         if !settings.logging {
             self.file = None;
-        } else if let Some((file, path)) = next {
-            self.file = Some(file);
+        } else if let Some((writer, path)) = next {
+            self.file = Some(LogFile { writer });
             self.path = Some(path);
             self.logged = LineState::default();
         }
@@ -199,8 +227,8 @@ impl RuntimeLog {
         // 旧文件换下后 `flush_if_due` 不再触及它：先把它的欠账冲掉再替换
         self.flush_pending();
         match open_log(&self.settings) {
-            Ok((file, path)) => {
-                self.file = Some(file);
+            Ok((writer, path)) => {
+                self.file = Some(LogFile { writer });
                 self.path = Some(path);
                 self.logged = LineState::default();
             }
@@ -246,9 +274,8 @@ impl RuntimeLog {
             let content = self
                 .logged
                 .render(text, self.settings.file_timestamps, fmt.as_ref());
-            // 只写页缓存，不落盘：刷屏时每块一次 FlushFileBuffers 太贵
-            //（std 的 File::flush 在 Windows 上本就是 no-op，真正落盘靠 sync_data）。
-            // 落盘由 `flush_if_due` 满 500ms 兜，Drop / update / 断开路径再补底。
+            // 只进 16KB 用户态缓冲：刷屏时每块一次 WriteFile 也省掉，
+            // 攒满缓冲或满 500ms 才刷出。Drop / update / 断开路径再补底。
             file.write_all(content.as_bytes()).is_err()
         } else {
             false
@@ -298,15 +325,15 @@ impl RuntimeLog {
                 }
             }
             entry.push('\n');
-            // TX 是用户手动触发、频率极低：保留「发出命令立刻能看到日志」的语义，
-            // 每条立即落盘（sync_data）。
+            // TX 是用户手动触发、频率极低：立即刷出用户态缓冲（微秒级），
+            // 保证「发出命令立刻能看到日志」，且不涉及物理落盘。
             let flushed = file
                 .write_all(entry.as_bytes())
-                .and_then(|_| file.sync_data())
+                .and_then(|_| file.flush())
                 .map_err(|e| format!("写入会话日志失败：{e}"));
             match flushed {
                 Ok(()) => {
-                    // TX 已立即落盘：接收方向自然也没有欠账了
+                    // TX 缓冲已刷空：接收方向自然也没有欠账了
                     self.dirty_since = None;
                 }
                 Err(err) => {
@@ -322,8 +349,9 @@ impl RuntimeLog {
         Ok(())
     }
 
-    /// 距最早一次未落盘写入满 [`FLUSH_INTERVAL`] 时把页缓存落盘（`sync_data`）。
-    /// `now` 参数注入，方便单测。返回是否真的执行了落盘。
+    /// 距最早一次未刷出的写入满 [`FLUSH_INTERVAL`] 时把用户态缓冲刷进页缓存
+    /// （`BufWriter::flush`，微秒级，不涉及 `FlushFileBuffers`）。
+    /// `now` 参数注入，方便单测。返回是否真的执行了 flush。
     ///
     /// 失败时沿用接收方向的静默语义：置 `file = None` 关闭日志，
     /// 同时清掉 `dirty_since`，避免后续滴答反复撞坏句柄。
@@ -337,18 +365,14 @@ impl RuntimeLog {
         self.flush_pending()
     }
 
-    /// 立即把页缓存落盘并清脏标记。无欠账或无文件时是空操作。
+    /// 立即把用户态缓冲刷进页缓存并清脏标记。无欠账或无文件时是空操作。
     /// 供退出/断开/换文件等兜底路径显式调用；滴答线程走 [`Self::flush_if_due`]。
-    ///
-    /// std 的 `File::flush()` 在 Windows 上是 no-op（见 std 文档），真正的
-    /// `FlushFileBuffers` 用 `sync_data` 触发：只刷文件数据，不刷元数据，
-    /// 成本低于 `sync_all`，正是运行日志需要的强度。
     pub fn flush_pending(&mut self) -> bool {
         let Some(file) = self.file.as_mut() else {
             self.dirty_since = None;
             return false;
         };
-        if file.sync_data().is_err() {
+        if file.flush().is_err() {
             // 句柄已不可信：静默关闭日志，路径一并清掉（界面随之不再显示日志位置），
             // 清欠账，避免后续滴答反复撞坏句柄
             self.file = None;
@@ -362,8 +386,8 @@ impl RuntimeLog {
 }
 
 impl Drop for RuntimeLog {
-    /// 退出兜底：进程正常关闭（含会话释放）时把最后的欠账冲下去。
-    /// 异常崩溃不走这里，但页缓存里的字节也不会丢（见 `FLUSH_INTERVAL` 注释）。
+    /// 退出兜底：进程正常关闭（含会话释放）时把最后的欠账冲进页缓存。
+    /// 异常崩溃不走这里，但已刷进页缓存的字节不会丢（见 `FLUSH_INTERVAL` 注释）。
     fn drop(&mut self) {
         self.flush_pending();
     }
@@ -505,7 +529,7 @@ fn filename(template: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn open_log(settings: &SessionSettings) -> Result<(File, PathBuf), String> {
+fn open_log(settings: &SessionSettings) -> Result<(BufWriter<File>, PathBuf), String> {
     let dir = Path::new(settings.log_directory.as_deref().ok_or("缺少日志目录")?);
     fs::create_dir_all(dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
     let name = filename(&settings.log_filename)?;
@@ -524,7 +548,9 @@ fn open_log(settings: &SessionSettings) -> Result<(File, PathBuf), String> {
             .create_new(true)
             .open(&candidate)
         {
-            Ok(file) => return Ok((file, candidate)),
+            Ok(file) => {
+                return Ok((BufWriter::with_capacity(WRITE_BUFFER_BYTES, file), candidate))
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("创建日志文件失败：{e}")),
         }
@@ -561,8 +587,9 @@ mod tests {
         let mut log = RuntimeLog::new(s).unwrap();
         assert_eq!(log.receive("a\r", true).unwrap(), "a\r\n");
         assert_eq!(log.receive("\nb\rc", true).unwrap(), "b\r\nc");
-        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "a\r\nb\rc");
+        // BufWriter 的内容在 flush 前不可见：drop 走兜底 flush 后再读
         drop(log);
+        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "a\r\nb\rc");
         fs::remove_dir_all(d).unwrap();
     }
     #[test]
@@ -594,9 +621,10 @@ mod tests {
         new.log_directory = Some(d2.to_string_lossy().into_owned());
         first.update(new).unwrap();
         first.receive("new", false).unwrap();
+        // update 换文件时已对旧文件兜底 flush；新文件的内容等 drop 再读
         assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "old");
-        assert_eq!(fs::read_to_string(d2.join("test.log")).unwrap(), "new");
         drop(first);
+        assert_eq!(fs::read_to_string(d2.join("test.log")).unwrap(), "new");
         drop(_second);
         fs::remove_dir_all(d).unwrap();
         fs::remove_dir_all(d2).unwrap();
@@ -617,12 +645,13 @@ mod tests {
         s.logging = true;
         log.update(s).unwrap();
         log.receive("new", false).unwrap();
+        // 第一个文件的欠账在 update 关闭时兜底 flush；第二个文件等 drop
         assert_eq!(
             fs::read_to_string(d.join("test.log")).unwrap(),
             "[T] one\n[T] [TX] hi\\r\\n\n[T] two\n"
         );
-        assert_eq!(fs::read_to_string(d.join("test-1.log")).unwrap(), "[T] new");
         drop(log);
+        assert_eq!(fs::read_to_string(d.join("test-1.log")).unwrap(), "[T] new");
         fs::remove_dir_all(d).unwrap();
     }
     #[test]
@@ -636,20 +665,17 @@ mod tests {
         // 暂停那一刻不建文件：下一次真正有内容时再开新文件，不留下空日志
         assert!(!d.join("test-1.log").exists());
         log.receive("after", false).unwrap();
+        // receive 触发翻页时已对旧文件兜底 flush；新文件的内容等 drop 再读
         assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "before");
-        assert_eq!(fs::read_to_string(d.join("test-1.log")).unwrap(), "after");
 
         // 取消勾选后继续/连接不再翻页：内容接着写当前文件
         s.new_log_on_toggle = false;
         log.update(s).unwrap();
         log.mark_new_file();
         log.receive("third", false).unwrap();
-        assert_eq!(
-            fs::read_to_string(d.join("test-1.log")).unwrap(),
-            "afterthird"
-        );
         assert!(!d.join("test-2.log").exists());
         drop(log);
+        assert_eq!(fs::read_to_string(d.join("test-1.log")).unwrap(), "afterthird");
         fs::remove_dir_all(d).unwrap();
     }
 
@@ -765,7 +791,8 @@ mod tests {
 
     /// flush 失败走静默关闭语义：`file` 与 `path` 一并清掉，
     /// 且后续滴答不再触发（`dirty_since` 已清）。
-    /// 用只读句柄构造必败的 flush：Windows 的 `FlushFileBuffers` 需要写权限。
+    /// 用只读句柄构造必败的写入：`BufWriter` 缓冲满时触发 `WriteFile`，
+    /// 只读句柄没有写权限必然失败，`BufWriter::flush` 随之报错。
     #[test]
     #[cfg(windows)]
     fn failed_flush_closes_the_log_silently() {
@@ -775,7 +802,7 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         let path = d.join("test.log");
         // 先落一个空文件，再以只读方式打开（只共享读）：RuntimeLog 拿到的句柄
-        // 没有 GENERIC_WRITE，Windows 的 FlushFileBuffers（sync_data）必然失败。
+        // 没有 GENERIC_WRITE，缓冲满时的 WriteFile 必然失败。
         fs::File::create(&path).unwrap();
         let ro = OpenOptions::new()
             .read(true)
@@ -785,10 +812,15 @@ mod tests {
         let mut s = settings(&d);
         s.logging = false; // new() 不建文件，文件由下面手动注入
         let mut log = RuntimeLog::new(s).unwrap();
-        log.file = Some(ro.try_clone().unwrap()); // 测试内注入只读句柄的副本
+        // 注入只读句柄并预填 4KB（远小于 16KB 容量，纯缓冲、不触句柄），
+        // 这样到期的 flush 才会真正尝试 WriteFile 并失败。
+        let mut writer =
+            BufWriter::with_capacity(WRITE_BUFFER_BYTES, ro.try_clone().unwrap());
+        writer.write_all(&vec![b'x'; 4096]).unwrap();
+        log.file = Some(LogFile::from_parts(writer));
         log.path = Some(path.clone());
         log.dirty_since = Some(Instant::now());
-        // 注入的只读句柄写不进东西：走 flush 失败分支
+        // 只读句柄写不进东西（缓冲满时 WriteFile 失败）：走 flush 失败分支
         assert!(!log.flush_if_due(Instant::now() + FLUSH_INTERVAL));
         assert!(log.file.is_none(), "失败后必须静默关闭日志文件");
         assert!(log.path().is_none(), "失败后路径也应清掉");
