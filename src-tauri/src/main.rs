@@ -980,6 +980,14 @@ fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
                             if session.transport.kind() == TransportKind::Terminal {
                                 push_ownership(&app_for_tick, &session, &id);
                             }
+                            // 运行日志定期落盘：独立短持锁，不与任何其它锁嵌套，
+                            // 用完即放（锁序红线：不新增第三种加锁顺序）。
+                            let log_flush_due = Instant::now();
+                            session
+                                .runtime_log
+                                .lock()
+                                .as_mut()
+                                .map(|log| log.flush_if_due(log_flush_due));
                             if quiet >= IDLE_FLUSH_MS
                                 && session.dirty.swap(false, Ordering::Relaxed)
                                 && !save_session_scrollback(&state, &session, &id)
@@ -1392,9 +1400,11 @@ fn serial_status(state: State<'_, AppState>, id: String) -> Result<SerialStatusP
 
 /// 暂停/继续（串口是断开/连接）之后的日志切分：按会话设置决定下一条记录是否写进新文件。
 /// 新建的串口会话已经在 `RuntimeLog::new` 里开过文件，这里只管「切换」这一下。
+/// 断开路径顺带把页缓存里的欠账冲下去：旧文件换下后就没人再管它的 flush 了。
 fn mark_session_log_rotation(session: &Session) {
     if let Some(log) = session.runtime_log.lock().as_mut() {
         log.mark_new_file();
+        log.flush_pending();
     }
 }
 

@@ -12,6 +12,13 @@ use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// 运行日志的定期落盘间隔。`write_all` 直达 OS 页缓存（tail 等读取立即可见），
+/// std 的 `File::flush()` 在 Windows 上是 no-op——真正昂贵的 `FlushFileBuffers`
+/// 只能通过 `sync_data`（见 `flush_pending`）触发。满 500ms 由滴答线程统一落盘：
+/// 进程异常崩溃不丢字节（页缓存还在），掉电最多丢约 500ms 的日志。
+const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Escape {
@@ -115,6 +122,10 @@ pub struct RuntimeLog {
     /// 暂停/继续（断开/连接）翻过页：下一条记录落到新文件。
     /// 不在切换那一刻立刻建文件，避免暂停期间留下一个空文件。
     rotate_pending: bool,
+    /// 页缓存里有未落盘内容的最早写入时刻（参数注入的 `Instant`，方便单测）。
+    /// `None` = 干净；写入成功时只在从干净变脏那一刻 `get_or_insert`，
+    /// 之后绝不覆盖——持续刷屏不能把落盘时点推到永远。
+    dirty_since: Option<Instant>,
 }
 
 impl RuntimeLog {
@@ -135,10 +146,12 @@ impl RuntimeLog {
             serial_escape: Escape::Ground,
             serial_after_cr: false,
             rotate_pending: false,
+            dirty_since: None,
         })
     }
 
     /// 先创建新文件，再提交设置；创建失败时保留原有日志和设置。
+    /// 关闭日志或换文件之前先把旧文件的未落盘内容冲下去（兜底 flush）。
     pub fn update(&mut self, settings: SessionSettings) -> Result<(), String> {
         validate(&settings)?;
         let rotate = settings.logging
@@ -151,6 +164,11 @@ impl RuntimeLog {
         } else {
             None
         };
+        // 新文件已就绪，此时旧文件再也收不到新内容：落盘兜底后替换。
+        // 掉日志开关同理——flush 与「禁用日志」语义互不干扰。
+        if (next.is_some() || !settings.logging) && self.file.is_some() {
+            self.flush_pending();
+        }
         if !settings.logging {
             self.file = None;
         } else if let Some((file, path)) = next {
@@ -178,6 +196,8 @@ impl RuntimeLog {
             return;
         }
         self.rotate_pending = false;
+        // 旧文件换下后 `flush_if_due` 不再触及它：先把它的欠账冲掉再替换
+        self.flush_pending();
         match open_log(&self.settings) {
             Ok((file, path)) => {
                 self.file = Some(file);
@@ -226,13 +246,21 @@ impl RuntimeLog {
             let content = self
                 .logged
                 .render(text, self.settings.file_timestamps, fmt.as_ref());
-            file.write_all(content.as_bytes()).is_err() || file.flush().is_err()
+            // 只写页缓存，不落盘：刷屏时每块一次 FlushFileBuffers 太贵
+            //（std 的 File::flush 在 Windows 上本就是 no-op，真正落盘靠 sync_data）。
+            // 落盘由 `flush_if_due` 满 500ms 兜，Drop / update / 断开路径再补底。
+            file.write_all(content.as_bytes()).is_err()
         } else {
             false
         };
         if write_failed {
             // 文件日志失败不能让接收线程丢掉已经准备好的回显内容。
             self.file = None;
+            self.dirty_since = None;
+        } else if self.file.is_some() {
+            // 仅从干净变脏那一刻记时刻，之后绝不覆盖：
+            // 持续刷屏不能把落盘时点推到永远（防饿死）。
+            self.dirty_since.get_or_insert(Instant::now());
         }
         Ok(display)
     }
@@ -270,12 +298,74 @@ impl RuntimeLog {
                 }
             }
             entry.push('\n');
-            file.write_all(entry.as_bytes())
-                .and_then(|_| file.flush())
-                .map_err(|e| format!("写入会话日志失败：{e}"))?;
+            // TX 是用户手动触发、频率极低：保留「发出命令立刻能看到日志」的语义，
+            // 每条立即落盘（sync_data）。
+            let flushed = file
+                .write_all(entry.as_bytes())
+                .and_then(|_| file.sync_data())
+                .map_err(|e| format!("写入会话日志失败：{e}"));
+            match flushed {
+                Ok(()) => {
+                    // TX 已立即落盘：接收方向自然也没有欠账了
+                    self.dirty_since = None;
+                }
+                Err(err) => {
+                    // 失败语义保持原样：TX 记录进不了文件就报错给调用方。
+                    // 句柄已不可信，接收方向的欠账也一并放弃，静默关闭日志。
+                    self.file = None;
+                    self.dirty_since = None;
+                    return Err(err);
+                }
+            }
             self.logged = LineState::default();
         }
         Ok(())
+    }
+
+    /// 距最早一次未落盘写入满 [`FLUSH_INTERVAL`] 时把页缓存落盘（`sync_data`）。
+    /// `now` 参数注入，方便单测。返回是否真的执行了落盘。
+    ///
+    /// 失败时沿用接收方向的静默语义：置 `file = None` 关闭日志，
+    /// 同时清掉 `dirty_since`，避免后续滴答反复撞坏句柄。
+    pub fn flush_if_due(&mut self, now: Instant) -> bool {
+        let due = self
+            .dirty_since
+            .is_some_and(|since| now.duration_since(since) >= FLUSH_INTERVAL);
+        if !due {
+            return false;
+        }
+        self.flush_pending()
+    }
+
+    /// 立即把页缓存落盘并清脏标记。无欠账或无文件时是空操作。
+    /// 供退出/断开/换文件等兜底路径显式调用；滴答线程走 [`Self::flush_if_due`]。
+    ///
+    /// std 的 `File::flush()` 在 Windows 上是 no-op（见 std 文档），真正的
+    /// `FlushFileBuffers` 用 `sync_data` 触发：只刷文件数据，不刷元数据，
+    /// 成本低于 `sync_all`，正是运行日志需要的强度。
+    pub fn flush_pending(&mut self) -> bool {
+        let Some(file) = self.file.as_mut() else {
+            self.dirty_since = None;
+            return false;
+        };
+        if file.sync_data().is_err() {
+            // 句柄已不可信：静默关闭日志，路径一并清掉（界面随之不再显示日志位置），
+            // 清欠账，避免后续滴答反复撞坏句柄
+            self.file = None;
+            self.path = None;
+            self.dirty_since = None;
+            return false;
+        }
+        self.dirty_since = None;
+        true
+    }
+}
+
+impl Drop for RuntimeLog {
+    /// 退出兜底：进程正常关闭（含会话释放）时把最后的欠账冲下去。
+    /// 异常崩溃不走这里，但页缓存里的字节也不会丢（见 `FLUSH_INTERVAL` 注释）。
+    fn drop(&mut self) {
+        self.flush_pending();
     }
 }
 
@@ -598,5 +688,124 @@ mod tests {
         assert!(out.ends_with("] x"), "{out}");
         assert!(!out.contains("yyyy"), "{out}");
         assert!(!out.contains("HH"), "{out}");
+    }
+
+    // ---------- 定期刷盘（Batch C #5） ----------
+    //
+    // `receive` 内部用真实 `Instant::now()` 记「变脏时刻」，测试里取「收块之后的
+    // 时刻」做基准：变脏的真实时刻一定早于它，用它做参照只会偏保守——
+    // 若「收块时刻 + 偏移」尚未到期，真实变脏时刻更未到期。
+
+    /// 写入不立即 flush；未满 500ms 不触发；满 500ms 触发一次，
+    /// 之后再次调用不再触发（欠账已清）。
+    #[test]
+    fn flush_is_deferred_until_due_and_fires_once() {
+        let d = dir();
+        let mut log = RuntimeLog::new(settings(&d)).unwrap();
+        let t0 = Instant::now(); // 早于变脏时刻
+        log.receive("chunk", false).unwrap();
+        let t1 = Instant::now(); // 晚于变脏时刻
+        // 写入后立刻查：以「早于变脏」的 t0 + 499ms 判定，必然未到期
+        assert!(!log.flush_if_due(t0 + Duration::from_millis(499)));
+        // 以「晚于变脏」的 t1 + 500ms 判定，必然到期
+        assert!(log.flush_if_due(t1 + Duration::from_millis(500)));
+        // 欠账已清：同一时刻再问不触发
+        assert!(!log.flush_if_due(t1 + Duration::from_millis(501)));
+        // 落盘结果可读：内容完好
+        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "chunk");
+        drop(log);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// 持续写入不饿死：变脏时刻只在首块记下、后续块绝不覆盖，
+    /// 自首块起满 500ms 依然触发 flush。
+    #[test]
+    fn continuous_writes_do_not_starve_the_flush() {
+        let d = dir();
+        let mut log = RuntimeLog::new(settings(&d)).unwrap();
+        let t0 = Instant::now(); // 早于首块的变脏时刻
+        // 300ms 内连灌 30 块（间隔 10ms 模拟刷屏）：每块都比首块晚，不许推时点
+        for i in 0..30u32 {
+            log.receive(&format!("line{i}\n"), false).unwrap();
+            assert!(!log.flush_if_due(t0 + Duration::from_millis(i as u64 * 10)));
+        }
+        let t1 = Instant::now(); // 晚于首块的变脏时刻
+        // 自首块起满 500ms：必须触发
+        assert!(log.flush_if_due(t1 + Duration::from_millis(500)));
+        // 30 块内容全部落盘
+        let content = fs::read_to_string(d.join("test.log")).unwrap();
+        for i in 0..30u32 {
+            assert!(content.contains(&format!("line{i}\n")), "缺 line{i}");
+        }
+        drop(log);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// `transmit` 保留立即 flush 的语义，并把接收方向的欠账一并清掉：
+    /// TX 之后即使不满 500ms 也不该再触发接收方向的 flush。
+    #[test]
+    fn transmit_flushes_immediately_and_clears_the_debt() {
+        let d = dir();
+        let mut s = settings(&d);
+        s.file_timestamps = true;
+        s.timestamp_format = "T".into();
+        let mut log = RuntimeLog::new(s).unwrap();
+        let t0 = Instant::now(); // 早于变脏时刻
+        log.receive("recv", false).unwrap();
+        log.transmit("hi").unwrap(); // 立即落盘
+        // TX 后文件已含接收 + 发送记录：flush_if_due 无欠账可冲
+        assert!(!log.flush_if_due(t0 + Duration::from_millis(1_000)));
+        assert_eq!(
+            fs::read_to_string(d.join("test.log")).unwrap(),
+            "[T] recv\n[T] [TX] hi\n"
+        );
+        drop(log);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// flush 失败走静默关闭语义：`file` 与 `path` 一并清掉，
+    /// 且后续滴答不再触发（`dirty_since` 已清）。
+    /// 用只读句柄构造必败的 flush：Windows 的 `FlushFileBuffers` 需要写权限。
+    #[test]
+    #[cfg(windows)]
+    fn failed_flush_closes_the_log_silently() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        let d = dir();
+        fs::create_dir_all(&d).unwrap();
+        let path = d.join("test.log");
+        // 先落一个空文件，再以只读方式打开（只共享读）：RuntimeLog 拿到的句柄
+        // 没有 GENERIC_WRITE，Windows 的 FlushFileBuffers（sync_data）必然失败。
+        fs::File::create(&path).unwrap();
+        let ro = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let mut s = settings(&d);
+        s.logging = false; // new() 不建文件，文件由下面手动注入
+        let mut log = RuntimeLog::new(s).unwrap();
+        log.file = Some(ro.try_clone().unwrap()); // 测试内注入只读句柄的副本
+        log.path = Some(path.clone());
+        log.dirty_since = Some(Instant::now());
+        // 注入的只读句柄写不进东西：走 flush 失败分支
+        assert!(!log.flush_if_due(Instant::now() + FLUSH_INTERVAL));
+        assert!(log.file.is_none(), "失败后必须静默关闭日志文件");
+        assert!(log.path().is_none(), "失败后路径也应清掉");
+        // 再问一次：欠账已清，不再触发、也不再撞坏句柄
+        assert!(!log.flush_if_due(Instant::now() + FLUSH_INTERVAL * 2));
+        drop(ro);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Drop 兜底：不调用任何显式落盘，对象销毁时欠账也会冲下去。
+    #[test]
+    fn drop_flushes_the_outstanding_debt() {
+        let d = dir();
+        let mut log = RuntimeLog::new(settings(&d)).unwrap();
+        log.receive("bye", false).unwrap();
+        drop(log); // 不显式 flush
+        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "bye");
+        fs::remove_dir_all(d).unwrap();
     }
 }
