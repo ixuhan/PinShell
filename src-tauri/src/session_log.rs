@@ -282,7 +282,10 @@ impl RuntimeLog {
         };
         if write_failed {
             // 文件日志失败不能让接收线程丢掉已经准备好的回显内容。
+            // 句柄已不可信：file / path / dirty_since 三者一并清掉（与 flush 失败
+            // 同一语义），界面不再指向一个不会再有新内容的死路径。
             self.file = None;
+            self.path = None;
             self.dirty_since = None;
         } else if self.file.is_some() {
             // 仅从干净变脏那一刻记时刻，之后绝不覆盖：
@@ -338,8 +341,10 @@ impl RuntimeLog {
                 }
                 Err(err) => {
                     // 失败语义保持原样：TX 记录进不了文件就报错给调用方。
-                    // 句柄已不可信，接收方向的欠账也一并放弃，静默关闭日志。
+                    // 句柄已不可信：与 receive / flush 失败同一语义，
+                    // file / path / dirty_since 三者一并清掉，静默关闭日志。
                     self.file = None;
+                    self.path = None;
                     self.dirty_since = None;
                     return Err(err);
                 }
@@ -826,6 +831,75 @@ mod tests {
         assert!(log.path().is_none(), "失败后路径也应清掉");
         // 再问一次：欠账已清，不再触发、也不再撞坏句柄
         assert!(!log.flush_if_due(Instant::now() + FLUSH_INTERVAL * 2));
+        drop(ro);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// receive 写失败与 flush 失败同一语义：file / path / dirty_since 三者全清。
+    /// 只读句柄 + 预填满 16KB 缓冲：下一次 receive 的 write_all 触发 flush 必败。
+    #[test]
+    #[cfg(windows)]
+    fn failed_receive_write_closes_the_log_silently() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        let d = dir();
+        fs::create_dir_all(&d).unwrap();
+        let path = d.join("test.log");
+        fs::File::create(&path).unwrap();
+        let ro = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let mut s = settings(&d);
+        s.logging = false;
+        let mut log = RuntimeLog::new(s).unwrap();
+        // 预填 16KB 减 1 字节（纯缓冲、不触句柄）：下一小块写入超出容量时
+        // `BufWriter` 先 flush 缓冲——对只读句柄必败，`write_all` 随之报错
+        let mut writer =
+            BufWriter::with_capacity(WRITE_BUFFER_BYTES, ro.try_clone().unwrap());
+        writer.write_all(&vec![b'x'; WRITE_BUFFER_BYTES - 1]).unwrap();
+        log.file = Some(LogFile::from_parts(writer));
+        log.path = Some(path.clone());
+        log.dirty_since = Some(Instant::now());
+        // 显示内容照常返回（失败不能丢回显），但日志句柄已静默关闭
+        let display = log.receive("yyyy", false).unwrap();
+        assert_eq!(display, "yyyy");
+        assert!(log.file.is_none(), "receive 写失败后必须静默关闭日志文件");
+        assert!(log.path().is_none(), "receive 写失败后路径也应清掉");
+        assert!(log.dirty_since.is_none(), "receive 写失败后欠账也应清掉");
+        drop(ro);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// transmit 失败返回 Err，且 file / path / dirty_since 三者全清。
+    #[test]
+    #[cfg(windows)]
+    fn failed_transmit_closes_the_log_silently() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        let d = dir();
+        fs::create_dir_all(&d).unwrap();
+        let path = d.join("test.log");
+        fs::File::create(&path).unwrap();
+        let ro = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let mut s = settings(&d);
+        s.logging = false;
+        let mut log = RuntimeLog::new(s).unwrap();
+        log.file = Some(LogFile::from_parts(
+            BufWriter::with_capacity(WRITE_BUFFER_BYTES, ro.try_clone().unwrap()),
+        ));
+        log.path = Some(path.clone());
+        log.dirty_since = Some(Instant::now());
+        // TX 显式 flush：只读句柄必败，错误返回给调用方
+        assert!(log.transmit("hi").is_err());
+        assert!(log.file.is_none(), "transmit 失败后必须静默关闭日志文件");
+        assert!(log.path().is_none(), "transmit 失败后路径也应清掉");
+        assert!(log.dirty_since.is_none(), "transmit 失败后欠账也应清掉");
         drop(ro);
         fs::remove_dir_all(d).unwrap();
     }

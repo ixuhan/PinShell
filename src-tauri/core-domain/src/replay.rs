@@ -126,8 +126,8 @@ impl ReplayBuffer {
     /// 优化前的旧实现：先做完整 `snapshot()` 再按需丢弃重拼。
     /// 仅供等价对照测试使用（见下方 `snapshot_for_attach_matches_legacy`），
     /// 生产代码一律走上面的单次拼装版本。
-    /// 非测试编译下无调用方，压掉 dead_code 警告。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// `#[cfg(test)]` 彻底排除在生产编译单元之外（集成测试不引用它，不受影响）。
+    #[cfg(test)]
     fn snapshot_for_attach_legacy(&self, answered_seq: u64) -> Snapshot {
         let mut snapshot = self.snapshot();
         if answered_seq == 0 && self.residue.is_empty() {
@@ -457,8 +457,11 @@ mod tests {
         assert_eq!(snap.text, buf.snapshot_for_attach_legacy(2).text);
     }
 
-    /// 256KB 快照微基准：新旧实现计时对比。只要求新实现不慢于旧实现
-    /// （10% 余量防 CI 抖动）；具体数字见提交说明的性能对比。
+    /// 256KB 快照微基准：新旧实现计时对比。只要求新实现不慢于旧实现。
+    /// 墙钟相对断言在并行/负载高的常规 `cargo test`（尤其 debug）里噪声可超 10%：
+    /// 默认 `#[ignore]`，手动跑 `cargo test -p core-domain -- --ignored --release`。
+    /// 等价性正确性由 `snapshot_for_attach_matches_legacy` 守住，性能回归交给人肉基准。
+    #[ignore = "wall-clock benchmark; run manually with -- --ignored --release"]
     #[test]
     fn snapshot_for_attach_is_not_slower_than_legacy() {
         use std::time::{Duration, Instant};
