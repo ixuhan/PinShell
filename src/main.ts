@@ -370,9 +370,11 @@ async function resyncScreen(id: string): Promise<boolean> {
       id,
       answeredSeq: answered.get(id) ?? 0
     });
-    trace(
-      `attach ${id.slice(0, 4)} answered=${answered.get(id) ?? 0} snapSeq=${snap.seq} len=${snap.data.length} queries=${countQueries(snap.data)}`
-    );
+    if (DEBUG) {
+      trace(
+        `attach ${id.slice(0, 4)} answered=${answered.get(id) ?? 0} snapSeq=${snap.seq} len=${snap.data.length} queries=${countQueries(snap.data)}`
+      );
+    }
   } catch (err) {
     attaching = false;
     log(`挂回失败: ${String(err)}`);
@@ -436,7 +438,7 @@ async function resyncScreen(id: string): Promise<boolean> {
   resyncBackgrounds();
   // 尺寸变了就让 PTY 跟着变：每发一次 shell 就会收到一次 SIGWINCH、重画一次提示符，
   // 满屏时那一次重画会在末尾留下空白行，所以这行 trace 是排查「切回来整屏上移」的抓手。
-  trace(`resize ${id.slice(0, 4)} ${term.cols}x${term.rows}`);
+  if (DEBUG) trace(`resize ${id.slice(0, 4)} ${term.cols}x${term.rows}`);
   void invoke("pty_resize", { id, cols: term.cols, rows: term.rows });
   return true;
 }
