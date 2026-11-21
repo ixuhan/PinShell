@@ -77,6 +77,10 @@ const OUT_COALESCE_MS: u64 = 8;
 /// 每个会话保留多少回放字节。够覆盖一次重载与切会话的空档，又不至于长住内存。
 const REPLAY_CAP_BYTES: usize = 256 * 1024;
 
+/// 暂停期间合流缓冲的兜底上限。暂停时发送线程照常每帧取走并丢弃，缓冲平时
+/// 只有几 KB；这个上限只在 pump 线程失效时生效，防止暂停 + 灌屏把内存堆大。
+const OUTBOX_CAP_BYTES: usize = 1024 * 1024;
+
 /// 输出静默多久之后才把卷轴快照落盘。太短会在持续刷屏时反复写文件，
 /// 太长则崩溃退出会丢更多屏幕内容。3 秒是「用户已经看完这段话」的量级。
 const IDLE_FLUSH_MS: u64 = 3000;
@@ -1054,7 +1058,15 @@ fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
                                 .unwrap_or(decoded);
                             let seq = thread_session.replay.lock().push(&text).unwrap_or_default();
                             thread_session.dirty.store(true, Ordering::Relaxed);
-                            thread_session.outbox.pending.lock().push(&text, seq);
+                            if thread_session.paused.load(Ordering::Relaxed) {
+                                thread_session
+                                    .outbox
+                                    .pending
+                                    .lock()
+                                    .push_capped(&text, seq, OUTBOX_CAP_BYTES);
+                            } else {
+                                thread_session.outbox.pending.lock().push(&text, seq);
+                            }
                         }
                         continue;
                     }
@@ -1104,7 +1116,19 @@ fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
                         //
                         // 事件不在这里直接发：先攒进合流缓冲，由发送线程按帧发出去。
                         // 刷屏时这里一秒会跑上千次，逐块发 IPC 的代价全落在主线程与前端。
-                        thread_session.outbox.pending.lock().push(&text, seq);
+                        //
+                        // 暂停时用带上限的 push_capped：pump 线程照常取走并丢弃，缓冲平时
+                        // 只有几 KB；上限只是 pump 失效时的兜底（超限丢的块已在回放里，
+                        // 继续时整屏重画覆盖，不缺字）。未暂停时绝不丢块——seq 协议靠它。
+                        if thread_session.paused.load(Ordering::Relaxed) {
+                            thread_session
+                                .outbox
+                                .pending
+                                .lock()
+                                .push_capped(&text, seq, OUTBOX_CAP_BYTES);
+                        } else {
+                            thread_session.outbox.pending.lock().push(&text, seq);
+                        }
                     }
                 }
                 Err(err) => {

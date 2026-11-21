@@ -32,6 +32,24 @@ impl Coalescer {
         true
     }
 
+    /// 带 1MB 上限的追加：超限时旧缓冲整体让位给新块。
+    ///
+    /// 与 [`Coalescer::push`] 的差别只在「缓冲即将超上限」这一种情况：
+    /// 旧内容整体丢弃、换上本块——被丢的内容早已写进回放缓冲，暂停结束时
+    /// 前端按回放整屏重画，不会缺字。空块照旧早退：不写、不清空、不占序号。
+    pub fn push_capped(&mut self, text: &str, seq: u64, max_bytes: usize) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        if self.text.len() + text.len() > max_bytes {
+            // 全新的 String 换掉旧缓冲：连同峰值堆容量一起释放，别只 clear。
+            self.text = String::new();
+        }
+        self.text.push_str(text);
+        self.seq = seq;
+        true
+    }
+
     /// 取走攒下的全部内容。空缓冲返回 `None`。
     pub fn take(&mut self) -> Option<(String, u64)> {
         if self.text.is_empty() {
@@ -95,5 +113,64 @@ mod tests {
         c.clear();
         assert!(c.is_empty());
         assert_eq!(c.take(), None);
+    }
+
+    /// 超限时旧缓冲整体让位：内存有界，seq 仍取最后一块。
+    #[test]
+    fn push_capped_discards_old_text_when_over_the_limit() {
+        let mut c = Coalescer::new();
+        assert!(c.push("old-1", 1));
+        assert!(c.push("old-2", 2));
+        // 7 字节旧内容 + 5 字节新块 = 12 > 10：触发整体让位
+        assert!(c.push_capped("new!!", 9, 10));
+        assert!(c.len_bytes() <= 10, "超限后必须回到上限以内");
+        assert_eq!(c.take(), Some(("new!!".to_string(), 9)), "seq 取最后一块");
+    }
+
+    /// 空块在上限判断之前早退：不清空攒着的内容，也不动 seq。
+    #[test]
+    fn push_capped_ignores_empty_chunks_even_when_over_the_limit() {
+        let mut c = Coalescer::new();
+        c.push("kept", 3);
+        // 缓冲已超「上限」，但空块不该触发清空
+        assert!(!c.push_capped("", 7, 2));
+        assert_eq!(c.take(), Some(("kept".to_string(), 3)));
+    }
+
+    /// 连续超限：每次都回到上限以内，内存不随灌入量增长。
+    #[test]
+    fn push_capped_stays_bounded_under_sustained_overload() {
+        let mut c = Coalescer::new();
+        let big = "y".repeat(4096);
+        for seq in 0..1000u64 {
+            c.push_capped(&big, seq, 8192);
+            assert!(c.len_bytes() <= 8192, "seq {seq} 时超限");
+        }
+        assert_eq!(c.seq, 999, "seq 跟到最后一块");
+    }
+
+    /// 未触上限时 push_capped 与 push 完全一致：逐字节完整、seq 为最后一块。
+    #[test]
+    fn push_capped_matches_push_below_the_limit() {
+        let mut capped = Coalescer::new();
+        let mut plain = Coalescer::new();
+        let chunks = [("a", 1), ("bcd", 2), ("", 3), ("efg", 4)];
+        for (text, seq) in chunks {
+            capped.push_capped(text, seq, 64);
+            plain.push(text, seq);
+        }
+        assert_eq!(capped.take(), plain.take());
+    }
+
+    /// 超限让位后堆容量确实释放：新一轮灌入不会叠加在旧容量之上。
+    #[test]
+    fn push_capped_releases_peak_capacity_on_reset() {
+        let mut c = Coalescer::new();
+        c.push_capped(&"x".repeat(8192), 1, 8192);
+        assert!(c.len_bytes() <= 8192);
+        // 再来一块触发让位：缓冲换新，容量不得残留上一轮的峰值
+        c.push_capped(&"z".repeat(16), 2, 8192);
+        assert_eq!(c.len_bytes(), 16);
+        assert_eq!(c.seq, 2);
     }
 }
