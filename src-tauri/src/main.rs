@@ -616,6 +616,15 @@ fn is_bash(shell: &str) -> bool {
     matches!(name.as_str(), "bash" | "bash.exe")
 }
 
+fn is_cmd(shell: &str) -> bool {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    matches!(name.as_str(), "cmd" | "cmd.exe")
+}
+
 /// Windows 的 verbatim 前缀（`\\?\`）不能交给 MSYS 程序：Git Bash 打开这种路径会失败，
 /// 而且 `--init-file` 失败时不会报错，集成脚本就整段没跑、会话永远停在「未知 · 直通」。
 /// 资源目录在 Windows 上常常带这个前缀，返回前统一去掉。
@@ -787,6 +796,13 @@ fn spawn_session(
             cmd.arg(script);
             cmd.arg("-i");
         }
+    } else if is_cmd(&shell) {
+        // cmd 无钩子可挂（ADR 0003 §四）：唯一入口是 PROMPT 环境变量。把 OSC 133 标记
+        // 拼进提示符——标记序列不占可见宽度，cmd 不做光标宽度计算，无需 $E 包裹顾虑；
+        // 用户自定义过 PROMPT 时尊重原值，把标记缀在前面。
+        let marker = "\x1b]133;A\x07"; // 提示符开始（就绪）
+        let user_prompt = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
+        cmd.env("PROMPT", format!("{marker}{user_prompt}"));
     }
 
     let child = pair

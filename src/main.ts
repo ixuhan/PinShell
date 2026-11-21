@@ -465,7 +465,10 @@ async function attach(id: string) {
   window.clearTimeout(noticeTimer);
   ibHex.hidden = !serialKind;
   ibLog.hidden = !serialKind;
-  document.getElementById("ib-actions")!.hidden = !serialKind;
+  // 「直通 / 接管」按钮对所有会话可见：cmd 这类没有提示符标记的会话永远停在「未知 ·
+  // 直通」，输入条被禁用，用户唯一的自救入口就是这个按钮（点一下锁接管）。之前只在
+  // 串口会话显示，cmd 会话看起来就是「输入框灰了、没地方点」。
+  document.getElementById("ib-actions")!.hidden = false;
   ibHex.classList.toggle("on", hexMode);
   ibHex.disabled = false;
   ibLog.disabled = true;
@@ -727,12 +730,13 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
   /// 点的时候再读：异步查到的所有权会改它
   let overrideMode: OverrideMode = currentOverride;
   const overrideItem: PopupItem = {
+    // 与输入条按钮同一口径：文案 = 当前锁定状态（直通亮着 = 正在透传）
     label: overridePending
       ? t("sessionSettings.loading")
-      : currentOverride === "passthrough" ? t("session.takeover") : t("session.passthrough"),
+      : currentOverride === "passthrough" ? t("session.passthrough") : t("session.takeover"),
     title: currentOverride === "passthrough"
-      ? t("input.toTakeover")
-      : currentOverride === "input_bar" ? t("input.toPassthrough") : t("input.overrideHint"),
+      ? t("input.lockedPassthroughHint")
+      : currentOverride === "input_bar" ? t("input.lockedInputHint") : t("input.overrideHint"),
     disabled: !isLive || overridePending,
     run: () => void setOverrideFor(session.id, overrideMode === "passthrough" ? "input_bar" : "passthrough")
   };
@@ -806,8 +810,10 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
     void invoke<Ownership>("pty_ownership", { id: session.id }).then((ownership) => {
       if (!stillOpen()) return;
       overrideMode = ownership.override;
-      overrideItem.label = ownership.override === "passthrough" ? t("session.takeover") : t("session.passthrough");
-      overrideItem.title = ownership.override === "passthrough" ? t("input.toTakeover") : t("input.toPassthrough");
+      overrideItem.label = ownership.override === "passthrough" ? t("session.passthrough") : t("session.takeover");
+      overrideItem.title = ownership.override === "passthrough"
+        ? t("input.lockedPassthroughHint")
+        : ownership.override === "input_bar" ? t("input.lockedInputHint") : t("input.overrideHint");
       overrideItem.disabled = false;
       menu?.repaint();
     }).catch(() => {});
@@ -1746,8 +1752,19 @@ function renderBarStatus() {
   }
   ownLabel.textContent = labelText;
   ownLabel.hidden = true;
-  ibOverride.textContent = own?.override === "passthrough" ? t("session.takeover") : t("session.passthrough");
-  ibOverride.title = own?.override === "passthrough" ? t("input.toTakeover") : t("input.toPassthrough");
+  // 按钮文案 = 当前按键实际归谁（直通 = 透传给终端，接管 = 输入条在收键）；
+  // 高亮（.on）表示这是用户显式锁定的，没亮就是状态机自动判的。
+  // 之前显示的是「下一步动作」，和状态点对不上：点了「接管」要再点一次才真正接管。
+  const locked = own?.override !== "none";
+  const showTakeover = own?.override === "input_bar"
+    || (own?.override === "none" && own?.owner === "input_bar");
+  ibOverride.textContent = showTakeover ? t("session.takeover") : t("session.passthrough");
+  ibOverride.title = own?.override === "passthrough"
+    ? t("input.lockedPassthroughHint")
+    : own?.override === "input_bar"
+      ? t("input.lockedInputHint")
+      : t("input.overrideHint");
+  ibOverride.classList.toggle("on", locked);
 
   // 同一格文案的优先级：临时错误 > 串口失败 > 串口断开 > 终端暂停中
   if (notice) {

@@ -1881,7 +1881,8 @@ body.layout-dragging {
 
 /* 直通 / 接管是互斥的锁定态：亮着表示当前锁定在哪一边 */
 #ib-pass.on,
-#ib-take.on {
+#ib-take.on,
+#ib-override.on {
   background: var(--bg-chip);
   border-color: var(--border-hover);
   color: var(--text-strong);

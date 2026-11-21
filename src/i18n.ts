@@ -105,6 +105,8 @@ const DICT = {
   "input.paused": ["暂停中", "Paused"],
   "input.pausedHint": ["点「连接」按原配置重开；会话、回放与历史都还在", "Click Connect to reopen with the same settings; the session, replay and history are kept"],
   "input.overrideHint": ["切换直通 / 接管", "Toggle pass-through / take over"],
+  "input.lockedPassthroughHint": ["按键正在透传给终端，点这里收回输入条", "Keys go to the terminal; click to take them back"],
+  "input.lockedInputHint": ["输入条已接管，点这里切回直通", "Input bar owns the keys; click to pass them through"],
   "input.toTakeover": ["切换到接管输入", "Switch to take-over input"],
   "input.toPassthrough": ["切换到直通输入", "Switch to pass-through input"],
   "input.hex": ["HEX", "HEX"],
