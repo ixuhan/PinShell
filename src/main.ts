@@ -986,20 +986,35 @@ function markSessionActivity(id: string) {
     : !(pausedBySession.get(id) ?? false);
   if (!connected) return;
 
-  activityUntilBySession.set(id, Date.now() + SESSION_ACTIVITY_MS);
-  const dot = [...sessList.querySelectorAll<HTMLElement>(".sess-row")]
-    .find((row) => row.dataset.sessionId === id)?.querySelector<HTMLElement>(".sess-dot");
-  dot?.classList.add("activity");
+  // 边沿触发：活跃窗口已经开着就只顺延截止时间（纯内存 O(1)），不查 DOM、不动定时器——
+  // 刷屏时每块输出都走到这里，之前每块都做两次 querySelectorAll 全表扫描。
+  if (activityTimers.has(id)) {
+    activityUntilBySession.set(id, Date.now() + SESSION_ACTIVITY_MS);
+    return;
+  }
 
-  const previous = activityTimers.get(id);
-  if (previous !== undefined) window.clearTimeout(previous);
-  activityTimers.set(id, window.setTimeout(() => {
-    activityUntilBySession.delete(id);
-    activityTimers.delete(id);
-    [...sessList.querySelectorAll<HTMLElement>(".sess-row")]
-      .find((row) => row.dataset.sessionId === id)?.querySelector<HTMLElement>(".sess-dot")
-      ?.classList.remove("activity");
-  }, SESSION_ACTIVITY_MS));
+  // 静默 → 活跃：亮灯一次，起一个跟随截止时间的定时器。到期时若截止时间被后续输出
+  // 顺延过就按剩余时间续期，真正到期才灭灯。renderTree 重建也会按 Map 里的截止时间
+  // 把活跃窗口内的点重新亮上（见 renderTree 的 activity 分支），两边不会打架。
+  activityUntilBySession.set(id, Date.now() + SESSION_ACTIVITY_MS);
+  const dotEl = () =>
+    sessList.querySelector<HTMLElement>(
+      `[data-session-id="${CSS.escape(id)}"] .sess-dot`
+    );
+  dotEl()?.classList.add("activity");
+  const arm = (ms: number) => {
+    activityTimers.set(id, window.setTimeout(() => {
+      const remaining = (activityUntilBySession.get(id) ?? 0) - Date.now();
+      if (remaining > 0) {
+        arm(remaining);
+        return;
+      }
+      activityUntilBySession.delete(id);
+      activityTimers.delete(id);
+      dotEl()?.classList.remove("activity");
+    }, ms));
+  };
+  arm(SESSION_ACTIVITY_MS);
 }
 
 interface TerminalProfile {
