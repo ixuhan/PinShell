@@ -17,11 +17,12 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use transport::{SerialTransport, Transport, TransportStatus};
 use uuid::Uuid;
@@ -917,35 +918,97 @@ fn start_pumps(app: &AppHandle, session: &Arc<Session>, id: &str) {
     if !state.tick_running.swap(true, Ordering::SeqCst) {
         let app_for_tick = app.clone();
         std::thread::spawn(move || {
-            while app_for_tick
-                .state::<AppState>()
-                .tick_running
-                .load(Ordering::Relaxed)
-            {
-                std::thread::sleep(Duration::from_millis(300));
-                let state = app_for_tick.state::<AppState>();
-                let sessions: Vec<(String, Arc<Session>)> = state
-                    .sessions
-                    .lock()
-                    .iter()
-                    .map(|(id, session)| (id.clone(), session.clone()))
-                    .collect();
-                for (id, session) in sessions {
-                    let quiet = {
-                        let mut input = session.input.lock();
-                        let quiet = now_ms().saturating_sub(input.last_output_ms);
-                        let at_line_start = input.at_line_start;
-                        input.tracker.on_silence(quiet, at_line_start);
-                        quiet
-                    };
-                    if session.transport.kind() == TransportKind::Terminal {
-                        push_ownership(&app_for_tick, &session, &id);
-                    }
-                    if quiet >= IDLE_FLUSH_MS
-                        && session.dirty.swap(false, Ordering::Relaxed)
-                        && !save_session_scrollback(&state, &session, &id)
+            // panic 退避参数：连续崩溃风暴只拦连续的——稳定运行 60 秒后计数归零。
+            const TICK_BACKOFF_MS: u64 = 300;
+            const TICK_BACKOFF_CAP_MS: u64 = 5_000;
+            const TICK_PANIC_COOLDOWN_MS: u64 = 60_000;
+            const TICK_PANIC_GIVE_UP_AFTER: u32 = 5;
+            let mut consecutive_panics: u32 = 0;
+            let mut last_panic: Option<Instant> = None;
+            loop {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    while app_for_tick
+                        .state::<AppState>()
+                        .tick_running
+                        .load(Ordering::Relaxed)
                     {
-                        session.dirty.store(true, Ordering::Relaxed);
+                        std::thread::sleep(Duration::from_millis(300));
+                        let state = app_for_tick.state::<AppState>();
+                        let sessions: Vec<(String, Arc<Session>)> = state
+                            .sessions
+                            .lock()
+                            .iter()
+                            .map(|(id, session)| (id.clone(), session.clone()))
+                            .collect();
+                        for (id, session) in sessions {
+                            let quiet = {
+                                let mut input = session.input.lock();
+                                let quiet = now_ms().saturating_sub(input.last_output_ms);
+                                let at_line_start = input.at_line_start;
+                                input.tracker.on_silence(quiet, at_line_start);
+                                quiet
+                            };
+                            if session.transport.kind() == TransportKind::Terminal {
+                                push_ownership(&app_for_tick, &session, &id);
+                            }
+                            if quiet >= IDLE_FLUSH_MS
+                                && session.dirty.swap(false, Ordering::Relaxed)
+                                && !save_session_scrollback(&state, &session, &id)
+                            {
+                                session.dirty.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }));
+                match result {
+                    // tick_running 已被外部置 false：正常退出。
+                    Ok(()) => break,
+                    Err(payload) => {
+                        // 冷却重置：离上次 panic 稳定超过 60 秒，说明不是风暴，重新计数。
+                        let now = Instant::now();
+                        let cooled_down = last_panic
+                            .map(|t| {
+                                now.duration_since(t).as_millis()
+                                    >= u128::from(TICK_PANIC_COOLDOWN_MS)
+                            })
+                            .unwrap_or(false);
+                        if cooled_down {
+                            consecutive_panics = 0;
+                        }
+                        consecutive_panics += 1;
+                        last_panic = Some(now);
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("unknown panic");
+                        eprintln!(
+                            "[tick] 调度线程 panic（连续第 {consecutive_panics} 次）: {message}"
+                        );
+                        // 退避（指数翻倍，5s 封顶）；应用正在退出时不再重启。
+                        let backoff_ms =
+                            (TICK_BACKOFF_MS << (consecutive_panics - 1).min(10)).min(TICK_BACKOFF_CAP_MS);
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
+                        if !app_for_tick
+                            .state::<AppState>()
+                            .tick_running
+                            .load(Ordering::Relaxed)
+                        {
+                            break;
+                        }
+                        // 连续 5 次：置回 false 让下一次会话启动的 swap(true) 重试，
+                        // 本线程放弃。若不置 false，tick_running 卡在 true，线程永远起不来。
+                        if consecutive_panics >= TICK_PANIC_GIVE_UP_AFTER {
+                            app_for_tick
+                                .state::<AppState>()
+                                .tick_running
+                                .store(false, Ordering::SeqCst);
+                            eprintln!(
+                                "[tick] 连续 panic {consecutive_panics} 次，调度线程放弃；\
+                                 下一个会话启动时会重新拉起"
+                            );
+                            break;
+                        }
                     }
                 }
             }
