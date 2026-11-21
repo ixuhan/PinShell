@@ -16,9 +16,11 @@ describe("shortcut data", () => {
     expect(moveShortcut(items, 0, -1)).toBe(items);
   });
 
-  it("keeps file list room and clamps the height", () => {
-    expect(clampShortcutHeight(500, 600)).toBe(300);
-    expect(clampShortcutHeight(500, 400)).toBe(200);
+  it("caps the height at 70% like the left panel, and keeps a 120px floor", () => {
+    expect(clampShortcutHeight(500, 600)).toBe(420);
+    expect(clampShortcutHeight(500, 400)).toBe(280);
     expect(clampShortcutHeight(10, 500)).toBe(120);
+    // 另一栏可以被压到 30%：与左栏「串口拖到 70%」的表现一致
+    expect(clampShortcutHeight(9999, 1000)).toBe(700);
   });
 });

@@ -1,21 +1,989 @@
+/* ---------- 主题变量 ----------
+   所有颜色都从这里取，规则里不再写具体色值：换主题只改这一块。
+   `:root` 是暗黑（默认），其余按 `html[data-theme="…"]` 覆盖，顺序与
+   `src/theme.ts` 的 `THEMES` 一致——先暗后亮：
+     暗色：暗黑 / 深空蓝 midnight / 炭火 ember / 极地雾 nord
+     亮色：乳白 cream / 沙岩 sand / 明亮 bright / 雾灰 mist / 素纸 paper
+   终端本身是 canvas 画的、读不到 CSS 变量，它的配色在 `src/theme.ts` 里。 */
+:root {
+  /* 底色层次：从最底的应用底色到最亮的浮层 */
+  --bg-app: #0b0e14;
+  --bg-chrome: #0d1219;
+  --bg-panel: #131a23;
+  --bg-panel-hi: #141b26;
+  --bg-sunken: #0b1017;
+  --bg-raised: #141c28;
+  --bg-active: #1c3045;
+  --bg-dialog: #0f1620;
+  --bg-chip: #223247;
+
+  /* 分隔线与描边 */
+  --border-subtle: #1b2531;
+  --border: #24303f;
+  --border-strong: #344353;
+  --border-hover: #3f5468;
+  --focus-ring: #385b7b;
+
+  /* 文字：从最亮到最弱 */
+  --text-bright: #ffffff;
+  --text-strong: #e8eef7;
+  --text: #d7e3f0;
+  --text-muted: #8a9ab0;
+  --text-dim: #65758c;
+  --text-faint: #4a5a70;
+  --text-disabled: #5b6a7f;
+  --text-ghost: #4b5b70;
+  --text-link: #5d7fa3;
+
+  /* 主色：连接中、焦点、选中 */
+  --accent: #46d19a;
+  --accent-strong: #368568;
+  --accent-solid: #24674f;
+  --accent-border: #2c5a46;
+  --accent-bg: #1c3a2d;
+  --accent-section: #83b59a;
+  /* 主色块上的文字（发送按钮）。深色主题用浅字，浅色主题用白字——
+     不能直接拿 `--text-strong`：浅色主题里它是深墨色，压在深绿底上只有 2.4:1 */
+  --on-accent: #eafff5;
+
+  /* 语义色 */
+  --danger: #e35d6a;
+  --danger-border: #5a2a30;
+  --danger-bg: #261a1d;
+  --danger-solid: #c42b1c;
+  --on-danger: #ffffff;
+  --warn: #d6a34a;
+  --warn-strong: #f0c477;
+  --warn-bg: #3a2f1c;
+  --warn-border: #4a3a22;
+  --info: #56b4ff;
+  --info-bg: #24405a;
+  --dot-idle: #3c4a5c;
+
+  /* 遮罩与投影 */
+  --overlay-strong: #05090fb8;
+  --shadow-color: #000000;
+  --shadow-soft: #00000099;
+  --shadow-strong: #000000cc;
+}
+
+/* 深空蓝：靛蓝底 + 冷蓝主色。比暗黑更「夜」，整晚写固件不刺眼。
+   底色的蓝比暗黑更偏紫，主色从绿换成蓝，一眼能看出和暗黑不是同一套。 */
+html[data-theme="midnight"] {
+  --bg-app: #10121a;
+  --bg-chrome: #0c0e15;
+  --bg-panel: #151824;
+  --bg-panel-hi: #1a1e2c;
+  --bg-sunken: #0b0d13;
+  --bg-raised: #1b2030;
+  --bg-active: #24314e;
+  --bg-dialog: #131724;
+  --bg-chip: #242d44;
+
+  --border-subtle: #1c2130;
+  --border: #272e40;
+  --border-strong: #364059;
+  --border-hover: #475573;
+  --focus-ring: #3f5f92;
+
+  --text-bright: #ffffff;
+  --text-strong: #e6ebfa;
+  --text: #ccd6ec;
+  --text-muted: #98a3bd;
+  --text-dim: #7883a0;
+  --text-faint: #565f7a;
+  --text-disabled: #626d88;
+  --text-ghost: #4f5772;
+  --text-link: #7aa2f7;
+
+  --accent: #6ea8ff;
+  --accent-strong: #4c86d9;
+  --accent-solid: #2b4f80;
+  --accent-border: #33527d;
+  --accent-bg: #17243a;
+  --accent-section: #8cb8f5;
+  --on-accent: #eaf2ff;
+
+  --danger: #f07178;
+  --danger-border: #54282f;
+  --danger-bg: #2a151b;
+  --danger-solid: #c4303f;
+  --on-danger: #ffffff;
+  --warn: #e0af68;
+  --warn-strong: #f3cb85;
+  --warn-bg: #2f2718;
+  --warn-border: #463a23;
+  --info: #7dcfff;
+  --info-bg: #1b3345;
+  --dot-idle: #3c465c;
+
+  --overlay-strong: #060810b8;
+  --shadow-color: #000000;
+  --shadow-soft: #00000099;
+  --shadow-strong: #000000cc;
+}
+
+/* 炭火：暖炭底 + 琥珀主色。蓝色光最少的一档，夜里看久了眼睛最松。
+   注意 `--info` 保留了一点冷色，留给错误/提示的语义区分，别为了统一改成暖色。 */
+html[data-theme="ember"] {
+  --bg-app: #17130f;
+  --bg-chrome: #110e0b;
+  --bg-panel: #1e1813;
+  --bg-panel-hi: #241d17;
+  --bg-sunken: #0f0c09;
+  --bg-raised: #261e18;
+  --bg-active: #3a2a1a;
+  --bg-dialog: #1b1511;
+  --bg-chip: #32251a;
+
+  --border-subtle: #271f18;
+  --border: #342a20;
+  --border-strong: #46382a;
+  --border-hover: #5b4835;
+  --focus-ring: #7a5630;
+
+  --text-bright: #fff8f1;
+  --text-strong: #f4e8da;
+  --text: #ded0bf;
+  --text-muted: #b09e86;
+  --text-dim: #93816d;
+  --text-faint: #6b5d4e;
+  --text-disabled: #78695a;
+  --text-ghost: #5f5245;
+  --text-link: #e0a565;
+
+  --accent: #e8a95f;
+  --accent-strong: #c9863f;
+  --accent-solid: #7a4a1e;
+  --accent-border: #6d4724;
+  --accent-bg: #332210;
+  --accent-section: #e8b884;
+  --on-accent: #fff6ea;
+
+  --danger: #e8695f;
+  --danger-border: #552a24;
+  --danger-bg: #2a1714;
+  --danger-solid: #c43d2f;
+  --on-danger: #fff8f1;
+  --warn: #e8c07a;
+  --warn-strong: #f5d79c;
+  --warn-bg: #312716;
+  --warn-border: #4a3a20;
+  --info: #86bcd8;
+  --info-bg: #1e2d36;
+  --dot-idle: #4b3c2f;
+
+  --overlay-strong: #0a0705b8;
+  --shadow-color: #000000;
+  --shadow-soft: #000000aa;
+  --shadow-strong: #000000d9;
+}
+
+/* 极地雾：低饱和蓝灰 + 冰青主色。底色比暗黑亮一档、对比压得更软，
+   盯着输出看很久也不累，但不像纯黑那样在暗房间里「发亮」。 */
+html[data-theme="nord"] {
+  --bg-app: #262b35;
+  --bg-chrome: #20242d;
+  --bg-panel: #2c323d;
+  --bg-panel-hi: #313845;
+  --bg-sunken: #1e222a;
+  --bg-raised: #333a47;
+  --bg-active: #3b4a61;
+  --bg-dialog: #2a2f3a;
+  --bg-chip: #3a4251;
+
+  --border-subtle: #343b47;
+  --border: #404855;
+  --border-strong: #4e5867;
+  --border-hover: #5f6a7c;
+  --focus-ring: #5e81ac;
+
+  --text-bright: #ffffff;
+  --text-strong: #eceff4;
+  --text: #d8dee9;
+  --text-muted: #a4aebd;
+  --text-dim: #8993a2;
+  --text-faint: #6a7483;
+  --text-disabled: #737d8d;
+  --text-ghost: #626b7b;
+  --text-link: #88c0d0;
+
+  --accent: #88c0d0;
+  --accent-strong: #6ba3b4;
+  --accent-solid: #3a6470;
+  --accent-border: #48646f;
+  --accent-bg: #2a3b42;
+  --accent-section: #9dccd9;
+  --on-accent: #eef4f7;
+
+  --danger: #bf616a;
+  --danger-border: #553038;
+  --danger-bg: #2c1b20;
+  --danger-solid: #b04a53;
+  --on-danger: #ffffff;
+  --warn: #ebcb8b;
+  --warn-strong: #f5ddaa;
+  --warn-bg: #332b1e;
+  --warn-border: #4c4227;
+  --info: #81a1c1;
+  --info-bg: #2b3543;
+  --dot-idle: #4d5766;
+
+  --overlay-strong: #0d1117b8;
+  --shadow-color: #0a0d12;
+  --shadow-soft: #0a0d12aa;
+  --shadow-strong: #0a0d12d9;
+}
+
+/* 乳白：暖白底 + 深墨字，主色压暗一档保证对比度 */
+html[data-theme="cream"] {
+  --bg-app: #f6f1e7;
+  --bg-chrome: #efe8db;
+  --bg-panel: #faf6ee;
+  --bg-panel-hi: #fdfaf4;
+  --bg-sunken: #f1ebdf;
+  --bg-raised: #f0e9dc;
+  --bg-active: #dceadf;
+  --bg-dialog: #fbf7f0;
+  --bg-chip: #e8e0d2;
+
+  --border-subtle: #e2d9c9;
+  --border: #d8cdb9;
+  --border-strong: #c4b69d;
+  --border-hover: #b0a184;
+  --focus-ring: #9dbfd8;
+
+  --text-bright: #1a1712;
+  --text-strong: #2a2620;
+  --text: #3a352c;
+  --text-muted: #6d6558;
+  --text-dim: #857b6b;
+  --text-faint: #9a8f7d;
+  --text-disabled: #a89c8a;
+  --text-ghost: #b0a493;
+  --text-link: #2f6d9e;
+
+  --accent: #1f7a55;
+  --accent-strong: #17694a;
+  --accent-solid: #1f7a55;
+  --accent-border: #a8c8b6;
+  --accent-bg: #e2efe6;
+  --accent-section: #3f7d5f;
+  --on-accent: #ffffff;
+
+  --danger: #b3353f;
+  --danger-border: #e0b9bc;
+  --danger-bg: #f7e6e6;
+  --danger-solid: #c42b1c;
+  --on-danger: #ffffff;
+  --warn: #8a6216;
+  --warn-strong: #a8791f;
+  --warn-bg: #f6ecd8;
+  --warn-border: #ddc79b;
+  --info: #1d5fa8;
+  --info-bg: #e3edf8;
+  --dot-idle: #bdb2a0;
+
+  --overlay-strong: #3a332a99;
+  --shadow-color: #3a332a;
+  --shadow-soft: #3a332a33;
+  --shadow-strong: #3a332a55;
+}
+
+/* 明亮：纯白底 + 冷灰描边，与乳白的暖色调区分开 */
+html[data-theme="bright"] {
+  --bg-app: #ffffff;
+  --bg-chrome: #f5f6f8;
+  --bg-panel: #ffffff;
+  --bg-panel-hi: #fafbfc;
+  --bg-sunken: #f3f5f7;
+  --bg-raised: #f7f9fb;
+  --bg-active: #e3f2ea;
+  --bg-dialog: #ffffff;
+  --bg-chip: #e9edf2;
+
+  --border-subtle: #e8ebef;
+  --border: #dbe0e6;
+  --border-strong: #c3cad3;
+  --border-hover: #a7b2be;
+  --focus-ring: #8fb9dd;
+
+  --text-bright: #0b0f14;
+  --text-strong: #161b22;
+  --text: #2b323b;
+  --text-muted: #5c6672;
+  --text-dim: #76818f;
+  --text-faint: #8d98a5;
+  --text-disabled: #a3adb9;
+  --text-ghost: #b3bcc7;
+  --text-link: #1f6fb2;
+
+  --accent: #16805c;
+  --accent-strong: #116b4c;
+  --accent-solid: #16805c;
+  --accent-border: #a5cdb9;
+  --accent-bg: #e4f2ea;
+  --accent-section: #2f7a5c;
+  --on-accent: #ffffff;
+
+  --danger: #c02a35;
+  --danger-border: #eec3c7;
+  --danger-bg: #fbeaeb;
+  --danger-solid: #c42b1c;
+  --on-danger: #ffffff;
+  --warn: #9a6c12;
+  --warn-strong: #b07f1c;
+  --warn-bg: #fbf1dd;
+  --warn-border: #e6d2a6;
+  --info: #1763b0;
+  --info-bg: #e5f0fb;
+  --dot-idle: #c2cad4;
+
+  --overlay-strong: #101820a6;
+  --shadow-color: #1a2432;
+  --shadow-soft: #1a24322e;
+  --shadow-strong: #1a24324d;
+}
+
+/* ---- 下面是三套新的亮色：乳白的暖、明亮的白各占一头，这三套补中间的灰与砂 ---- */
+
+/* 沙岩：中性砂底 + 深青主色。同是暖调，但底色把乳白那层黄去掉了，暖而不黄；
+   主色从绿换成深青，两套并排也能一眼分出来。 */
+html[data-theme="sand"] {
+  --bg-app: #ece6da;
+  --bg-chrome: #e5ded0;
+  --bg-panel: #f4efe5;
+  --bg-panel-hi: #faf6ee;
+  --bg-sunken: #e8e1d3;
+  --bg-raised: #f0eade;
+  --bg-active: #dfe7db;
+  --bg-dialog: #f8f4ea;
+  --bg-chip: #ddd5c4;
+
+  --border-subtle: #e0d8c8;
+  --border: #d3c9b5;
+  --border-strong: #bcb09a;
+  --border-hover: #a3977e;
+  --focus-ring: #9cb6c9;
+
+  --text-bright: #17140f;
+  --text-strong: #241f18;
+  --text: #35302a;
+  --text-muted: #5a5346;
+  --text-dim: #6f6759;
+  --text-faint: #847b6a;
+  --text-disabled: #9c9280;
+  --text-ghost: #a99f8c;
+  --text-link: #2f6a94;
+
+  --accent: #2f6e63;
+  --accent-strong: #245a51;
+  --accent-solid: #2f6e63;
+  --accent-border: #a8c3b6;
+  --accent-bg: #dfeae4;
+  --accent-section: #33705f;
+  --on-accent: #ffffff;
+
+  --danger: #a8342f;
+  --danger-border: #ddb9b4;
+  --danger-bg: #f6e7e4;
+  --danger-solid: #a8342f;
+  --on-danger: #ffffff;
+  --warn: #7d5a14;
+  --warn-strong: #946a1c;
+  --warn-bg: #f6eeda;
+  --warn-border: #ddcda3;
+  --info: #256098;
+  --info-bg: #e2ecf5;
+  --dot-idle: #c3b9a5;
+
+  --overlay-strong: #3a332a99;
+  --shadow-color: #3a332a;
+  --shadow-soft: #3a332a33;
+  --shadow-strong: #3a332a55;
+}
+
+/* 雾灰：冷灰白底 + 青蓝主色。比纯白少一层眩光，白天在大窗口里看一天也不扎眼；
+   主色选青蓝而不是绿，是为了和乳白/明亮那两套绿主色区分开。 */
+html[data-theme="mist"] {
+  --bg-app: #eceef1;
+  --bg-chrome: #e4e7eb;
+  --bg-panel: #f4f6f8;
+  --bg-panel-hi: #fafbfc;
+  --bg-sunken: #e6e9ed;
+  --bg-raised: #eef1f4;
+  --bg-active: #dbe7f4;
+  --bg-dialog: #f8fafb;
+  --bg-chip: #dfe4ea;
+
+  --border-subtle: #e0e4e9;
+  --border: #d2d8df;
+  --border-strong: #b9c1ca;
+  --border-hover: #9aa5b1;
+  --focus-ring: #8fb2d4;
+
+  --text-bright: #0d1319;
+  --text-strong: #1a222b;
+  --text: #2e3944;
+  --text-muted: #58636f;
+  --text-dim: #6d7985;
+  --text-faint: #858f9b;
+  --text-disabled: #98a2ae;
+  --text-ghost: #a7b1bc;
+  --text-link: #1e6db5;
+
+  --accent: #1a7f9e;
+  --accent-strong: #14657e;
+  --accent-solid: #14657e;
+  --accent-border: #a9ccd8;
+  --accent-bg: #e0eef2;
+  --accent-section: #2a7285;
+  --on-accent: #ffffff;
+
+  --danger: #c02a35;
+  --danger-border: #eec3c7;
+  --danger-bg: #fbeaeb;
+  --danger-solid: #c42b1c;
+  --on-danger: #ffffff;
+  --warn: #8f6712;
+  --warn-strong: #a87c1c;
+  --warn-bg: #fbf1dd;
+  --warn-border: #e6d2a6;
+  --info: #14639f;
+  --info-bg: #e3eef8;
+  --dot-idle: #c0c8d1;
+
+  --overlay-strong: #0f1620a6;
+  --shadow-color: #16202b;
+  --shadow-soft: #16202b2e;
+  --shadow-strong: #16202b4d;
+}
+
+/* 素纸：近单色——米白纸 + 墨蓝主色，只有语义色带彩。
+   最安静的一档，截图贴文档、录屏演示时界面不会抢戏。 */
+html[data-theme="paper"] {
+  --bg-app: #fbfaf6;
+  --bg-chrome: #f3f1eb;
+  --bg-panel: #fdfcf9;
+  --bg-panel-hi: #ffffff;
+  --bg-sunken: #f2f0e9;
+  --bg-raised: #f8f6f1;
+  --bg-active: #e9ecf0;
+  --bg-dialog: #fefdfb;
+  --bg-chip: #eae7de;
+
+  --border-subtle: #eae7df;
+  --border: #ddd8cc;
+  --border-strong: #c7c1b2;
+  --border-hover: #a7a192;
+  --focus-ring: #a9b6c4;
+
+  --text-bright: #000000;
+  --text-strong: #12100c;
+  --text: #23201a;
+  --text-muted: #56514a;
+  --text-dim: #6d675c;
+  --text-faint: #857f73;
+  --text-disabled: #969084;
+  --text-ghost: #a6a094;
+  --text-link: #27527f;
+
+  --accent: #27527f;
+  --accent-strong: #1d3f63;
+  --accent-solid: #27527f;
+  --accent-border: #b0c0d1;
+  --accent-bg: #e9eef5;
+  --accent-section: #2b5279;
+  --on-accent: #ffffff;
+
+  --danger: #a02527;
+  --danger-border: #dfb9b7;
+  --danger-bg: #f7e8e6;
+  --danger-solid: #a02527;
+  --on-danger: #ffffff;
+  --warn: #74540f;
+  --warn-strong: #8a6616;
+  --warn-bg: #f6efdb;
+  --warn-border: #ddd0a8;
+  --info: #1f5787;
+  --info-bg: #e7eef6;
+  --dot-idle: #ccc6b8;
+
+  --overlay-strong: #2a261d99;
+  --shadow-color: #2a261d;
+  --shadow-soft: #2a261d24;
+  --shadow-strong: #2a261d44;
+}
+
 html,
 body,
 #app {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #0b0e14;
+  background: var(--bg-app);
 }
 
-/* 页面整体是深色，原生滚动条/表单控件也要跟着深色。
-   不声明的话 WebView2 会按浅色主题画滚动条，终端右边缘就会多出一条白色长条。 */
+/* 原生滚动条/表单控件跟着主题走。
+   不声明的话 WebView2 会按浅色主题画滚动条，暗黑界面右边缘就会多出一条白色长条。
+   `applyTheme` 也会写 inline 的 color-scheme，这里的规则只是首帧的兜底。 */
 html {
   color-scheme: dark;
 }
 
+html[data-theme="cream"],
+html[data-theme="sand"],
+html[data-theme="bright"],
+html[data-theme="mist"],
+html[data-theme="paper"] {
+  color-scheme: light;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
 #app {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: row;
+}
+
+/* ---------- 滚动条 ----------
+   WebView2 不动的话画的是原生滚动条：浅色主题下是浅灰轨道 + 两端的上下箭头 + 斜切边的滑块，
+   和界面里这些圆角、无边框的面板完全不是一路，会话/串口/快捷指令/文件四条栏并排看尤其突兀。
+   这里统一收成一种：轨道透明、没有按钮、细圆角滑块、悬停提亮。用 `*` 一次铺满所有滚动容器，
+   终端、四栏、弹窗、多行输入框共用同一套；各栏不要再单独写滚动条配色。 */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 不画箭头按钮。留着的话 WebView2 会在轨道两端各画一格，那一格是纯原生控件颜色，
+   不跟主题变量走，浅色主题里就是两块扎眼的浅灰。 */
+*::-webkit-scrollbar-button {
+  display: none;
+}
+
+*::-webkit-scrollbar-thumb {
+  /* 外圈 2px 透明边框 + padding-box：让滑块比槽窄，两侧留出缝隙，不顶到面板边线 */
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: 5px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--border-hover);
+  background-clip: padding-box;
+}
+
+/* ---------- 自绘标题栏 ---------- */
+/* 原生标题栏已在 tauri.conf.json 关掉，这条顶栏是唯一的窗口装饰。
+   配色沿用界面深色：底 var(--bg-chrome)、分隔线 var(--border-subtle)，和左右两栏一致。 */
+#titlebar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  height: 32px;
+  background: var(--bg-chrome);
+  border-bottom: 1px solid var(--border-subtle);
+  font: 11px/1 system-ui, "Segoe UI", sans-serif;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+/* 拖动区：从最左侧的应用名一直铺到右侧工具区，双击切换最大化 */
+#titlebar-drag {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 10px 0 12px;
+}
+
+#titlebar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.3px;
+  color: var(--text);
+}
+
+/* 右侧工具区：侧栏折叠 + 设置，紧挨着窗口按钮 */
+#titlebar-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+#titlebar-tools button {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+#titlebar-tools button:hover {
+  background: var(--border-subtle);
+  color: var(--text-strong);
+}
+
+#titlebar-tools svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.1;
+  stroke-linejoin: round;
+}
+
+/* 侧栏图标：外框永远描边；那一栏本身展开时涂黑、收起时留空。
+   这样不用看按钮背景色，只看图形就知道现在哪一栏是开着的。 */
+#titlebar-tools .bar-fill {
+  fill: currentColor;
+  stroke: none;
+  opacity: 0;
+}
+
+#titlebar-tools button[aria-pressed="false"] .bar-fill {
+  opacity: 0.85;
+}
+
+/* 齿轮是实心路径，必须压过上面 `#titlebar-tools svg` 的 fill:none / stroke。
+   选择器要写到同等具体度，否则线条规则会赢，齿轮被当成描边画出来就残缺了。 */
+#titlebar-tools svg.icon-gear {
+  fill: currentColor;
+  stroke: none;
+}
+
+#titlebar-actions {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+}
+
+/* 三个窗口按钮：透明底，悬停提亮，关闭按钮悬停变红（和 Windows 一致） */
+#titlebar-actions button {
+  width: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+#titlebar-actions button:hover {
+  background: var(--border-subtle);
+  color: var(--text-strong);
+}
+
+#titlebar-actions #win-close:hover {
+  background: var(--danger-solid);
+  color: var(--on-danger);
+}
+
+#titlebar-actions svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+/* 最大化后「还原」图标的差别由 JS 切类名控制 */
+#win-maximize.restore svg rect {
+  stroke-dasharray: none;
+}
+
+/* ---------- 子栏通用结构：.panel > .panel-head + .panel-body ---------- */
+/* 四个子栏（会话 / 串口 / 快捷指令 / 文件）共用这一套：
+   标题栏单击折叠、箭头指示方向、工具按钮统一靠右。别再各写一份。 */
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 6px 0 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  /* 整条标题栏都是折叠开关：手形 + 悬停高亮，告诉用户这里能点 */
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.panel-head:hover {
+  background: var(--bg-raised);
+}
+
+.panel-head:hover .panel-title,
+.panel-head:hover .panel-chevron {
+  color: var(--text-strong);
+}
+
+/* 标题栏整条都能点：按钮只占文字宽度，空白处由 panelFold 的容器监听补上 */
+.panel-toggle {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.panel-toggle:hover {
+  background: var(--bg-raised);
+  color: var(--text-strong);
+}
+
+.panel-chevron {
+  flex: none;
+  width: 10px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
+}
+
+.panel-toggle:hover .panel-chevron,
+.panel-toggle[aria-expanded="true"] .panel-chevron {
+  color: var(--text-muted);
+}
+
+.panel-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 标题栏右侧的动作组：一律推到底，按钮尺寸与配色全栏一致 */
+.panel-tools {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+
+.panel-tools button,
+.panel-tools select {
+  flex: none;
+  height: 22px;
+  min-width: 22px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.panel-tools button:hover:not(:disabled),
+.panel-tools select:hover {
+  background: var(--bg-raised);
+  color: var(--text-strong);
+}
+
+.panel-tools button.on {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.panel-tools button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 面板头部的图标按钮：批量选择开关原来直接写字符 `☑`，那是系统字体画出来的
+   细蓝框 + 实心小勾，像一枚原生 checkbox 混在 ＋/导入/导出 那排纯符号里。
+   换成内联 SVG，描边规格与行内图标（见下方）完全一致；`currentColor` 让常态走
+   --text-muted、进入批量模式的 .on 态自动变 --accent，不用再管一份配色。 */
+.panel-tools button.icon-btn {
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.panel-tools button.icon-btn svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 面板体内的操作行：按钮多、可换行，不挤标题栏 */
+.panel-toolbar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-toolbar button {
+  flex: none;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.panel-toolbar button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.panel-toolbar button.on {
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.panel-toolbar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ---------- 行内图标按钮 ----------
+   会话行尾的「⋯」和快捷指令行尾的「↑ ↓ ✎ ×」是同一类东西：贴着内容走的小按钮。
+   以前各写一套——快捷指令那四个是 19px 的描边小方块，四连排像四个输入框；会话那边
+   是一列常驻的灰点，二十行堆下来整栏都是噪点。现在统一成「无边框、无底色、悬停才浮出
+   一块圆角底」，两处共用一个定义，改一处两边同步。 */
+.sess-menu-button,
+.shortcut-action {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sess-menu-button:hover,
+.shortcut-action:hover:not(:disabled) {
+  background: var(--bg-chip);
+  color: var(--text-strong);
+}
+
+/* 键盘焦点要看得见，但别再加一圈外发光：行本身已经很窄 */
+.sess-menu-button:focus-visible,
+.shortcut-action:focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+/* 图标本身：16 viewBox 缩到 14px，描边 1.35——和标题栏那组 1.1 描边的图标是一路的，
+   比 12px 的字符清楚，四个并排也不会一边轻一边重。 */
+.sess-menu-button svg,
+.shortcut-action svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 「⋯」是三个零长度线段 + 圆头画出来的点，不是线：1.35 描边缩到 14px 后直径只剩
+   1px 出头，几乎看不见。SVG 里的 stroke-width="2.2" 是 presentation attribute，
+   优先级低于这里的 CSS，所以必须在 CSS 里再单独加粗一次，视觉重量才和另外四个齐平。 */
+.sess-menu-button svg {
+  stroke-width: 2.2;
+}
+
+.shortcut-action:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+
+/* 会话行的「⋯」平时收起来，指到这一行（或它就是当前行）才出现。
+   不收起的话每行尾巴上都有一个灰点，纵向排成一列，比内容本身还抢眼。 */
+.sess-menu-button {
+  opacity: 0;
+}
+
+.sess-row:hover .sess-menu-button,
+.sess-row.active .sess-menu-button,
+.sess-menu-button:focus-visible {
+  opacity: 1;
+}
+
+/* 折叠只收起内容：标题栏留着，点一下再展开 */
+.panel.collapsed > .panel-body {
+  display: none;
 }
 
 /* 左栏：会话树。热/冷只由状态点表达，不做两套列表 */
@@ -26,10 +994,26 @@ html {
   width: var(--sidebar-width, 196px);
   display: flex;
   flex-direction: column;
-  background: #0d1219;
-  border-right: 1px solid #1b2531;
+  background: var(--bg-chrome);
+  border-right: 1px solid var(--border-subtle);
   font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
   user-select: none;
+}
+
+/* 会话子栏吃掉剩余高度，串口子栏贴底 */
+#sess-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 收起后不再占位：只留标题栏，下面的串口子栏自然跟着上移。
+   两个都收起时两块一起贴顶，和右栏的表现一致。 */
+#sess-panel.collapsed {
+  flex: none;
+}
+
+#sess-panel.collapsed #sess-body {
+  display: none;
 }
 
 /* 右边缘的拖拽手柄：跨在边框上，抓取范围 11px（栏内 6px、栏外 5px） */
@@ -58,51 +1042,21 @@ html {
 
 #sess-resizer:hover::after,
 body.layout-dragging #sess-resizer::after {
-  background: #2c5a46;
+  background: var(--accent-border);
 }
 
+/* 会话子栏的标题栏：与其它子栏同高，只多留一点上边距，和栏顶的空白对齐 */
 #sess-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 10px 6px;
-  color: #8a9ab0;
-  font-size: 11px;
-  letter-spacing: 0.5px;
+  padding: 4px 6px 4px 4px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-/* 两个按钮都推到右端：新建在前，收起在后 */
-#sess-new {
-  margin-left: auto;
-}
-
-#sess-new,
-#sess-collapse {
-  width: 22px;
-  height: 22px;
-  background: transparent;
-  border: 1px solid #24303f;
-  border-radius: 6px;
-  color: #8a9ab0;
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-#sess-new:hover,
-#sess-collapse:hover {
-  color: #e8eef7;
-  border-color: #31435a;
-}
-
-/* 收起后只剩一条 26px 的竖条：头部、列表、提示与拖拽手柄全部让位 */
+/* 收起后只剩一条 26px 的竖条：内容与拖拽手柄全部让位，只留展开按钮 */
 #sidebar.collapsed {
   width: 26px;
 }
 
-#sidebar.collapsed #sess-head,
-#sidebar.collapsed #sess-list,
-#sidebar.collapsed #sess-hint,
+#sidebar.collapsed #sess-panel,
 #sidebar.collapsed #ports-panel,
 #sidebar.collapsed #sess-resizer {
   display: none;
@@ -114,7 +1068,7 @@ body.layout-dragging #sess-resizer::after {
   padding: 10px 0;
   border: 0;
   background: transparent;
-  color: #5d7fa3;
+  color: var(--text-link);
   font: inherit;
   cursor: pointer;
   /* 竖排两字，26px 宽刚好放得下 */
@@ -122,8 +1076,8 @@ body.layout-dragging #sess-resizer::after {
 }
 
 #sess-expand:hover {
-  color: #d7e3f0;
-  background: #131a23;
+  color: var(--text);
+  background: var(--bg-panel);
 }
 
 /* hidden 属性必须压过上面的 display，否则展开状态下还会留一个空白按钮 */
@@ -138,7 +1092,7 @@ body.layout-dragging #sess-resizer::after {
 
 .sess-state {
   flex: none;
-  color: #d6a34a;
+  color: var(--warn);
   font-size: 10px;
 }
 
@@ -147,11 +1101,11 @@ body.layout-dragging #sess-resizer::after {
 }
 
 .sess-state.connected {
-  color: #46d19a;
+  color: var(--accent);
 }
 
 .sess-state.paused {
-  color: #d6a34a;
+  color: var(--warn);
 }
 
 #sess-list {
@@ -167,20 +1121,20 @@ body.layout-dragging #sess-resizer::after {
   gap: 7px;
   padding: 5px 6px;
   border-radius: 6px;
-  color: #9aabc2;
+  color: var(--text-muted);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .sess-row:hover {
-  background: #141c28;
+  background: var(--bg-raised);
 }
 
 .sess-row.active {
   position: relative;
-  background: #1c3045;
-  color: #f2f7ff;
-  box-shadow: inset 0 0 0 1px #385b7b;
+  background: var(--bg-active);
+  color: var(--text-strong);
+  box-shadow: inset 0 0 0 1px var(--focus-ring);
 }
 
 .sess-row.active::before {
@@ -191,11 +1145,130 @@ body.layout-dragging #sess-resizer::after {
   bottom: 4px;
   width: 3px;
   border-radius: 0 3px 3px 0;
-  background: #56b4ff;
+  background: var(--info);
 }
 
 .sess-row.active .sess-name {
   font-weight: 600;
+}
+
+/* ---------- 列表多选（会话 / 快捷指令） ---------- */
+/* 进入批量模式后标题栏按钮保持按下态，列表上方出现全选/反选/删除 */
+.bulk-bar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bulk-bar[hidden] {
+  display: none;
+}
+
+.bulk-bar button {
+  flex: none;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bulk-bar button:hover:not(:disabled) {
+  background: var(--bg-raised);
+  color: var(--text-strong);
+}
+
+.bulk-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.bulk-bar button.danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.bulk-bar button.danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+
+/* 勾选框占在状态点前面：尺寸压小，别把单行列表撑高。
+   原生复选框只会被 `accent-color` 染一个勾，方框和描边仍是系统画的——浅色主题里
+   是一块偏灰的白底，暗色主题里是一块亮白，和旁边那些圆角面板放在一起很跳。
+   这里整个重画：方框用主题描边、选中填主色、对勾用两条边旋 45° 画出来。 */
+.sess-check,
+.shortcut-check {
+  flex: none;
+  position: relative;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-panel);
+  cursor: pointer;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.sess-check:hover,
+.shortcut-check:hover {
+  border-color: var(--border-hover);
+}
+
+.sess-check:checked,
+.shortcut-check:checked {
+  background: var(--accent-solid);
+  border-color: var(--accent-strong);
+}
+
+/* 对勾：一块 4×7 的直角边，绕中心转 45° 就是 √。用 --on-accent 保证九套主题下都压得住底色。 */
+.sess-check:checked::after,
+.shortcut-check:checked::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 0.5px;
+  width: 4px;
+  height: 7px;
+  border: solid var(--on-accent);
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(45deg);
+}
+
+.sess-check:focus-visible,
+.shortcut-check:focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* 快捷指令一行是带 1px 边框的卡片，padding-left 却是 0：批量模式下勾选框是
+   第一个子节点，会直接贴着行的左边框，两条 1px 描边叠成一条粗线，看着像压在框上。
+   补 5px 左外边距（加上行本身那 1px 边框 = 距行外沿 6px），和会话列表的
+   6px 内边距落在同一视觉起点上，两栏的勾选框才对齐。只作用于 shortcut-check，
+   会话行本来就有留白，不用动。 */
+.shortcut-check {
+  margin-left: 5px;
+}
+
+.sess-row.selected,
+.shortcut-row.selected {
+  /* 用主色淡底区分「勾选中」和当前会话的 active 高亮：两者同屏时不能长得一样 */
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+/* 批量模式下单条操作让位：会话的「⋯」菜单收起来，行只剩勾选 */
+#sess-panel.selecting .sess-menu-button {
+  display: none;
 }
 
 .sess-dot {
@@ -203,12 +1276,12 @@ body.layout-dragging #sess-resizer::after {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #3c4a5c;
+  background: var(--dot-idle);
 }
 
 .sess-dot.connected {
-  background: #46d19a;
-  box-shadow: 0 0 6px -1px #46d19a;
+  background: var(--accent);
+  box-shadow: 0 0 6px -1px var(--accent);
 }
 
 .sess-dot.activity {
@@ -218,7 +1291,7 @@ body.layout-dragging #sess-resizer::after {
 @keyframes sess-dot-blink {
   50% {
     opacity: 0.25;
-    box-shadow: 0 0 1px #46d19a;
+    box-shadow: 0 0 1px var(--accent);
   }
 }
 
@@ -237,32 +1310,12 @@ body.layout-dragging #sess-resizer::after {
   width: 100%;
   margin: -1px 0;
   padding: 0 4px;
-  background: #0b1017;
-  border: 1px solid #31435a;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   outline: 0;
-  color: #e8eef7;
+  color: var(--text-strong);
   font: inherit;
-}
-
-.sess-menu-button {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: #718198;
-  font-size: 16px;
-  line-height: 18px;
-  cursor: pointer;
-}
-
-.sess-menu-button:hover,
-.sess-row.active .sess-menu-button {
-  background: #27394d;
-  color: #e8eef7;
 }
 
 .sess-close {
@@ -270,7 +1323,7 @@ body.layout-dragging #sess-resizer::after {
   padding: 0 2px;
   background: transparent;
   border: 0;
-  color: #3f4c60;
+  color: var(--text-faint);
   font-size: 11px;
   cursor: pointer;
   opacity: 0;
@@ -281,13 +1334,7 @@ body.layout-dragging #sess-resizer::after {
 }
 
 .sess-close:hover {
-  color: #e35d6a;
-}
-
-#sess-hint {
-  padding: 6px 10px 8px;
-  color: #3f4c60;
-  font-size: 10.5px;
+  color: var(--danger);
 }
 
 #ports-panel {
@@ -295,9 +1342,42 @@ body.layout-dragging #sess-resizer::after {
   flex: none;
   min-width: 0;
   height: var(--ports-height, 180px);
-  border-top: 1px solid #24303f;
+  border-top: 1px solid var(--border);
 }
 
+/* 会话子栏展开时它由 #sess-panel 的 flex: 1 自然挤到底部；
+   会话收起后 #sess-panel 不再占位，串口跟着上移到标题栏下面。 */
+
+/* 会话收起、串口展开：让串口填满剩下的整栏高度。
+   否则固定 180px 的面板会孤零零停在栏顶，下面一大片空白，
+   端口列表看起来像悬在半空。这时高度由 flex 决定，分割线没有意义。 */
+#sidebar.sess-folded #ports-panel:not(.collapsed) {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+#sidebar.sess-folded #ports-panel:not(.collapsed) #ports-resizer {
+  display: none;
+}
+
+/* 折叠时高度交给标题栏：不能再留着 180px 的空白 */
+#ports-panel.collapsed {
+  height: auto;
+}
+
+#ports-panel.collapsed #ports-body {
+  display: none;
+}
+
+#ports-panel.collapsed #ports-resizer {
+  display: none;
+}
+
+/* 拖拽手柄贴在串口顶边、向上伸出 5px 便于抓取。
+   但它不能盖到上方会话子栏的标题栏上：会话收起时两块紧邻，
+   手柄向上伸出会把「点会话标题栏展开」的点击截走。
+   所以只在会话子栏展开（上方有内容区）时才允许向上伸出。 */
 #ports-resizer {
   position: absolute;
   top: -5px;
@@ -307,6 +1387,13 @@ body.layout-dragging #sess-resizer::after {
   z-index: 6;
   cursor: row-resize;
   touch-action: none;
+}
+
+/* 会话子栏收起时：手柄完全收进串口面板内，不再压住上面的标题栏。
+   类名由 sidebarUi 挂到 #sidebar 上（不用 :has()，避免依赖较新的选择器支持）。 */
+#sidebar.sess-folded #ports-resizer {
+  top: 0;
+  height: 6px;
 }
 
 #ports-resizer::after {
@@ -321,35 +1408,19 @@ body.layout-dragging #sess-resizer::after {
 
 #ports-resizer:hover::after,
 body.layout-dragging #ports-resizer::after {
-  background: #2c5a46;
-}
-
-#ports-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  height: calc(100% - 35px);
+  background: var(--accent-border);
 }
 
 #ports-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
+  padding: 4px 6px 4px 4px;
 }
 
-.ports-heading {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
-  margin-right: auto;
-  min-width: 0;
-}
-
+/* 刷新时间放在列表上方，不挤占标题栏的按钮位置 */
 #ports-refreshed {
-  color: #65758c;
-  font-size: 10.5px;
+  flex: none;
+  padding: 2px 10px 4px;
+  color: var(--text-dim);
+  font-size: 10px;
   line-height: 12px;
   white-space: nowrap;
   display: inline-flex;
@@ -368,16 +1439,16 @@ body.layout-dragging #ports-resizer::after {
   height: 6px;
   flex: none;
   border-radius: 50%;
-  background: #46d19a;
-  box-shadow: 0 0 5px #46d19a;
+  background: var(--accent);
+  box-shadow: 0 0 5px var(--accent);
   animation: refresh-pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes refresh-pulse {
-  50% { opacity: 0.35; box-shadow: 0 0 1px #46d19a; }
+  50% { opacity: 0.35; box-shadow: 0 0 1px var(--accent); }
 }
 
-#ports-head button,
+/* 端口行的「＋」与标题栏按钮保持同一套观感；标题栏按钮由 .panel-tools 统一定义 */
 .port-add {
   flex: none;
   height: 24px;
@@ -386,28 +1457,20 @@ body.layout-dragging #ports-resizer::after {
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: #8a9ab0;
+  color: var(--text-muted);
   font: inherit;
   cursor: pointer;
 }
 
-#ports-head button:hover,
 .port-add:hover {
-  background: #1b2935;
-  color: #e8eef7;
-}
-
-#ports-head .ports-heading #ports-toggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: 0;
+  background: var(--bg-raised);
+  color: var(--text-strong);
 }
 
 #ports-auto.on {
-  background: #1c3a2d;
-  border-color: #2c5a46;
-  color: #70d6a6;
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--accent-strong);
 }
 
 #ports-refresh:disabled {
@@ -426,20 +1489,21 @@ body.layout-dragging #ports-resizer::after {
 .port-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 4px;
-  border-radius: 4px;
-  color: #9aabc2;
+  gap: 7px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
 }
 
 .port-row:hover {
-  background: #141c28;
+  background: var(--bg-raised);
 }
 
 .port-row.sel {
-  background: #1c3045;
-  color: #e8eef7;
+  background: var(--bg-active);
+  color: var(--text-strong);
 }
 
 .port-label {
@@ -448,32 +1512,24 @@ body.layout-dragging #ports-resizer::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font: inherit;
 }
 
 #ports-status {
-  padding: 3px 10px 6px;
-  color: #65758c;
-  font-size: 10.5px;
+  flex: none;
+  padding: 4px 10px;
+  color: var(--text-faint);
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
 #ports-status.error {
-  color: #e35d6a;
+  color: var(--danger);
 }
 
-#ports-panel.collapsed {
-  height: auto;
-}
-
-#ports-panel.collapsed #ports-body,
-#ports-panel.collapsed #ports-resizer,
-#ports-panel.collapsed #ports-refresh,
-#ports-panel.collapsed #ports-auto {
+/* 折叠时只留标题栏，工具按钮仍可见（刷新/自动在收起状态下也能用） */
+#ports-panel.collapsed #ports-refreshed {
   display: none;
-}
-
-#ports-panel.collapsed .ports-chevron {
-  transform: rotate(-90deg);
 }
 
 #main {
@@ -507,27 +1563,21 @@ body.layout-dragging #ports-resizer::after {
   padding: 8px 10px 6px;
 }
 
-/* 终端自己的滚动条：WebView2 默认画成浅色轨道，在深色背景上就像贴着文件面板
-   的一条白色长条。收窄、轨道透明、滑块用低调的灰蓝，悬停再提亮一点。 */
-#term-host .xterm .xterm-viewport::-webkit-scrollbar {
-  width: 10px;
+/* xterm 自带样式给 `.xterm-viewport` 写了 `background-color: #000`。画布只覆盖字符区，
+   `.xterm` 的内边距露出来的正是这层黑底——暗黑主题下看不出来，乳白主题下就是一整圈黑框。
+   把它换成主题底色，黑框随之消失；`color-scheme` 已经让原生滚动条跟着主题走。 */
+#term-host .xterm .xterm-viewport {
+  background-color: var(--bg-app);
 }
 
-#term-host .xterm .xterm-viewport::-webkit-scrollbar-track {
-  background: transparent;
+/* 输入法候选框同理：xterm 默认给它黑底白字，乳白主题下会闪出一块黑。 */
+#term-host .xterm .composition-view {
+  background: var(--bg-app);
+  color: var(--text-strong);
 }
 
-#term-host .xterm .xterm-viewport::-webkit-scrollbar-thumb {
-  background: #253040;
-  border: 2px solid transparent;
-  border-radius: 5px;
-  background-clip: padding-box;
-}
-
-#term-host .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: #33445a;
-  background-clip: padding-box;
-}
+/* 终端的滚动条不再单独配色：它和其它四栏共用文件开头那套全局规则。
+   以前这里单独写过一份，结果终端是灰蓝细条、旁边的面板还是原生滚动条，并排放着最明显。 */
 
 /* 输入条：常驻可见，状态点说明此刻按键归谁 */
 #inputbar-resizer[hidden],
@@ -569,7 +1619,7 @@ body.layout-dragging #ports-resizer::after {
 
 #inputbar-resizer:hover::after,
 body.layout-dragging #inputbar-resizer::after {
-  background: #3b8067;
+  background: var(--accent-strong);
 }
 
 body.layout-dragging {
@@ -589,11 +1639,11 @@ body.layout-dragging {
   gap: 0;
   margin: 0 10px 8px;
   padding: 8px 10px 7px;
-  border: 1px solid #24303f;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: linear-gradient(#141b26, #101720);
+  background: linear-gradient(var(--bg-panel-hi), var(--bg-dialog));
   font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
-  color: #8a9ab0;
+  color: var(--text-muted);
   opacity: 1;
   overflow: hidden;
   transition: none;
@@ -630,10 +1680,10 @@ body.layout-dragging {
   flex: none;
   height: 30px;
   padding: 4px 9px;
-  background: #131a23;
-  border: 1px solid #24303f;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #8a9ab0;
+  color: var(--text-muted);
   font: inherit;
   font-size: 10.5px;
   line-height: 1.6;
@@ -642,8 +1692,8 @@ body.layout-dragging {
 }
 
 #ib-history:hover {
-  color: #e8eef7;
-  border-color: #3b8067;
+  color: var(--text-strong);
+  border-color: var(--accent-strong);
 }
 
 #ib-status {
@@ -663,7 +1713,7 @@ body.layout-dragging {
 }
 
 #inputbar.pass {
-  border-color: #1d2735;
+  border-color: var(--border);
 }
 
 #own-dot {
@@ -671,37 +1721,37 @@ body.layout-dragging {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #3c4a5c;
+  background: var(--dot-idle);
   flex: none;
 }
 
 #own-dot.ok {
-  background: #46d19a;
-  box-shadow: 0 0 7px -1px #46d19a;
+  background: var(--accent);
+  box-shadow: 0 0 7px -1px var(--accent);
 }
 
 #own-dot.guess {
-  background: #d6a34a;
-  box-shadow: 0 0 7px -1px #d6a34a;
+  background: var(--warn);
+  box-shadow: 0 0 7px -1px var(--warn);
 }
 
 #own-label {
   min-width: 0;
   font-size: 10.5px;
-  color: #65758c;
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
 #inputbar.ok #own-label {
-  color: #46d19a;
+  color: var(--accent);
 }
 
 #inputbar.guess #own-label {
-  color: #d6a34a;
+  color: var(--warn);
 }
 
 #ib-prompt {
-  color: #46d19a;
+  color: var(--accent);
   flex: none;
 }
 
@@ -736,21 +1786,21 @@ body.layout-dragging {
   background: transparent;
   border: 0;
   outline: 0;
-  color: #e8eef7;
+  color: var(--text-strong);
   font: inherit;
   line-height: 1.6;
-  caret-color: #46d19a;
+  caret-color: var(--accent);
 }
 
 #ib-input:disabled {
-  color: #5b6a7f;
+  color: var(--text-disabled);
 }
 
 #ib-ghost {
   position: absolute;
   top: 3px;
   left: 0;
-  color: #4b5b70;
+  color: var(--text-ghost);
   white-space: pre;
   pointer-events: none;
   user-select: none;
@@ -760,7 +1810,7 @@ body.layout-dragging {
 #ib-hint {
   flex: none;
   font-size: 10.5px;
-  color: #3f4c60;
+  color: var(--text-faint);
   white-space: nowrap;
 }
 
@@ -783,10 +1833,10 @@ body.layout-dragging {
   min-width: 34px;
   height: 30px;
   padding: 4px 9px;
-  background: #131a23;
-  border: 1px solid #24303f;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #8a9ab0;
+  color: var(--text-muted);
   font: inherit;
   font-size: 10.5px;
   line-height: 1.6;
@@ -801,10 +1851,11 @@ body.layout-dragging {
   min-width: 58px;
   height: 30px;
   padding: 4px 12px;
-  background: #24674f;
-  border: 1px solid #368568;
+  background: var(--accent-solid);
+  border: 1px solid var(--accent-strong);
   border-radius: 6px;
-  color: #e8eef7;
+  /* 主色块上的字单独给一个变量：浅色主题里 --text-strong 是深墨色，压在深绿底上看不清 */
+  color: var(--on-accent);
   font: inherit;
   font-size: 11px;
   line-height: 1.6;
@@ -813,8 +1864,8 @@ body.layout-dragging {
 }
 
 #ib-send:hover:not(:disabled) {
-  background: #2c8061;
-  border-color: #49a47e;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 
 #ib-send:disabled {
@@ -831,16 +1882,16 @@ body.layout-dragging {
 /* 直通 / 接管是互斥的锁定态：亮着表示当前锁定在哪一边 */
 #ib-pass.on,
 #ib-take.on {
-  background: #2b3b4f;
-  border-color: #3f5468;
-  color: #e8eef7;
+  background: var(--bg-chip);
+  border-color: var(--border-hover);
+  color: var(--text-strong);
 }
 
 /* 暂停是「正在丢弃输出」，与锁定态分开配色 */
 #ib-pause.on {
-  background: #3a2f1c;
-  border-color: #5b4520;
-  color: #d6a34a;
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn);
 }
 
 #ib-send[hidden],
@@ -856,70 +1907,74 @@ body.layout-dragging {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10.5px;
-  color: #d6a34a;
+  color: var(--warn);
 }
 
 #inputbar.paused {
-  border-color: #4a3a22;
+  border-color: var(--warn-border);
 }
 
 /* ---------- 串口（M5） ---------- */
 
 /* 状态点：主动断开是琥珀，读写失败是红；连上时仍用绿色 ok */
 #own-dot.warn {
-  background: #d6a34a;
-  box-shadow: 0 0 7px -1px #d6a34a;
+  background: var(--warn);
+  box-shadow: 0 0 7px -1px var(--warn);
 }
 
 #own-dot.err {
-  background: #e35d6a;
-  box-shadow: 0 0 7px -1px #e35d6a;
+  background: var(--danger);
+  box-shadow: 0 0 7px -1px var(--danger);
 }
 
 #inputbar.serial {
-  border-color: #24405a;
+  border-color: var(--info-bg);
 }
 
 #inputbar.failed {
-  border-color: #5a2a30;
+  border-color: var(--danger-border);
 }
 
 #inputbar.failed #own-label {
-  color: #e35d6a;
+  color: var(--danger);
 }
 
 /* 出错提示浮在输入条上方，不占输入条的位置。
    之前它和输入框一起排在一行里：长错误（「十六进制位数是奇数，每字节需要两位」）
    会把输入框挤成 0 宽，用户看不到「发送失败后留在输入条上」待改的那一行。 */
 #ib-paused.err {
-  color: #e35d6a;
+  color: var(--danger);
   position: absolute;
   right: 10px;
   bottom: calc(100% + 6px);
   max-width: min(520px, calc(100% - 20px));
   padding: 3px 9px;
-  border: 1px solid #5a2a30;
+  border: 1px solid var(--danger-border);
   border-radius: 7px;
-  background: #261a1d;
-  box-shadow: 0 6px 18px -10px #000;
+  background: var(--danger-bg);
+  box-shadow: 0 6px 18px -10px var(--shadow-color);
   white-space: normal;
   z-index: 4;
   /* 只是说明，不要挡住终端上的点击与选中 */
   pointer-events: none;
 }
 
-/* 串口会话在侧栏里用一个记号区分：终端是普通过程，串口是一条一直开着的线 */
-.sess-row .sess-serial-mark {
-  flex: none;
-  color: #4f8cc9;
-  font-size: 10.5px;
+/* 串口会话的连接参数：端口 · 波特率。单独一格，改名不会动它 */
+.sess-row .sess-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  font-size: 10px;
 }
 
 /* 串口的 HEX 模式亮着时提示「这次发送按十六进制解析」 */
 #ib-hex.on {
-  background: #223247;
-  border-color: #3f5468;
-  color: #e8eef7;
+  background: var(--bg-chip);
+  border-color: var(--border-hover);
+  color: var(--text-strong);
 }
 
 /* ---------- 新建串口会话 ---------- */
@@ -929,7 +1984,7 @@ body.layout-dragging {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #05090fb8;
+  background: var(--overlay-strong);
   z-index: 40;
 }
 
@@ -942,12 +1997,12 @@ body.layout-dragging {
   max-height: calc(100vh - 40px);
   overflow: auto;
   padding: 14px 16px 12px;
-  background: #0f1620;
-  border: 1px solid #2a3a4d;
+  background: var(--bg-dialog);
+  border: 1px solid var(--border-strong);
   border-radius: 12px;
-  box-shadow: 0 18px 48px -12px #000c;
+  box-shadow: 0 18px 48px -12px var(--shadow-strong);
   font: 12px/1.7 "Cascadia Mono", Consolas, monospace;
-  color: #8a9ab0;
+  color: var(--text-muted);
 }
 
 #serial-head {
@@ -955,20 +2010,22 @@ body.layout-dragging {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
-  color: #e8eef7;
+  color: var(--text-strong);
+  cursor: move;
+  touch-action: none;
 }
 
 #serial-head button {
   padding: 0 6px;
   background: transparent;
   border: 0;
-  color: #65758c;
+  color: var(--text-dim);
   font: inherit;
   cursor: pointer;
 }
 
 #serial-head button:hover {
-  color: #e8eef7;
+  color: var(--text-strong);
 }
 
 #serial-grid {
@@ -982,7 +2039,7 @@ body.layout-dragging {
   flex-direction: column;
   gap: 2px;
   font-size: 10.5px;
-  color: #65758c;
+  color: var(--text-dim);
 }
 
 #serial-grid label.wide {
@@ -994,10 +2051,10 @@ body.layout-dragging {
   width: 100%;
   box-sizing: border-box;
   padding: 4px 8px;
-  background: #121a25;
-  border: 1px solid #24303f;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #e8eef7;
+  color: var(--text-strong);
   font: inherit;
   font-size: 12px;
   outline: none;
@@ -1005,7 +2062,12 @@ body.layout-dragging {
 
 #serial-grid input:focus,
 #serial-grid select:focus {
-  border-color: #3f5468;
+  border-color: var(--border-hover);
+}
+
+#serial-grid input[readonly] {
+  opacity: .65;
+  cursor: default;
 }
 
 .serial-inline {
@@ -1021,16 +2083,54 @@ body.layout-dragging {
   flex: none;
   width: 30px;
   background: transparent;
-  border: 1px solid #24303f;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #8a9ab0;
+  color: var(--text-muted);
   font: inherit;
   cursor: pointer;
 }
 
 .serial-inline button:hover {
-  color: #e8eef7;
-  border-color: #31435a;
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+/* 波特率：数字输入 + 自绘下拉按钮。常用值列表在 `attachBaudPicker` 里，
+   用全应用共用的弹出菜单，不再依赖系统绘制的 <datalist>。 */
+.baud-field {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+
+.baud-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.baud-field button {
+  flex: none;
+  width: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.baud-field button:hover {
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+/* 有了右侧下拉，原生数字微调箭头就多余了，还会把输入框挤窄 */
+.baud-field input[type="number"]::-webkit-inner-spin-button,
+.baud-field input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 #serial-flags {
@@ -1039,56 +2139,51 @@ body.layout-dragging {
   gap: 14px;
   margin-top: 10px;
   font-size: 10.5px;
-  color: #65758c;
+  color: var(--text-dim);
 }
 
 #serial-flags label {
   display: flex;
   align-items: center;
   gap: 4px;
-  color: #8a9ab0;
+  color: var(--text-muted);
 }
 
 #serial-flags span {
   margin-left: auto;
-  color: #3f4c60;
+  color: var(--text-faint);
 }
 
 #serial-error {
   min-height: 1.7em;
   margin-top: 8px;
   font-size: 11px;
-  color: #e06c75;
+  color: var(--danger);
   white-space: pre-wrap;
 }
 
 #serial-foot {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
-}
-
-#serial-ports-hint {
-  flex: 1 1 auto;
-  font-size: 10.5px;
-  color: #3f4c60;
 }
 
 #serial-foot button {
   padding: 4px 14px;
   background: transparent;
-  border: 1px solid #24303f;
+  border: 1px solid var(--border);
   border-radius: 7px;
-  color: #8a9ab0;
+  color: var(--text-muted);
   font: inherit;
   cursor: pointer;
 }
 
 #serial-foot button[type="submit"] {
-  background: #223247;
-  border-color: #3f5468;
-  color: #e8eef7;
+  background: var(--bg-chip);
+  border-color: var(--border-hover);
+  color: var(--text-strong);
 }
 
 #serial-foot button:disabled {
@@ -1104,59 +2199,106 @@ body.layout-dragging {
 }
 
 #hud {
-  /* 相对 #main 定位（不是窗口）：否则会压在右侧文件面板与输入条上 */
+  /* 相对 #main 定位（不是窗口），放在右上角：
+     原来贴着底边，输入条展开时被它盖住、切到直通（输入条收成 0 高）又冒出来压住终端最后一行。 */
   position: absolute;
-  right: 10px;
-  bottom: 46px;
-  max-width: calc(100% - 20px);
+  top: 10px;
+  right: 12px;
+  z-index: 3;
+  max-width: min(70%, 900px);
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-dialog);
   font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
-  color: #4a5a70;
+  color: var(--text-dim);
   pointer-events: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: right;
+  opacity: 0.92;
+}
+
+/* 没有消息时不占视觉：一条透明的圆角空块也不该留在终端上 */
+#hud:empty {
+  display: none;
 }
 
 /* ---------- Ctrl+R：输入条上方的历史检索覆盖层 ---------- */
-/* 新建按钮的终端类型菜单 */
-.sess-new-menu {
-  min-width: 156px;
-}
 
-/* 会话列表右键菜单 */
-.sess-context-menu {
+.session-settings-overlay[hidden] { display: none; }
+.session-settings-overlay {
   position: fixed;
-  z-index: 30;
-  min-width: 132px;
-  padding: 4px;
-  background: #111923;
-  border: 1px solid #2a3a4d;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--overlay-strong);
+  font: 13px/1.5 "Segoe UI", sans-serif;
+}
+.session-settings-dialog {
+  width: min(560px, 100%);
+  max-height: min(760px, 94vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
   border-radius: 7px;
-  box-shadow: 0 8px 24px #0009;
+  background: var(--bg-dialog);
+  color: var(--text);
+  box-shadow: 0 18px 60px var(--shadow-strong);
 }
 
-.sess-context-menu button {
-  display: block;
-  width: 100%;
-  padding: 6px 9px;
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  color: #c5d1e0;
-  font: inherit;
-  cursor: pointer;
+/* 打开时整张对话框拿到焦点（Esc 直接可用），不需要一圈焦点描边 */
+.session-settings-dialog:focus {
+  outline: none;
 }
-
-.sess-context-menu button:hover:not(:disabled) {
-  background: #203044;
-  color: #fff;
+.session-settings-dialog > header,
+.session-settings-dialog > footer {
+  flex: none;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
 }
+.session-settings-dialog > header { cursor: move; touch-action: none; }
+.session-settings-dialog > header h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.session-settings-dialog > header button { margin-left: auto; width: 28px; height: 28px; border: 0; background: transparent; color: var(--text-muted); font-size: 20px; cursor: pointer; }
+.session-settings-body { min-height: 0; overflow: auto; }
+.session-settings-dialog section { padding: 10px 16px 12px; border-bottom: 1px solid var(--border); }
+.session-settings-dialog section h3 { margin: 0 0 6px; color: var(--accent-section); font-size: 11px; font-weight: 600; }
+.session-settings-dialog section label { min-height: 34px; display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr); align-items: center; gap: 12px; color: var(--text); }
+.session-settings-dialog input[type="text"],
+.session-settings-dialog input[type="number"],
+.session-settings-dialog select {
+  width: 100%; min-width: 0; box-sizing: border-box; padding: 5px 7px;
+  border: 1px solid var(--border-strong); border-radius: 4px; outline: none;
+  background: var(--bg-sunken); color: var(--text-strong); font: 12px "Cascadia Mono", Consolas, monospace;
+}
+.session-settings-dialog input[type="checkbox"] { justify-self: start; accent-color: var(--accent-strong); }
+.session-settings-path { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr); align-items: center; gap: 12px; min-height: 34px; }
+.session-settings-path > span:first-child { color: var(--text); }
+.session-settings-path-field { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-settings-path-field input { flex: 1 1 auto; min-width: 0; }
+.session-settings-path button,
+.session-settings-dialog > footer button { min-height: 28px; padding: 3px 9px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-panel); color: var(--text); cursor: pointer; }
+/* 「浏览 / 打开」不参与收缩：空间不够时让输入框变窄，
+   否则按钮会被挤到一个字宽，中文就竖着排成一列。 */
+.session-settings-path button { flex: none; white-space: nowrap; }
+.session-settings-dialog > footer { justify-content: flex-end; border-top: 0; border-bottom: 0; }
+.session-settings-error { flex: none; min-height: 0; padding: 0 16px; color: var(--danger); overflow-wrap: anywhere; }
+.session-settings-error:not(:empty) { padding-top: 8px; }
+.session-settings-dialog button:disabled { opacity: .5; cursor: default; }
+.session-settings-dialog input[readonly] { opacity: .65; cursor: default; }
 
-.sess-context-menu button:disabled {
-  color: #586779;
-  cursor: default;
+@media (max-width: 520px) {
+  .session-settings-overlay { padding: 8px; }
+  .session-settings-dialog section label { grid-template-columns: minmax(95px, .8fr) minmax(0, 1.2fr); gap: 8px; }
+  .session-settings-path { grid-template-columns: minmax(95px, .8fr) minmax(0, 1.2fr); gap: 8px; }
 }
 
 #hist-overlay {
@@ -1167,10 +2309,10 @@ body.layout-dragging {
   max-height: 58%;
   display: flex;
   flex-direction: column;
-  background: #0f1620;
-  border: 1px solid #2a3a4d;
+  background: var(--bg-dialog);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
-  box-shadow: 0 10px 32px -8px #000a;
+  box-shadow: 0 10px 32px -8px var(--shadow-soft);
   font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
   overflow: hidden;
   z-index: 20;
@@ -1185,8 +2327,8 @@ body.layout-dragging {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid #1b2531;
-  color: #8a9ab0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
 }
 
 #hist-title {
@@ -1196,7 +2338,7 @@ body.layout-dragging {
 
 #hist-count {
   flex: 1 1 auto;
-  color: #4a5a70;
+  color: var(--text-faint);
   font-size: 10.5px;
 }
 
@@ -1205,9 +2347,9 @@ body.layout-dragging {
   flex: none;
   padding: 1px 6px;
   background: transparent;
-  border: 1px solid #24303f;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: #8a9ab0;
+  color: var(--text-muted);
   font: inherit;
   font-size: 10.5px;
   cursor: pointer;
@@ -1215,24 +2357,24 @@ body.layout-dragging {
 
 #hist-clear:hover,
 #hist-close:hover {
-  color: #e8eef7;
-  border-color: #31435a;
+  color: var(--text-strong);
+  border-color: var(--border-strong);
 }
 
 #hist-clear.armed {
-  color: #e35d6a;
-  border-color: #5a2a30;
+  color: var(--danger);
+  border-color: var(--danger-border);
 }
 
 #hist-query {
   border: 0;
-  border-bottom: 1px solid #1b2531;
+  border-bottom: 1px solid var(--border-subtle);
   outline: 0;
   padding: 6px 10px;
-  background: #0b1017;
-  color: #e8eef7;
+  background: var(--bg-sunken);
+  color: var(--text-strong);
   font: inherit;
-  caret-color: #46d19a;
+  caret-color: var(--accent);
 }
 
 #hist-list {
@@ -1244,7 +2386,7 @@ body.layout-dragging {
 
 .hist-day {
   padding: 6px 6px 2px;
-  color: #3f4c60;
+  color: var(--text-faint);
   font-size: 10.5px;
   letter-spacing: 0.5px;
 }
@@ -1255,15 +2397,15 @@ body.layout-dragging {
   gap: 10px;
   padding: 3px 8px;
   border-radius: 5px;
-  color: #c7d3e2;
+  color: var(--text);
   cursor: pointer;
   white-space: pre;
   overflow: hidden;
 }
 
 .hist-row.sel {
-  background: #1b2a3c;
-  color: #ffffff;
+  background: var(--bg-active);
+  color: var(--text-bright);
 }
 
 .hist-cmd {
@@ -1275,32 +2417,32 @@ body.layout-dragging {
 
 .hist-badge {
   flex: none;
-  color: #4a5a70;
+  color: var(--text-faint);
   font-size: 10.5px;
 }
 
 .hist-older {
   flex: none;
-  color: #d6a34a;
+  color: var(--warn);
   font-size: 10px;
 }
 
 .hist-time {
   flex: none;
-  color: #4a5a70;
+  color: var(--text-faint);
   font-size: 10.5px;
 }
 
 .hist-empty {
   padding: 14px;
-  color: #4a5a70;
+  color: var(--text-faint);
   text-align: center;
 }
 
 #hist-foot {
   padding: 4px 10px 6px;
-  border-top: 1px solid #1b2531;
-  color: #3f4c60;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-faint);
   font-size: 10.5px;
 }
 
@@ -1310,10 +2452,21 @@ body.layout-dragging {
   flex: none;
   height: var(--shortcuts-height, 220px);
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border-bottom: 1px solid #24303f;
-  background: #0b1017;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+/* 折叠后高度交给标题栏，工具按钮保留 */
+#shortcuts-panel.collapsed {
+  height: auto;
+}
+
+#shortcuts-panel.collapsed #shortcuts-body {
+  display: none;
+}
+
+#shortcuts-panel.collapsed #shortcuts-resizer {
+  display: none;
 }
 
 #shortcuts-resizer {
@@ -1338,63 +2491,47 @@ body.layout-dragging {
 }
 
 #shortcuts-resizer:hover::after,
-body.layout-dragging #shortcuts-resizer::after { background: #2c5a46; }
-#shortcuts-panel.collapsed { height: auto !important; }
-#shortcuts-panel.collapsed #shortcuts-body { display: none; }
-#shortcuts-panel.collapsed #shortcuts-resizer { display: none; }
+body.layout-dragging #shortcuts-resizer::after { background: var(--accent-border); }
 
 #shortcuts-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 7px;
-  border-bottom: 1px solid #1b2531;
+  padding: 4px 6px 4px 4px;
 }
 
-#shortcuts-head button,
-.shortcut-action {
-  flex: none;
-  padding: 2px 6px;
-  border: 1px solid #24303f;
-  border-radius: 4px;
-  background: #131a23;
-  color: #93a4b8;
-  font: inherit;
-  cursor: pointer;
-}
-#shortcuts-head button:hover:not(:disabled), .shortcut-action:hover:not(:disabled) { color: #e8eef7; border-color: #3b526b; }
-#shortcuts-toggle { margin-right: auto; }
-#shortcuts-toggle[aria-expanded="true"] { color: #d7e3f0; }
-#shortcuts-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-#shortcuts-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 5px; }
-#shortcuts-status { flex: none; min-height: 15px; padding: 2px 8px; color: #708095; font-size: 10px; overflow-wrap: anywhere; }
-.shortcut-row { display: flex; gap: 3px; align-items: stretch; margin-bottom: 4px; }
-.shortcut-card { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; padding: 5px 7px; border: 1px solid #253244; border-radius: 4px; background: #101720; color: #cbd7e5; text-align: left; font: inherit; cursor: pointer; }
-.shortcut-card:hover:not(:disabled) { border-color: #3a5268; background: #141e29; }
+/* 行内那四个操作按钮（↑ ↓ ✎ ×）的样式在文件前面「行内图标按钮」一节，
+   和会话行的「⋯」共用一套，这里不再重复定义。 */
+#shortcuts-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 3px; }
+#shortcuts-status { flex: none; min-height: 13px; padding: 1px 6px; color: var(--text-dim); font-size: 10px; overflow-wrap: anywhere; }
+/* 一行就是一张卡片：命令区与右侧操作按钮共用同一层边框与底色，
+   按钮不再孤零零地落在面板背景上。 */
+.shortcut-row { display: flex; gap: 2px; align-items: center; margin-bottom: 2px; padding: 1px 3px 1px 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-dialog); }
+.shortcut-row:hover { border-color: var(--border-hover); background: var(--bg-raised); }
+.shortcut-card { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 3px 6px; border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
 .shortcut-card:disabled { cursor: default; }
-.shortcut-name { min-width: 0; overflow-wrap: anywhere; font-weight: 600; font-size: 11px; }
-.shortcut-command { grid-column: 1 / -1; grid-row: 2; min-width: 0; color: #8495a9; font-size: 10px; line-height: 1.25; white-space: pre-wrap; overflow-wrap: anywhere; }
-.shortcut-mode { grid-column: 2; grid-row: 1; justify-self: end; align-self: start; padding: 0 4px; border-radius: 3px; font-size: 9px; line-height: 14px; }
-.shortcut-mode.execute { color: #7de0b7; background: #153226; }
-.shortcut-mode.fill { color: #f0c477; background: #382b16; }
-.shortcut-controls { flex: none; display: flex; flex-direction: column; gap: 2px; }
-.shortcut-action { width: 23px; height: 22px; padding: 0; line-height: 18px; }
-.shortcut-action:disabled { opacity: .3; cursor: default; }
+.shortcut-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 11px; }
+.shortcut-command { grid-column: 1; grid-row: 2; min-width: 0; color: var(--text-muted); font-size: 10px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 执行/填入：和右侧操作按钮同一档高度（19px）、同一圆角（4px），
+   由 .shortcut-row 的 align-items:center 统一垂直居中，四种控件一条线。 */
+.shortcut-mode { flex: none; height: 19px; padding: 0 6px; border-radius: 4px; font-size: 10px; line-height: 19px; }
+/* 文字色不用 --accent-strong：它在暗色主题里压在 --accent-bg 上只有 2.8:1，
+   十套主题里最差的一档。--accent-section 是按主题调过深浅的「浅主色文字」，
+   暗色下 5.3 起步、浅色下 4.1 打底，一套写法通吃。 */
+.shortcut-mode.execute { color: var(--accent-section); background: var(--accent-bg); }
+.shortcut-mode.fill { color: var(--warn); background: var(--warn-bg); }
+.shortcut-controls { flex: none; display: flex; flex-direction: row; gap: 2px; padding-right: 2px; }
 
-#shortcut-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.58); }
+#shortcut-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 16px; background: var(--overlay-strong); }
 #shortcut-overlay[hidden] { display: none; }
-#shortcut-form { width: min(480px, 100%); display: grid; gap: 12px; padding: 16px; border: 1px solid #2b3a4d; border-radius: 6px; background: #10161f; color: #d7e3f0; box-shadow: 0 16px 48px rgba(0,0,0,.55); }
+#shortcut-form { width: min(480px, 100%); display: grid; gap: 12px; padding: 16px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-dialog); color: var(--text); box-shadow: 0 16px 48px var(--shadow-strong); }
 #shortcut-dialog-head, #shortcut-dialog-foot { display: flex; align-items: center; gap: 8px; }
-#shortcut-dialog-head { justify-content: space-between; font-size: 14px; }
-#shortcut-form > label { display: grid; gap: 5px; color: #93a4b8; }
-#shortcut-form input[type="text"], #shortcut-form textarea { box-sizing: border-box; width: 100%; padding: 7px; border: 1px solid #29394d; border-radius: 4px; outline: 0; background: #0b1017; color: #e8eef7; font: inherit; }
+#shortcut-dialog-head { justify-content: space-between; font-size: 14px; cursor: move; touch-action: none; }
+#shortcut-form > label { display: grid; gap: 5px; color: var(--text-muted); }
+#shortcut-form input[type="text"], #shortcut-form textarea { box-sizing: border-box; width: 100%; padding: 7px; border: 1px solid var(--border-strong); border-radius: 4px; outline: 0; background: var(--bg-sunken); color: var(--text-strong); font: inherit; }
 #shortcut-form textarea { resize: vertical; min-height: 100px; font-family: "Cascadia Mono", Consolas, monospace; }
-#shortcut-form input:focus, #shortcut-form textarea:focus { border-color: #46a77f; }
-#shortcut-form fieldset { display: flex; gap: 18px; border: 1px solid #29394d; border-radius: 4px; color: #b9c7d6; }
+#shortcut-form input:focus, #shortcut-form textarea:focus { border-color: var(--accent-strong); }
+#shortcut-form fieldset { display: flex; gap: 18px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); }
 #shortcut-form fieldset label { display: inline-flex; align-items: center; gap: 6px; }
-#shortcut-dialog-head button, #shortcut-dialog-foot button { padding: 5px 10px; border: 1px solid #34465b; border-radius: 4px; background: #17212d; color: #d7e3f0; font: inherit; cursor: pointer; }
-#shortcut-error { flex: 1 1 auto; color: #e87c83; }
+#shortcut-dialog-head button, #shortcut-dialog-foot button { padding: 5px 10px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-panel); color: var(--text); font: inherit; cursor: pointer; }
+#shortcut-error { flex: 1 1 auto; color: var(--danger); }
 
 /* ---------- 文件面板（M4）：跟随焦点会话的 CWD ---------- */
 
@@ -1406,8 +2543,8 @@ body.layout-dragging #shortcuts-resizer::after { background: #2c5a46; }
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background: #0d1219;
-  border-left: 1px solid #1b2531;
+  background: var(--bg-chrome);
+  border-left: 1px solid var(--border-subtle);
   font: 12px/1.5 "Cascadia Mono", Consolas, monospace;
   user-select: none;
 }
@@ -1438,11 +2575,7 @@ body.layout-dragging #shortcuts-resizer::after { background: #2c5a46; }
 
 #files-resizer:hover::after,
 body.layout-dragging #files-resizer::after {
-  background: #2c5a46;
-}
-
-#files.collapsed #files-resizer {
-  display: none;
+  background: var(--accent-border);
 }
 
 body.layout-dragging {
@@ -1450,32 +2583,35 @@ body.layout-dragging {
   user-select: none;
 }
 
+/* 整栏向右收起：和左栏一样只剩一条 26px 竖条，内容与手柄全部让位 */
 #files.collapsed {
   width: 26px;
 }
 
-#files.collapsed #files-body {
+#files.collapsed #files-body,
+#files.collapsed #files-resizer {
   display: none;
 }
 
+/* 展开按钮：竖排两个字，26px 宽刚好放得下 */
 #files-expand {
+  flex: 1 1 auto;
   width: 100%;
-  height: 100%;
   padding: 10px 0;
   border: 0;
   background: transparent;
-  color: #5d7fa3;
+  color: var(--text-link);
   font: inherit;
   cursor: pointer;
   writing-mode: vertical-rl;
 }
 
 #files-expand:hover {
-  color: #d7e3f0;
-  background: #131a23;
+  color: var(--text);
+  background: var(--bg-panel);
 }
 
-/* hidden 属性必须压过上面的 display，否则收起面板后还会留一个空白按钮 */
+/* hidden 属性必须压过上面的 display，否则展开状态下还会留一个空白按钮 */
 #files-expand[hidden] {
   display: none;
 }
@@ -1487,77 +2623,115 @@ body.layout-dragging {
   flex-direction: column;
 }
 
+/* 文件子栏吃掉右栏剩余高度；快捷指令子栏在上面按固定高度 */
+#files-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#files-panel.collapsed {
+  flex: none;
+}
+
+#files-panel.collapsed #files-main {
+  display: none;
+}
+
+/* 文件子栏收起时，让快捷指令子栏吃掉右栏剩余高度，把收起的「文件」标题栏顶到底部——
+   与左栏「会话展开、串口收起」的表现一致，而不是紧贴在快捷指令下面悬在半空。 */
+#files-body.files-folded #shortcuts-panel:not(.collapsed) {
+  flex: 1 1 auto;
+  height: auto;
+}
+
+/* 这个状态下快捷指令的高度由 flex 决定，拖高度的手柄没有意义，收掉避免误解 */
+#files-body.files-folded #shortcuts-resizer {
+  display: none;
+}
+
 #files-head {
-  flex: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-  padding: 6px 8px;
-  border-bottom: 1px solid #1b2531;
+  padding: 4px 6px 4px 4px;
 }
 
-#files-head button {
-  flex: none;
-  padding: 2px 7px;
-  border: 1px solid #24303f;
-  border-radius: 6px;
-  background: #131a23;
-  color: #93a4b8;
-  font: inherit;
-  cursor: pointer;
-}
-
-#files-head button:hover:not(:disabled) {
-  color: #d7e3f0;
-  border-color: #33465c;
-}
-
-#files-head select {
-  flex: none;
-  min-width: 82px;
-  padding: 2px 5px;
-  border: 1px solid #24303f;
-  border-radius: 6px;
-  background: #131a23;
-  color: #93a4b8;
-  font: inherit;
-  cursor: pointer;
-}
-
-#files-head select:hover,
-#files-head select:focus {
-  color: #d7e3f0;
-  border-color: #33465c;
-}
-
-#files-head select option {
-  background: #131a23;
-  color: #d7e3f0;
-}
-
-#files-head button.on {
-  color: #46d19a;
-  border-color: #2c5a46;
-}
-
-#files-head button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-#files-mode {
-  min-width: 46px;
+/* 操作行（#files-tools）用 .panel-toolbar 的通用样式，这里只补它自己的宽度限制 */
+#files-tools #files-sort {
+  min-width: 78px;
+  max-width: 100%;
 }
 
 #files-path {
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
   padding: 4px 10px;
-  color: #8fa3b8;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* 面包屑横向滚动，不换行；滚动条隐藏，长路径靠拖动/滚轮看后半段 */
+#files-path .f-crumbs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-bottom: 1px solid #1b2531;
+  scrollbar-width: none;
+}
+
+#files-path .f-crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+.f-crumb {
+  flex: none;
+  padding: 0 2px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.f-crumb:hover {
+  background: var(--bg-raised);
+  color: var(--text-strong);
+}
+
+.f-crumb-sep {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.f-path-edit {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.f-path-edit:hover {
+  background: var(--bg-raised);
+  color: var(--text-strong);
+}
+
+.f-path-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: none;
+  background: var(--bg-sunken);
+  color: var(--text-strong);
+  font: 12px "Cascadia Mono", Consolas, monospace;
 }
 
 #files-refreshed {
@@ -1566,10 +2740,10 @@ body.layout-dragging {
   align-items: center;
   gap: 5px;
   padding: 3px 10px;
-  color: #6f8a7d;
+  color: var(--accent-section);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
-  border-bottom: 1px solid #1b2531;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 #files-refreshed[hidden] {
@@ -1583,34 +2757,44 @@ body.layout-dragging {
   padding: 4px 0;
 }
 
+/* 列表可被点空白处聚焦（F5 刷新的落点）；鼠标点击不画焦点框，键盘进入才画 */
+#files-list:focus {
+  outline: none;
+}
+
+#files-list:focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
 .f-row {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) auto auto;
   gap: 6px;
   align-items: center;
   padding: 1px 10px;
-  color: #b9c7d6;
+  color: var(--text);
   cursor: default;
 }
 
 .f-row:hover {
-  background: #131a23;
+  background: var(--bg-panel);
 }
 
 .f-row.sel {
-  background: #1b2735;
+  background: var(--bg-raised);
 }
 
 .f-row.dir {
-  color: #dce8f5;
+  color: var(--text-strong);
 }
 
 .f-icon {
-  color: #5d7fa3;
+  color: var(--text-link);
 }
 
 .f-row.dir .f-icon {
-  color: #46d19a;
+  color: var(--accent);
 }
 
 .f-name {
@@ -1620,70 +2804,195 @@ body.layout-dragging {
 }
 
 .f-row.dir .f-name {
-  color: #9fd3ff;
+  color: var(--info);
 }
 
 /* 列表顶部的「..」：不是目录里的真实条目，压暗一档，别和真目录抢注意力 */
 .f-row.up .f-name {
-  color: #7f93a8;
+  color: var(--text-dim);
 }
 
 .f-link {
   margin-left: 3px;
-  color: #6b7c90;
+  color: var(--text-dim);
 }
 
 .f-size,
 .f-time {
-  color: #66788c;
+  color: var(--text-dim);
   font-size: 11px;
   white-space: nowrap;
 }
 
 .f-empty {
   padding: 8px 10px;
-  color: #66788c;
+  color: var(--text-dim);
 }
 
 #files-foot {
   flex: none;
   padding: 4px 10px;
-  border-top: 1px solid #1b2531;
-  color: #5f7186;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-faint);
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* 文件面板的降级右键菜单：原生 shell 菜单弹不出来（helper 缺失或崩了）时才出现。
-   用 fixed 定位，坐标已由 clampMenuPosition 夹进视口。 */
-.f-menu {
+/* ---------- 弹出菜单 ----------
+   会话操作、新建会话类型、排序方式、文件面板的降级右键菜单共用一套（`src/popupMenu.ts`）。
+   菜单挂在 body 上，不继承任何面板的字号，所以字体必须在这里写全：
+   等宽 12px 与侧栏会话行一致，不写就退回 WebView2 的默认衬线字体。
+   坐标已由 `clampMenuPosition` 夹进视口。 */
+.popup-menu {
   position: fixed;
-  z-index: 30;
-  min-width: 180px;
+  z-index: 40;
+  min-width: 132px;
+  max-width: min(320px, calc(100vw - 12px));
+  box-sizing: border-box;
   padding: 4px;
-  background: #10161f;
-  border: 1px solid #263445;
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  background: var(--bg-dialog);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  box-shadow: 0 10px 28px var(--shadow-soft);
+  color: var(--text);
+  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  user-select: none;
 }
 
-.f-menu-item {
-  display: block;
+.popup-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 100%;
-  padding: 5px 10px;
+  min-height: 24px;
+  padding: 3px 8px;
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #c7d5e4;
+  color: inherit;
   font: inherit;
   text-align: left;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.popup-item .popup-check {
+  flex: none;
+  width: 10px;
+  color: var(--accent);
+}
+
+.popup-item .popup-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.popup-item .popup-hint {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.popup-item:hover:not(:disabled),
+.popup-item.sel:not(:disabled) {
+  background: var(--bg-chip);
+  color: var(--text-bright);
+}
+
+.popup-item.danger { color: var(--danger); }
+
+.popup-item.danger:hover:not(:disabled),
+.popup-item.danger.sel:not(:disabled) {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.popup-item:disabled {
+  color: var(--text-faint);
   cursor: default;
 }
 
-.f-menu-item.sel {
-  background: #1b2735;
-  color: #e6f1ff;
+#settings-overlay[hidden] { display: none; }
+#settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: var(--overlay-strong);
+}
+#settings-dialog {
+  width: min(520px, 100%);
+  max-height: min(680px, 92vh);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-dialog);
+  color: var(--text);
+  box-shadow: 0 18px 60px var(--shadow-strong);
+  font: 13px/1.5 "Segoe UI", sans-serif;
+}
+#settings-dialog > header,
+#settings-dialog > footer {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+#settings-dialog > header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+/* 整条标题栏是拖动把手（与其它弹窗一致）：光标与触控提示跟着变 */
+#settings-dialog > header { cursor: move; touch-action: none; }
+#settings-dialog > header button,
+#settings-dialog > footer button,
+.settings-update button {
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text);
+  cursor: pointer;
+}
+#settings-dialog > header button { margin-left: auto; width: 28px; padding: 0; font-size: 18px; }
+.settings-section { padding: 12px 16px 14px; border-bottom: 1px solid var(--border); }
+.settings-section h3 { margin: 0 0 8px; color: var(--accent-section); font-size: 11px; font-weight: 600; }
+.settings-section > label {
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(130px, 1.4fr);
+  align-items: center;
+  gap: 12px;
+  color: var(--text);
+}
+.settings-section input[type="number"],
+.settings-section input[type="text"],
+.settings-section select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: none;
+  background: var(--bg-sunken);
+  color: var(--text-strong);
+  font: 12px "Cascadia Mono", Consolas, monospace;
+}
+.settings-section input[type="checkbox"] { justify-self: start; accent-color: var(--accent-strong); }
+.settings-section output { color: var(--text-muted); font-size: 11px; }
+.settings-update { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-update span { flex: 1 1 180px; min-width: 0; color: var(--text-muted); overflow-wrap: anywhere; }
+.settings-update button:disabled { opacity: .5; cursor: default; }
+#settings-dialog > footer { justify-content: flex-end; border-top: 0; border-bottom: 0; color: var(--text-dim); font-size: 11px; }
+
+@media (max-width: 560px) {
+  #settings-overlay { padding: 10px; }
+  .settings-section > label { grid-template-columns: minmax(90px, .8fr) minmax(0, 1.2fr); gap: 8px; }
 }

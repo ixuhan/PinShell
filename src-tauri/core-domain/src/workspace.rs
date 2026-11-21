@@ -93,13 +93,58 @@ pub struct SessionMeta {
     pub cwd: Option<String>,
     /// 终端通道才有；串口会话为 `None`
     pub shell: Option<String>,
-    /// 串口通道才有；终端会话为 `None`。整份随工作区落盘，冷会话重开时按它重连。
+    /// 串口通道才有；终端会话为 `None`。
     pub serial: Option<SerialConfig>,
+    /// 会话显示与用户日志设置；不改变内部诊断日志。
+    pub settings: SessionSettings,
     pub hot: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSettings {
+    pub cr_as_newline: bool,
+    pub console_timestamps: bool,
+    pub file_timestamps: bool,
+    pub timestamp_format: String,
+    pub log_directory: Option<String>,
+    pub log_filename: String,
+    pub logging: bool,
+    /// 暂停/继续（串口是断开/连接）时换一个新的日志文件。
+    /// 默认关闭：一次会话默认写同一个文件，只有用户主动勾选才按连接切分。
+    pub new_log_on_toggle: bool,
+    /// 终端字号（CSS 像素）。属于会话：不同会话可以各自放大或缩小，
+    /// 全局设置里不再有字号项。
+    pub font_size: u16,
+}
+
+/// 字号的合法区间。与前端输入框的 min/max 一致；越界的值在保存时夹回来，
+/// 而不是拒绝——旧版本落盘的 `0` 或缺字段都该能用。
+pub const MIN_FONT_SIZE: u16 = 9;
+pub const MAX_FONT_SIZE: u16 = 28;
+pub const DEFAULT_FONT_SIZE: u16 = 13;
+
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self {
+            cr_as_newline: false,
+            console_timestamps: false,
+            file_timestamps: false,
+            timestamp_format: "yyyy-MM-dd HH:mm:ss.SSS".into(),
+            log_directory: None,
+            log_filename: "%Y%M%D-%h%m%s.log".into(),
+            logging: false,
+            new_log_on_toggle: false,
+            font_size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
 impl SessionMeta {
-    pub fn terminal(id: impl Into<String>, title: impl Into<String>, shell: impl Into<String>) -> Self {
+    pub fn terminal(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        shell: impl Into<String>,
+    ) -> Self {
         SessionMeta {
             id: id.into(),
             title: title.into(),
@@ -107,15 +152,12 @@ impl SessionMeta {
             cwd: None,
             shell: Some(shell.into()),
             serial: None,
+            settings: SessionSettings::default(),
             hot: false,
         }
     }
 
-    pub fn serial(
-        id: impl Into<String>,
-        title: impl Into<String>,
-        config: SerialConfig,
-    ) -> Self {
+    pub fn serial(id: impl Into<String>, title: impl Into<String>, config: SerialConfig) -> Self {
         SessionMeta {
             id: id.into(),
             title: title.into(),
@@ -123,6 +165,7 @@ impl SessionMeta {
             cwd: None,
             shell: None,
             serial: Some(config),
+            settings: SessionSettings::default(),
             hot: false,
         }
     }
@@ -465,10 +508,7 @@ fn remove_leaf(layout: Layout, session: &str) -> Option<Layout> {
             ratio,
             first,
             second,
-        } => match (
-            remove_leaf(*first, session),
-            remove_leaf(*second, session),
-        ) {
+        } => match (remove_leaf(*first, session), remove_leaf(*second, session)) {
             (None, None) => None,
             (None, Some(rest)) => Some(rest),
             (Some(rest), None) => Some(rest),
@@ -517,7 +557,10 @@ fn check_layout(
             Ok(())
         }
         Layout::Split {
-            ratio, first, second, ..
+            ratio,
+            first,
+            second,
+            ..
         } => {
             if !(*ratio > 0.0 && *ratio < 1.0) {
                 return Err(WorkspaceError::InvalidRatio);
@@ -772,10 +815,7 @@ mod tests {
     fn set_cwd_reports_only_real_changes() {
         let mut ws = workspace_with(&["a"]);
         assert_eq!(ws.set_cwd("a", "C:/Users/me"), Ok(true));
-        assert_eq!(
-            ws.session("a").unwrap().cwd.as_deref(),
-            Some("C:/Users/me")
-        );
+        assert_eq!(ws.session("a").unwrap().cwd.as_deref(), Some("C:/Users/me"));
         // 同一个目录反复上报（每次提示符都会来一条）不算变更，调用方据此跳过落盘
         assert_eq!(ws.set_cwd("a", "C:/Users/me"), Ok(false));
         assert_eq!(ws.set_cwd("a", "D:/work"), Ok(true));
@@ -794,7 +834,10 @@ mod tests {
         // 同一个名字再改一次不算变更
         assert_eq!(ws.rename_session("a", "部署窗口"), Ok(false));
         // 全空白没有可显示的内容
-        assert_eq!(ws.rename_session("a", "   "), Err(WorkspaceError::InvalidTitle));
+        assert_eq!(
+            ws.rename_session("a", "   "),
+            Err(WorkspaceError::InvalidTitle)
+        );
         // 按字符截断：中文与 emoji 都不会被切半个
         let long = "配".repeat(30) + &"🚀".repeat(20);
         assert_eq!(ws.rename_session("a", &long), Ok(true));
@@ -807,4 +850,3 @@ mod tests {
         );
     }
 }
-

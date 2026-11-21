@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 export type ShortcutMode = "execute" | "fill";
 
 export interface Shortcut {
@@ -15,11 +17,14 @@ export interface SessionShortcutPrefs {
 
 export const DEFAULT_SHORTCUT_HEIGHT = 220;
 export const MIN_SHORTCUT_HEIGHT = 120;
-export const MIN_FILE_LIST_HEIGHT = 160;
+/// 快捷指令最多占右栏内容区的七成：与左栏「串口」拖高的上限一致，留给另一栏的空间可以压得很低。
+export const MAX_SHORTCUT_RATIO = 0.7;
 
+/// 夹取快捷指令区高度。规则与左栏的串口拖高对齐：
+/// 下限 120px，上限为可用高度的 70%；不再额外给文件栏留固定 160px，
+/// 否则快捷指令最多只能到一半，另一栏永远压不下去。
 export function clampShortcutHeight(value: number, available: number): number {
-  const fileRoom = Math.max(0, available - MIN_FILE_LIST_HEIGHT);
-  const max = Math.min(Math.floor(available * 0.5), fileRoom);
+  const max = Math.max(MIN_SHORTCUT_HEIGHT, Math.floor(available * MAX_SHORTCUT_RATIO));
   const min = Math.min(MIN_SHORTCUT_HEIGHT, max);
   return Math.max(min, Math.min(Math.round(value), max));
 }
@@ -47,10 +52,10 @@ export function parseShortcutExport(text: string): Shortcut[] {
     : parsed && typeof parsed === "object" && Array.isArray((parsed as { items?: unknown }).items)
       ? (parsed as { items: unknown[] }).items
       : null;
-  if (!items) throw new Error("指令集格式无效：需要 JSON 数组或包含 items 数组的对象");
+  if (!items) throw new Error(t("shortcuts.badShape"));
   const normalized = items.map(normalizeShortcut);
   if (normalized.some((item) => item === null)) {
-    throw new Error("指令集格式无效：每项必须包含名称、命令和 execute/fill 模式");
+    throw new Error(t("shortcuts.badItem"));
   }
   return normalized as Shortcut[];
 }

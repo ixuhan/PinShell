@@ -14,13 +14,16 @@ tauri-build = { version = "2", features = [] }
 core-domain = { path = "core-domain" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
 serde_json = "1"
 portable-pty = "0.9"
 parking_lot = "0.12"
 uuid = { version = "1", features = ["v4"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 serialport = { version = "4.10.1", default-features = false }
 tauri-plugin-dialog = "2.0.0-rc.8"
+tauri-plugin-updater = "2.9.0"
+tauri-plugin-process = "2"
 
 # 关掉 WebView2 的浏览器加速键（Ctrl+R 不再是「刷新页面」）需要直接拿到 WebView2 设置。
 [target."cfg(windows)".dependencies]

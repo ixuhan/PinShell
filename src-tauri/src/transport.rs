@@ -77,6 +77,11 @@ pub trait Transport: Send + Sync {
         None
     }
 
+    /// 保存下次重连使用的参数，必须在串口释放后调用。
+    fn set_serial_config(&self, _config: SerialConfig) -> Result<(), String> {
+        Err("此会话不是串口".into())
+    }
+
     /// 串口日志文件；没有日志时返回 `None`。
     fn log_path(&self) -> Option<PathBuf> {
         None
@@ -358,6 +363,12 @@ impl Transport for SerialTransport {
         Some(self.config.lock().clone())
     }
 
+    fn set_serial_config(&self, config: SerialConfig) -> Result<(), String> {
+        config.validate().map_err(|err| err.to_string())?;
+        *self.config.lock() = config;
+        Ok(())
+    }
+
     fn log_path(&self) -> Option<PathBuf> {
         self.log.lock().as_ref().map(SerialLog::path)
     }
@@ -592,7 +603,7 @@ pub mod fake {
 
     pub struct MemoryTransport {
         inner: Arc<Inner>,
-        config: SerialConfig,
+        config: Mutex<SerialConfig>,
     }
 
     impl MemoryTransport {
@@ -610,7 +621,7 @@ pub mod fake {
             (
                 Self {
                     inner: inner.clone(),
-                    config,
+                    config: Mutex::new(config),
                 },
                 FakePeer { inner },
             )
@@ -700,11 +711,17 @@ pub mod fake {
         }
 
         fn port_key(&self) -> Option<String> {
-            Some(self.config.port.trim().to_string())
+            Some(self.config.lock().port.trim().to_string())
         }
 
         fn serial_config(&self) -> Option<SerialConfig> {
-            Some(self.config.clone())
+            Some(self.config.lock().clone())
+        }
+
+        fn set_serial_config(&self, config: SerialConfig) -> Result<(), String> {
+            config.validate().map_err(|err| err.to_string())?;
+            *self.config.lock() = config;
+            Ok(())
         }
     }
 

@@ -19,6 +19,7 @@ import {
   type HistorySnapshot
 } from "./historyCache";
 import { stripFocusReports } from "./ptyInput";
+import { ROW_ICON } from "./icons";
 import { normalizeHexInput } from "./hexInput";
 import { keepAfter, type OutChunk } from "./outQueue";
 import { clearDisplayMode } from "./displayClear";
@@ -27,9 +28,23 @@ import { setupShortcutsUi } from "./shortcutsUi";
 import { DRAGGING_CLASS } from "./resize";
 import { setupInputbarResize } from "./inputbarResize";
 import { setupSidebar } from "./sidebarUi";
+import { invertIds, pruneIds, selectAllIds, toggleId } from "./selection";
 import { setupSerialDialog, type SerialConfig } from "./serialUi";
 import { mergeRuntimeStates, type RuntimeState } from "./runtimeState";
+import {
+  DEFAULT_FONT_SIZE,
+  TERMINAL_CURSOR_BLINK,
+  TERMINAL_FONT_FAMILY,
+  TERMINAL_WEBGL,
+  clampFontSize
+} from "./displaySettings";
+import { applyStaticI18n, initLocale, onLocaleChange, t } from "./i18n";
+import { closePopupMenu, showPopupMenu, type PopupItem, type PopupMenuHandle } from "./popupMenu";
+import { applyTheme, readTheme, xtermTheme } from "./theme";
+import { setupGlobalSettings } from "./globalSettingsUi";
 import { setupSerialPortsPanel } from "./serialPortsPanelUi";
+import { setupSessionSettingsUi, type SessionSettings } from "./sessionSettingsUi";
+import { setupTitlebar } from "./titlebar";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -46,6 +61,13 @@ const ibOverride = document.getElementById("ib-override") as HTMLButtonElement;
 const ghostEl = document.getElementById("ib-ghost") as HTMLSpanElement;
 const sessList = document.getElementById("sess-list") as HTMLDivElement;
 const sessNew = document.getElementById("sess-new") as HTMLButtonElement;
+const sessSelect = document.getElementById("sess-select") as HTMLButtonElement;
+const sessBulk = document.getElementById("sess-bulk") as HTMLDivElement;
+const sessSelectAll = document.getElementById("sess-select-all") as HTMLButtonElement;
+const sessSelectInvert = document.getElementById("sess-select-invert") as HTMLButtonElement;
+const sessDeleteSelected = document.getElementById("sess-delete-selected") as HTMLButtonElement;
+const sessSelectDone = document.getElementById("sess-select-done") as HTMLButtonElement;
+const sessPanel = document.getElementById("sess-panel") as HTMLElement;
 const histOverlay = document.getElementById("hist-overlay") as HTMLDivElement;
 const histQuery = document.getElementById("hist-query") as HTMLInputElement;
 const histList = document.getElementById("hist-list") as HTMLDivElement;
@@ -56,9 +78,21 @@ const ibPaused = document.getElementById("ib-paused") as HTMLSpanElement;
 const ibHex = document.getElementById("ib-hex") as HTMLButtonElement;
 const ibLog = document.getElementById("ib-log") as HTMLButtonElement;
 
+// 语言与主题在模块求值时就定下来：后面的常量、首帧文案都按它们走
+initLocale();
+applyTheme(readTheme());
+
+/// HUD 上的诊断消息是瞬时的：显示几秒后自动淡出，免得一条启动信息永远压在终端上。
+const HUD_TTL_MS = 6000;
+let hudTimer: number | undefined;
+
 function log(msg: string) {
   hud.textContent = msg;
   console.log(msg);
+  window.clearTimeout(hudTimer);
+  hudTimer = window.setTimeout(() => {
+    hud.textContent = "";
+  }, HUD_TTL_MS);
 }
 
 // ---- 诊断开关：默认关闭 ----
@@ -104,6 +138,13 @@ window.addEventListener("beforeunload", () => trace(`beforeunload #${bootNo}`));
 window.addEventListener("error", (e) => trace(`js error #${bootNo} ${e.message}`));
 window.addEventListener("unhandledrejection", (e) => trace(`js rejection #${bootNo} ${String(e.reason)}`));
 
+document.addEventListener("contextmenu", (event) => {
+  if (event.defaultPrevented) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true']")) return;
+  event.preventDefault();
+});
+
 /// 终端保留多少行历史（xterm 的 `scrollback`）。其他产品的默认值各不相同：
 /// VS Code 1000、tmux / kitty 2000、WezTerm 3500、Windows Terminal 9001、Alacritty 10000、
 /// iTerm2 默认不限。上限存在的理由主要是**内存**与**持续裁剪的成本**，不是渲染：
@@ -120,11 +161,12 @@ window.addEventListener("unhandledrejection", (e) => trace(`js rejection #${boot
 const SCROLLBACK_LINES = 5000;
 
 const term = new Terminal({
-  fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
-  fontSize: 13,
+  fontFamily: TERMINAL_FONT_FAMILY,
+  fontSize: DEFAULT_FONT_SIZE,
   lineHeight: 1.4,
-  cursorBlink: true,
+  cursorBlink: TERMINAL_CURSOR_BLINK,
   scrollback: SCROLLBACK_LINES,
+  theme: xtermTheme(readTheme()),
   allowProposedApi: true
 });
 
@@ -134,12 +176,63 @@ term.open(document.getElementById("term-host") as HTMLElement);
 fit.fit();
 
 let webgl = false;
-try {
-  term.loadAddon(new WebglAddon());
-  webgl = true;
-} catch {
-  webgl = false;
+let webglAddon: WebglAddon | null = null;
+function applyWebgl(enabled: boolean) {
+  if (enabled && !webglAddon) {
+    try {
+      webglAddon = new WebglAddon();
+      term.loadAddon(webglAddon);
+      webglAddon.onContextLoss(() => {
+        webglAddon?.dispose();
+        webglAddon = null;
+        webgl = false;
+      });
+      webgl = true;
+    } catch {
+      webglAddon?.dispose();
+      webglAddon = null;
+      webgl = false;
+    }
+  } else if (!enabled && webglAddon) {
+    webglAddon.dispose();
+    webglAddon = null;
+    webgl = false;
+  }
 }
+applyWebgl(TERMINAL_WEBGL);
+
+/// 当前会话的字号。切会话时按该会话的设置换一次；会话设置里改完立即生效。
+function applyFontSize(size: number) {
+  const next = clampFontSize(size);
+  if (term.options.fontSize === next) return;
+  term.options.fontSize = next;
+  fit.fit();
+  syncSize();
+}
+
+/// 主题变了：CSS 变量由 `applyTheme` 换，终端这边换 canvas 配色。
+/// 只改 `theme` 不会重绘已有内容，所以补一次整屏 refresh。
+function applyTermTheme() {
+  term.options.theme = xtermTheme(readTheme());
+  term.refresh(0, term.rows - 1);
+}
+
+/// 语言切换后重画本文件生成的动态文案。
+/// 静态标注（`data-i18n`）由这里统一刷；各模块自己的动态文案通过 `onLocaleChange` 重画，
+/// 这里再补上会话树与输入条状态——它们是本文件直接画的。
+function refreshChromeText() {
+  applyStaticI18n(document);
+  renderTree();
+  renderBarStatus();
+}
+
+const globalSettings = setupGlobalSettings({
+  themeChanged: () => applyTermTheme()
+});
+
+document.getElementById("settings-open")!.addEventListener("click", () => globalSettings.open());
+
+onLocaleChange(() => refreshChromeText());
 
 let sessionId = "";
 let requestedSessionId = "";
@@ -147,6 +240,9 @@ let sessionSwitchToken = 0;
 let bytes = 0;
 /// 文件面板的句柄：监听器可能先于 setup 收到事件，所以允许为空
 let filePanel: ReturnType<typeof setupFilePanel> | null = null;
+/// 左栏句柄：标题栏的折叠按钮要用它切换整栏收起
+let setupSidebarHandle: ReturnType<typeof setupSidebar> | null = null;
+let sessionSettingsUi: ReturnType<typeof setupSessionSettingsUi> | null = null;
 let shortcutsUi: ReturnType<typeof setupShortcutsUi> | null = null;
 /// 新建串口会话的对话框：按钮在装配前就可能被点到（理论上不会），所以允许为空
 let serialDialog: ReturnType<typeof setupSerialDialog> | null = null;
@@ -288,13 +384,36 @@ async function resyncScreen(id: string): Promise<boolean> {
     return false;
   }
 
+  // 先把终端尺寸对准当前布局，再整屏回放。反过来的话（先写快照、再 fit）会触发一次重排，
+  // 底部提示符和滚动位置都会被推走：切回来看到的是被顶上去的一屏，实际输入却在缓冲区末尾。
+  fitTerm();
   lastSeq = snap.seq;
   if (snap.data) {
     // 快照会整屏重画：先复位，免得新内容叠在旧画面上（半屏重影）
     term.reset();
-    term.write(snap.data);
+    // 复位后视口可能还停在上一会话的滚动位置：先贴回底部并清掉「用户正在翻历史」的标记，
+    // 否则整段回放会从顶部开始铺，屏幕上看到的是历史的上半屏，而实际输入位置在缓冲区末尾。
+    term.scrollToBottom();
+    term.write(snap.data, () => {
+      // 回放解析完再贴一次：解析期间或随后的 fit/reflow 都可能把视口带离底部。
+      if (token !== attachToken || sessionId !== id) return;
+      term.scrollToBottom();
+      // WebGL 只重画「变脏」的行。整屏回放 + 重排之后强制刷一遍可见区，
+      // 免得画布还留着上一帧的行，看起来像整块内容被顶了上去（模型其实没错）。
+      term.refresh(0, term.rows - 1);
+      // 底色矩形的缓存也要等解析完再按新模型重算：早一步算的是空屏/半屏。
+      resyncBackgrounds();
+      // 滚动条高度的变化（reset 后变矮、回放后又变高）是异步派发的，可能晚于这次解析；
+      // 再等一拍贴一次，避免它把视口又带回上面。
+      window.setTimeout(() => {
+        if (token === attachToken && sessionId === id) term.scrollToBottom();
+      }, 80);
+    });
     // 这一份画过就等于答过：之后再附着，这部分查询交给后端删掉
     noteAnswered(id, snap.seq);
+  } else {
+    // 空快照：attach 已经 reset 过，这里把视口贴回尾部（否则新输出会画在看不见的位置）
+    term.scrollToBottom();
   }
   if (snap.dropped_bytes > 0) {
     console.warn(`[replay] 超出上限丢掉了 ${snap.dropped_bytes} 字节`);
@@ -312,8 +431,13 @@ async function resyncScreen(id: string): Promise<boolean> {
   }
 
   fitTerm();
+  // 尺寸变化可能触发重排，最后再贴一次底，保证切回来/继续后停在最新一行
+  term.scrollToBottom();
   // 空快照不会让模型发生变化，底色缓存得手动重算一次，否则旧矩形会一直画着
   resyncBackgrounds();
+  // 尺寸变了就让 PTY 跟着变：每发一次 shell 就会收到一次 SIGWINCH、重画一次提示符，
+  // 满屏时那一次重画会在末尾留下空白行，所以这行 trace 是排查「切回来整屏上移」的抓手。
+  trace(`resize ${id.slice(0, 4)} ${term.cols}x${term.rows}`);
   void invoke("pty_resize", { id, cols: term.cols, rows: term.rows });
   return true;
 }
@@ -329,6 +453,8 @@ async function attach(id: string) {
   // 通道类型决定界面上哪些入口存在（串口没有补全、命令检索与备用屏）。
   // 能力位由后端给（`pty_list` 的 `caps`），这里只按会话类型切换提示文案。
   serialKind = tree.find((session) => session.id === id)?.transport === "serial";
+  // 字号跟着会话走：每个会话可以各自放大或缩小
+  applyFontSize(tree.find((session) => session.id === id)?.settings.font_size ?? DEFAULT_FONT_SIZE);
   serialStatus = null;
   hexMode = hexBySession.get(id) ?? false;
   notice = "";
@@ -340,8 +466,8 @@ async function attach(id: string) {
   ibHex.disabled = false;
   ibLog.disabled = true;
   ib.placeholder = serialKind
-    ? hexMode ? "HEX：48 65 6C 6C 6F" : "输入要发送的内容"
-    : "输入命令";
+    ? hexMode ? t("input.placeholderHex") : t("input.placeholderSerial")
+    : t("input.placeholder");
   // 历史覆盖层、输入草稿、↑↓ 游标都属于上一个会话：切走时一起丢掉，
   // 否则旧会话里敲了一半的命令会被回车发到新会话去。
   if (!histOverlay.hidden) closeHistoryOverlay(false, false);
@@ -365,10 +491,22 @@ async function attach(id: string) {
   // `reset` 只清字形，不清底色矩形缓存：空屏时没人再触发重算，上一会话的选中底色会留着
   resyncBackgrounds();
 
+  // 输入条的形态决定终端有多高：直通模式下它收成 0 高，终端就多出几行。
+  // 这一步必须排在 fit + 回放**之前**——以前是回放完才 applyOwnership，于是 resyncScreen
+  // 按上一个会话的形态 fit（比如 31 行），回放完成后输入条才收起、高度变回 36 行，
+  // 期间给 PTY 连发了两次不同尺寸的 resize。shell 每收一次 SIGWINCH 就重画一次提示符，
+  // 满屏时就多出几行空白：切回来看到整屏被顶上去、底部空一块。
+  // 取不到归属不影响回放（按上一会话的形态画，后续 ownership 事件会纠正），所以失败只记日志。
+  try {
+    applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
+  } catch (err) {
+    log(`取归属失败: ${String(err)}`);
+  }
+  if (sessionId !== id) return;
+
   const ok = await resyncScreen(id);
   if (!ok || sessionId !== id) return;
 
-  applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
   if (serialKind) await syncSerial(id);
   else await syncPaused(id);
   void rebuildHistory(id);
@@ -387,6 +525,7 @@ interface TreeSession {
   shell: string | null;
   cwd: string | null;
   serial: SerialConfig | null;
+  settings: SessionSettings;
 }
 
 const pausedBySession = new Map<string, boolean>();
@@ -439,20 +578,116 @@ async function refreshTree() {
 
 /// 正在改名的会话 id。改名从会话操作菜单进入，回车提交、Esc 放弃。
 let renaming: string | null = null;
-let contextMenu: HTMLDivElement | null = null;
+/// 删除会话的二次确认给多久：超过这个时间菜单上的「确认删除？」自己收回，
+/// 免得隔很久再点那一下，手一滑就把会话删了。
+const DELETE_CONFIRM_MS = 5000;
 
-function closeSessionMenu() {
-  contextMenu?.remove();
-  contextMenu = null;
+/// 会话列表的批量选择：进入后点行只勾选，不切换会话。
+/// 勾选只是 id 的集合，全选/反选/清理失效项都走 `selection.ts` 的纯函数。
+let sessSelectMode = false;
+let sessSelected = new Set<string>();
+/// 批量删除与单条删除一样要二次确认：第一次点只把按钮换成「确认删除（n）」，
+/// 5 秒内再点才真的删；改选或超时都会自动收回。
+let sessDeleteArmed = false;
+let sessDeleteArmTimer: number | undefined;
+
+function disarmSessDelete() {
+  sessDeleteArmed = false;
+  window.clearTimeout(sessDeleteArmTimer);
+  sessDeleteArmTimer = undefined;
+}
+
+/// 模式开关、复选框与删除按钮的文案都在这里统一刷，renderTree 每次重画都会调。
+function paintSessBulk() {
+  sessBulk.hidden = !sessSelectMode;
+  sessSelect.classList.toggle("on", sessSelectMode);
+  sessSelect.setAttribute("aria-pressed", String(sessSelectMode));
+  sessPanel.classList.toggle("selecting", sessSelectMode);
+  const n = sessSelected.size;
+  sessDeleteSelected.textContent = sessDeleteArmed
+    ? t("bulk.deleteConfirm", { n })
+    : t("bulk.deleteCount", { n });
+  sessDeleteSelected.disabled = n === 0;
+}
+
+function setSessSelectMode(on: boolean) {
+  if (sessSelectMode === on) {
+    paintSessBulk();
+    return;
+  }
+  sessSelectMode = on;
+  sessSelected = new Set();
+  disarmSessDelete();
+  if (on) {
+    closePopupMenu();
+    // 子栏收着时进入批量模式看不见列表：走标题栏的折叠开关把它展开
+    if (sessPanel.classList.contains("collapsed")) {
+      (document.getElementById("sess-toggle") as HTMLButtonElement).click();
+    }
+  }
+  renderTree();
+}
+
+function toggleSessSelected(id: string) {
+  sessSelected = toggleId(sessSelected, id);
+  disarmSessDelete();
+  renderTree();
+}
+
+/// 批量删除选中的会话。当前会话也在其中时才切走：和单条删除的收尾一致，
+/// 逐条删除，一条失败不影响其余（失败的只记日志）。
+async function deleteSelectedSessions() {
+  const ids = tree.filter((session) => sessSelected.has(session.id)).map((session) => session.id);
+  if (!ids.length) return;
+  const wasActive = ids.includes(sessionId);
+  for (const id of ids) {
+    try {
+      await invoke("pty_close", { id });
+    } catch (err) {
+      console.warn(`[delete] ${String(err)}`);
+    }
+  }
+  sessSelected = new Set();
+  disarmSessDelete();
+  await refreshTree();
+  if (wasActive) {
+    sessionId = "";
+    const next = tree[tree.length - 1];
+    if (next) await openSession(next.id);
+    else await newSession();
+  }
+  renderTree();
+}
+
+
+function showTerminalSelectionMenu(text: string, x: number, y: number) {
+  showPopupMenu(
+    { x, y },
+    [
+      {
+        label: t("common.copy"),
+        run: () => {
+          void navigator.clipboard.writeText(text).catch((error: unknown) => {
+            console.warn(`[clipboard] 复制终端选区失败: ${String(error)}`);
+          });
+        }
+      }
+    ]
+  );
+}
+
+document.getElementById("term-host")!.addEventListener("contextmenu", (event) => {
+  if (!term.hasSelection()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showTerminalSelectionMenu(term.getSelection(), event.clientX, event.clientY);
+});
+
+function openSessionSettings(session: TreeSession) {
+  void sessionSettingsUi?.open(session.id, session.title, session.transport === "serial");
 }
 
 function showSessionMenu(session: TreeSession, x: number, y: number) {
-  closeSessionMenu();
-  const menu = document.createElement("div");
-  menu.className = "sess-context-menu";
-  menu.setAttribute("role", "menu");
-  contextMenu = menu;
-
   const isLive = live.has(session.id);
   const serial = session.transport === "serial";
   const cachedStatus = serial ? serialStatusBySession.get(session.id) : undefined;
@@ -463,103 +698,134 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
         ? !serialStatus || serialStatus.paused || serialStatus.status !== "open"
         : true
     : session.id === sessionId ? paused : pausedBySession.get(session.id) ?? false;
-  const pauseItem = document.createElement("button");
-  pauseItem.textContent = serial ? (pausedNow ? "连接" : "断开") : (pausedNow ? "继续" : "暂停");
-  pauseItem.disabled = !isLive;
+
+  const pauseLabel = (down: boolean) => serial
+    ? (down ? t("session.connect") : t("session.disconnect"))
+    : (down ? t("session.resume") : t("session.pause"));
+
+  let menu: PopupMenuHandle | null = null;
+  /// 菜单还开着才回写：异步查到状态时用户可能已经把它关了
+  const stillOpen = () => menu?.element.isConnected === true;
+
+  const pauseItem: PopupItem = {
+    label: pauseLabel(pausedNow),
+    disabled: !isLive,
+    run: () => void togglePauseFor(session.id, session.transport)
+  };
+
+  const clearItem: PopupItem = {
+    label: t("session.clear"),
+    disabled: !isLive,
+    run: () => void clearScreenFor(session.id)
+  };
+
+  const currentOverride = session.id === sessionId ? own?.override ?? "none" : "none";
+  const overridePending = isLive && session.id !== sessionId;
+  /// 点的时候再读：异步查到的所有权会改它
+  let overrideMode: OverrideMode = currentOverride;
+  const overrideItem: PopupItem = {
+    label: overridePending
+      ? t("sessionSettings.loading")
+      : currentOverride === "passthrough" ? t("session.takeover") : t("session.passthrough"),
+    title: currentOverride === "passthrough"
+      ? t("input.toTakeover")
+      : currentOverride === "input_bar" ? t("input.toPassthrough") : t("input.overrideHint"),
+    disabled: !isLive || overridePending,
+    run: () => void setOverrideFor(session.id, overrideMode === "passthrough" ? "input_bar" : "passthrough")
+  };
+
+  const renameItem: PopupItem = {
+    label: t("session.rename"),
+    run: () => {
+      renaming = session.id;
+      renderTree();
+    }
+  };
+
+  const settingsItem: PopupItem = {
+    label: t("session.settings"),
+    run: () => openSessionSettings(session)
+  };
+
+  /// 冻结：结束进程/端口但保留记录、历史与屏幕，点开会按原参数重新拉起。
+  /// 与「删除」是两件事，所以单独一项；冷会话无运行时可结束，禁用。
+  const freezeItem: PopupItem = {
+    label: t("session.freeze"),
+    title: t("session.freezeHint"),
+    disabled: !isLive,
+    run: () => void freezeSession(session.id)
+  };
+
+  // 删除会话是唯一不可撤销的操作：先变成红字问一句，再点一次才真的删。
+  // 两次点击之间超时自动收回，避免隔了很久再点那一下误删。
+  let armed = false;
+  let armTimer: number | undefined;
+  const disarm = () => {
+    armed = false;
+    window.clearTimeout(armTimer);
+    deleteItem.label = t("session.delete");
+  };
+  const deleteItem: PopupItem = {
+    label: t("session.delete"),
+    danger: true,
+    // 冷会话也要能删：它的意义就是「把这条记录去掉」，与是否还在跑无关
+    run: () => {
+      if (!armed) {
+        armed = true;
+        deleteItem.label = t("session.deleteConfirm");
+        window.clearTimeout(armTimer);
+        armTimer = window.setTimeout(() => {
+          disarm();
+          if (stillOpen()) menu?.repaint();
+        }, DELETE_CONFIRM_MS);
+        menu?.repaint();
+        return "keep-open";
+      }
+      disarm();
+      void closeSession(session.id);
+      return;
+    }
+  };
+
+  const items: PopupItem[] = [pauseItem, clearItem, overrideItem, renameItem, settingsItem, freezeItem, deleteItem];
+
+  // 后台会话没有本地状态：向它问一次，回来再把标签改对
   if (isLive && session.id !== sessionId) {
     const stateCommand = serial ? "serial_status" : "pty_paused";
     void invoke<boolean | SerialStatus>(stateCommand, { id: session.id }).then((state) => {
-      if (contextMenu !== menu) return;
+      if (!stillOpen()) return;
       const down = serial
         ? (state as SerialStatus).paused || (state as SerialStatus).status !== "open"
         : state as boolean;
-      pauseItem.textContent = serial ? (down ? "连接" : "断开") : (down ? "继续" : "暂停");
+      pauseItem.label = pauseLabel(down);
+      menu?.repaint();
     }).catch(() => {});
-  }
-  pauseItem.addEventListener("click", () => {
-    closeSessionMenu();
-    void togglePauseFor(session.id, session.transport);
-  });
-  menu.append(pauseItem);
-
-  const clearItem = document.createElement("button");
-  clearItem.textContent = "清屏";
-  clearItem.disabled = !isLive;
-  clearItem.addEventListener("click", () => {
-    closeSessionMenu();
-    void clearScreenFor(session.id);
-  });
-  menu.append(clearItem);
-
-  const currentOverride = session.id === sessionId
-    ? own?.override ?? "none"
-    : "none";
-  const overrideItem = document.createElement("button");
-  const overridePending = isLive && session.id !== sessionId;
-  overrideItem.textContent = overridePending ? "读取中…" : currentOverride === "passthrough" ? "接管" : "直通";
-  overrideItem.disabled = !isLive || overridePending;
-  if (currentOverride === "passthrough") {
-    overrideItem.title = "当前直通，点击切换到接管";
-  } else if (currentOverride === "input_bar") {
-    overrideItem.title = "当前接管，点击切换到直通";
-  } else {
-    overrideItem.title = "当前自动，点击锁定直通";
-  }
-  if (isLive && session.id !== sessionId) {
     void invoke<Ownership>("pty_ownership", { id: session.id }).then((ownership) => {
-      if (contextMenu === menu) {
-        overrideItem.textContent = ownership.override === "passthrough" ? "接管" : "直通";
-        overrideItem.dataset.mode = ownership.override;
-        overrideItem.disabled = false;
-      }
+      if (!stillOpen()) return;
+      overrideMode = ownership.override;
+      overrideItem.label = ownership.override === "passthrough" ? t("session.takeover") : t("session.passthrough");
+      overrideItem.title = ownership.override === "passthrough" ? t("input.toTakeover") : t("input.toPassthrough");
+      overrideItem.disabled = false;
+      menu?.repaint();
     }).catch(() => {});
   }
-  overrideItem.dataset.mode = currentOverride;
-  overrideItem.addEventListener("click", () => {
-    closeSessionMenu();
-    const mode = overrideItem.dataset.mode === "passthrough" ? "input_bar" : "passthrough";
-    void setOverrideFor(session.id, mode);
-  });
-  menu.append(overrideItem);
 
-  const renameItem = document.createElement("button");
-  renameItem.textContent = "重命名";
-  renameItem.addEventListener("click", () => {
-    closeSessionMenu();
-    renaming = session.id;
-    renderTree();
-  });
-  menu.append(renameItem);
-
-  const closeItem = document.createElement("button");
-  closeItem.textContent = "关闭会话";
-  closeItem.disabled = !isLive;
-  closeItem.addEventListener("click", () => {
-    closeSessionMenu();
-    void closeSession(session.id);
-  });
-  menu.append(closeItem);
-
-  document.body.append(menu);
-  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - menu.offsetWidth - 4))}px`;
-  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - menu.offsetHeight - 4))}px`;
+  menu = showPopupMenu({ x, y }, items, { minWidth: 132 });
 }
-
-document.addEventListener("pointerdown", (event) => {
-  if (contextMenu && !contextMenu.contains(event.target as Node)) closeSessionMenu();
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && contextMenu) closeSessionMenu();
-});
 
 function renderTree() {
   sessList.textContent = "";
+  // 树刷新后已经消失的会话不该继续占着勾选
+  sessSelected = pruneIds(sessSelected, tree.map((session) => session.id));
   for (const session of tree) {
     const row = document.createElement("div");
-    row.className = "sess-row" + ((requestedSessionId || sessionId) === session.id ? " active" : "");
+    row.className = "sess-row"
+      + ((requestedSessionId || sessionId) === session.id ? " active" : "")
+      + (sessSelectMode ? " selecting" : "")
+      + (sessSelectMode && sessSelected.has(session.id) ? " selected" : "");
     row.dataset.sessionId = session.id;
     const detail = session.transport === "serial" && session.serial
-      ? `串口 ${session.serial.port} · ${session.serial.baud}`
+      ? `${t("sidebar.serial")} ${session.serial.port} · ${session.serial.baud}`
       : session.cwd ?? "";
     row.title = `${session.title} · ${session.id.slice(0, 8)}${detail ? ` · ${detail}` : ""}`;
 
@@ -577,26 +843,32 @@ function renderTree() {
       dot.classList.add("activity");
     }
 
-    // 串口会话在行上加一个记号：终端是「跑一个进程」，串口是「占一条线」，
-    // 两者共用同一套会话模型，但一眼就该分得出来（ADR 0001）。
-    let mark: HTMLSpanElement | null = null;
-    if (session.transport === "serial") {
-      mark = document.createElement("span");
-      mark.className = "sess-serial-mark";
-      mark.textContent = "⌁";
-      mark.title = "串口会话";
+    // 串口的连接参数单独一格：改名只换名字，端口这行不动。
+    // 波特率不进侧栏（会话设置里能看到）；它只留在 tooltip 里，鼠标停一下还能查到。
+    const params = session.transport === "serial" && session.serial
+      ? session.serial.port
+      : "";
+    const paramsHint = session.transport === "serial" && session.serial
+      ? `${session.serial.port} · ${session.serial.baud}`
+      : "";
+    let detailEl: HTMLSpanElement | null = null;
+    if (params && session.title !== params) {
+      detailEl = document.createElement("span");
+      detailEl.className = "sess-detail";
+      detailEl.textContent = params;
+      detailEl.title = paramsHint;
     }
 
   const state = document.createElement("span");
     state.className = "sess-state";
     if (live.has(session.id)) {
       state.textContent = session.transport === "serial"
-        ? status?.status === "failed" ? "失败" : isPaused ? "已断开" : "已连接"
-        : isPaused ? "暂停中" : "运行中";
+        ? status?.status === "failed" ? t("session.failed") : isPaused ? t("session.disconnected") : t("session.connected")
+        : isPaused ? t("session.paused") : t("session.running");
       state.classList.add(isPaused ? "paused" : "connected");
       state.title = session.transport === "serial"
-        ? `${status?.error ?? (isPaused ? "串口已断开" : "串口已连接")} · 双击此处切换连接状态`
-        : isPaused ? "输出已暂停 · 双击切换暂停状态" : "会话运行中 · 双击切换暂停状态";
+        ? `${status?.error ?? (isPaused ? t("session.disconnected") : t("session.connected"))} · ${t("session.doubleClickConnect")}`
+        : isPaused ? t("session.pausedHint") : t("session.runningHint");
     }
 
     const name = document.createElement("span");
@@ -640,7 +912,7 @@ function renderTree() {
       });
     } else {
       name.textContent = `${session.title} · ${session.id.slice(0, 4)}`;
-      name.title = session.transport === "serial" ? "双击切换连接状态" : "双击切换暂停状态";
+      name.title = session.transport === "serial" ? t("session.doubleClickConnect") : t("session.doubleClickPause");
       name.addEventListener("dblclick", (e) => {
         e.stopPropagation();
       });
@@ -649,25 +921,45 @@ function renderTree() {
     const menuButton = document.createElement("button");
     menuButton.className = "sess-menu-button";
     menuButton.type = "button";
-    menuButton.textContent = "⋯";
-    menuButton.title = "会话操作";
-    menuButton.setAttribute("aria-label", `${session.title} 操作菜单`);
+    menuButton.innerHTML = ROW_ICON.more;
+    menuButton.title = t("session.menu");
+    menuButton.setAttribute("aria-label", t("session.menuOf", { title: session.title }));
     menuButton.addEventListener("click", (e) => {
       e.stopPropagation();
       const bounds = menuButton.getBoundingClientRect();
       showSessionMenu(session, bounds.right, bounds.bottom);
     });
 
-    row.append(dot);
-    if (mark) row.append(mark);
-    row.append(name, state, menuButton);
+    row.append(dot, name);
+    if (detailEl) row.append(detailEl);
+    row.append(state, menuButton);
+    if (sessSelectMode) {
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.className = "sess-check";
+      check.checked = sessSelected.has(session.id);
+      check.tabIndex = -1;
+      check.setAttribute("aria-label", session.title);
+      // 勾选交给复选框自己：点它不要冒泡成「点行」，否则一次点击勾两次
+      check.addEventListener("click", (event) => event.stopPropagation());
+      check.addEventListener("change", () => toggleSessSelected(session.id));
+      row.prepend(check);
+    }
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      showSessionMenu(session, e.clientX, e.clientY);
+      // 批量选择时不弹单条会话菜单：这一行现在代表的是「勾选」
+      if (!sessSelectMode) showSessionMenu(session, e.clientX, e.clientY);
     });
     row.addEventListener("click", (e) => {
-      closeSessionMenu();
+      if (sessSelectMode) {
+        // 双击的第二下不再勾选，否则连点两下等于没点
+        if (e.detail > 1) return;
+        e.preventDefault();
+        toggleSessSelected(session.id);
+        return;
+      }
+      closePopupMenu();
       const clicks = e.detail;
       if (clicks > 1) {
         if (clicks === 2 && live.has(session.id)) {
@@ -680,6 +972,7 @@ function renderTree() {
     });
     sessList.append(row);
   }
+  paintSessBulk();
 }
 
 function markSessionActivity(id: string) {
@@ -716,48 +1009,24 @@ interface TerminalProfile {
 }
 
 let terminalProfiles: TerminalProfile[] = [];
-let newMenu: HTMLDivElement | null = null;
-
-function closeNewMenu() {
-  newMenu?.remove();
-  newMenu = null;
-}
 
 async function showNewMenu() {
-  closeNewMenu();
+  closePopupMenu();
   try {
     terminalProfiles = await invoke<TerminalProfile[]>("terminal_profiles");
   } catch (err) {
     console.warn(`[terminal-profiles] ${String(err)}`);
     terminalProfiles = [];
   }
-  const menu = document.createElement("div");
-  menu.className = "sess-context-menu sess-new-menu";
-  menu.setAttribute("role", "menu");
-  newMenu = menu;
-  for (const profile of terminalProfiles) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.textContent = profile.title;
-    item.setAttribute("role", "menuitem");
-    item.addEventListener("click", () => {
-      closeNewMenu();
-      void newSession(profile.command);
-    });
-    menu.append(item);
-  }
-  document.body.append(menu);
-  const bounds = sessNew.getBoundingClientRect();
-  menu.style.left = `${Math.max(4, Math.min(bounds.left, window.innerWidth - menu.offsetWidth - 4))}px`;
-  menu.style.top = `${Math.max(4, Math.min(bounds.bottom + 4, window.innerHeight - menu.offsetHeight - 4))}px`;
+  showPopupMenu(
+    sessNew,
+    terminalProfiles.map((profile) => ({
+      label: profile.title,
+      run: () => void newSession(profile.command)
+    })),
+    { minWidth: 156 }
+  );
 }
-
-document.addEventListener("pointerdown", (event) => {
-  if (newMenu && !newMenu.contains(event.target as Node) && event.target !== sessNew) closeNewMenu();
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeNewMenu();
-});
 
 /// 第一次拉起的会话才量冷启动；之后新开的会话不重写这组数字
 async function spawn(id: string | null, cwd: string | null = null, shell: string | null = null): Promise<string> {
@@ -859,6 +1128,26 @@ async function closeSession(id: string) {
   renderTree();
 }
 
+/// 冻结会话：结束运行时（终端进程 / 串口句柄）但保留工作区节点、命令历史与屏幕快照。
+/// 点这一行会按原参数重新拉起，和冷会话的恢复路径完全一样。
+async function freezeSession(id: string) {
+  const wasActive = id === sessionId;
+  try {
+    await invoke("pty_freeze", { id });
+  } catch (err) {
+    console.warn(`[freeze] ${String(err)}`);
+    return;
+  }
+  await refreshTree();
+  if (!wasActive || sessionId !== id) return;
+  // 当前会话被冻结：切到别的会话；不能选它自己，否则 openSession 会立刻又拉起来
+  sessionId = "";
+  const next = [...tree].reverse().find((session) => session.id !== id);
+  if (next) await openSession(next.id);
+  else await newSession();
+  renderTree();
+}
+
 async function boot() {
   await refreshTree();
   if (!tree.length) {
@@ -875,6 +1164,34 @@ async function boot() {
 }
 
 sessNew.addEventListener("click", () => void showNewMenu());
+
+// 会话列表的多选：标题栏按钮切换模式，操作栏负责全选/反选/批量删除
+sessSelect.addEventListener("click", () => setSessSelectMode(!sessSelectMode));
+sessSelectDone.addEventListener("click", () => setSessSelectMode(false));
+sessSelectAll.addEventListener("click", () => {
+  sessSelected = selectAllIds(tree.map((session) => session.id));
+  disarmSessDelete();
+  renderTree();
+});
+sessSelectInvert.addEventListener("click", () => {
+  sessSelected = invertIds(sessSelected, tree.map((session) => session.id));
+  disarmSessDelete();
+  renderTree();
+});
+sessDeleteSelected.addEventListener("click", () => {
+  if (!sessSelected.size) return;
+  if (!sessDeleteArmed) {
+    sessDeleteArmed = true;
+    window.clearTimeout(sessDeleteArmTimer);
+    sessDeleteArmTimer = window.setTimeout(() => {
+      disarmSessDelete();
+      if (sessSelectMode) renderTree();
+    }, DELETE_CONFIRM_MS);
+    renderTree();
+    return;
+  }
+  void deleteSelectedSessions();
+});
 
 
 /// xterm 的 onData 里有真按键，也有终端回报。焦点报告（`ESC[I` / `ESC[O`）不是用户输入：
@@ -1025,11 +1342,13 @@ function renderHistoryRows(rows: HistoryRow[], total: number) {
   historyRows = rows;
   historyRowEls = [];
   histList.textContent = "";
-  histCount.textContent = `${total} 条${total > rows.length ? ` · 显示最近 ${rows.length}` : ""}`;
+  histCount.textContent = total > rows.length
+    ? t("history.countCapped", { n: total, m: rows.length })
+    : t("history.count", { n: total });
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "hist-empty";
-    empty.textContent = "没有匹配的命令";
+    empty.textContent = t("history.empty");
     histList.append(empty);
     return;
   }
@@ -1054,7 +1373,7 @@ function renderHistoryRows(rows: HistoryRow[], total: number) {
     if (!cached.has(row.item.id)) {
       const older = document.createElement("span");
       older.className = "hist-older";
-      older.textContent = "更早";
+      older.textContent = t("history.older");
       el.append(older);
     }
     if (row.item.use_count > 1) {
@@ -1213,19 +1532,19 @@ histClearBtn.addEventListener("click", () => {
   if (!clearArmed) {
     clearArmed = true;
     histClearBtn.classList.add("armed");
-    histClearBtn.textContent = "再点一次确认";
+    histClearBtn.textContent = t("history.clearArmed");
     window.clearTimeout(clearTimer);
     clearTimer = window.setTimeout(() => {
       clearArmed = false;
       histClearBtn.classList.remove("armed");
-      histClearBtn.textContent = "清空本会话";
+      histClearBtn.textContent = t("history.clear");
     }, 3000);
     return;
   }
   clearArmed = false;
   window.clearTimeout(clearTimer);
   histClearBtn.classList.remove("armed");
-  histClearBtn.textContent = "清空本会话";
+  histClearBtn.textContent = t("history.clear");
   const id = sessionId;
   if (!id) return;
   void invoke("history_clear", { id }).then(() => {
@@ -1236,6 +1555,17 @@ histClearBtn.addEventListener("click", () => {
 });
 
 histOverlay.addEventListener("mousedown", (e) => e.stopPropagation());
+
+/// 焦点正被别的界面占用时，所有权变化不该抢回来：模态对话框与历史检索面板都算。
+function blocksOwnershipFocus(): boolean {
+  if (!histOverlay.hidden) return true;
+  for (const id of ["settings-overlay", "shortcut-overlay", "serial-overlay"]) {
+    const el = document.getElementById(id);
+    if (el && !(el as HTMLElement).hidden) return true;
+  }
+  const sessionSettings = document.querySelector<HTMLElement>(".session-settings-overlay");
+  return !!sessionSettings && !sessionSettings.hidden;
+}
 
 function applyOwnership(next: Ownership) {
   const changed =
@@ -1271,9 +1601,19 @@ function applyOwnership(next: Ownership) {
   ib.disabled = !takes;
   renderSendAvailability();
   renderTree();
-  // 只在本应用的两个焦点之间搬动，别抢别的控件
+  // 把焦点搬到当前该收键盘的地方。只让开两种情况：正在编辑输入框/下拉，
+  // 或者开着模态对话框。其余（body、侧栏/标题栏按钮、刚消失的菜单项）都接管——
+  // 新建会话是从按钮点出来的，Git Bash 启动很快，提示符可能早于菜单关闭就到，
+  // 旧逻辑见焦点不在两个输入目标上就不动，结果键盘谁都不接收。
   const active = document.activeElement;
-  if (active === ib || active === document.body || active === term.textarea) {
+  const editable =
+    active instanceof HTMLElement &&
+    (active.matches("input, textarea, select") || active.isContentEditable);
+  const transient =
+    active === null ||
+    active === document.body ||
+    (active instanceof HTMLElement && active.matches("button, [role='menuitem']"));
+  if (!blocksOwnershipFocus() && (active === ib || active === term.textarea || (!editable && transient))) {
     if (takes) ib.focus();
     else term.focus();
   }
@@ -1357,16 +1697,16 @@ function renderBarStatus() {
 
   let labelText: string;
   if (own?.override === "passthrough") {
-    labelText = "已锁直通 · 按键全给通道";
+    labelText = t("input.lockedPassthrough");
   } else if (own?.override === "input_bar") {
-    labelText = "已锁输入条 · 按键不回通道";
+    labelText = t("input.lockedInput");
   } else if (serialKind) {
     if (!serialStatus) {
-      labelText = "串口 · 连接中";
+      labelText = t("input.serialConnecting");
     } else if (serialStatus.status === "failed") {
-      labelText = `${serialStatus.config.port} · 失败`;
+      labelText = t("input.serialFailed", { port: serialStatus.config.port });
     } else if (serialStatus.paused || serialStatus.status === "released") {
-      labelText = `${serialStatus.config.port} · 断开`;
+      labelText = t("input.serialDisconnected", { port: serialStatus.config.port });
     } else {
       labelText = `${serialStatus.config.port} · ${serialStatus.config.baud}`;
     }
@@ -1375,8 +1715,8 @@ function renderBarStatus() {
   }
   ownLabel.textContent = labelText;
   ownLabel.hidden = true;
-  ibOverride.textContent = own?.override === "passthrough" ? "接管" : "直通";
-  ibOverride.title = own?.override === "passthrough" ? "切换到接管输入" : "切换到直通输入";
+  ibOverride.textContent = own?.override === "passthrough" ? t("session.takeover") : t("session.passthrough");
+  ibOverride.title = own?.override === "passthrough" ? t("input.toTakeover") : t("input.toPassthrough");
 
   // 同一格文案的优先级：临时错误 > 串口失败 > 串口断开 > 终端暂停中
   if (notice) {
@@ -1386,17 +1726,17 @@ function renderBarStatus() {
     ibPaused.classList.toggle("err", noticeIsError);
   } else if (serialKind && serialStatus?.status === "failed") {
     ibPaused.hidden = false;
-    ibPaused.textContent = "连接失败";
+    ibPaused.textContent = t("input.connectFailed");
     ibPaused.title = serialStatus.error ?? "";
     ibPaused.classList.add("err");
   } else if (serialKind && (serialStatus?.paused || serialStatus?.status === "released")) {
     ibPaused.hidden = false;
-    ibPaused.textContent = "端口已断开";
-    ibPaused.title = "点「连接」按原配置重开；会话、回放与历史都还在";
+    ibPaused.textContent = t("input.portDropped");
+    ibPaused.title = t("input.pausedHint");
     ibPaused.classList.remove("err");
   } else if (!serialKind) {
     ibPaused.hidden = !paused;
-    ibPaused.textContent = "暂停中";
+    ibPaused.textContent = t("input.paused");
     ibPaused.title = "";
     ibPaused.classList.remove("err");
   } else {
@@ -1406,8 +1746,8 @@ function renderBarStatus() {
   if (serialKind) {
     ibLog.disabled = !serialStatus?.log;
     ibLog.title = serialStatus?.log
-      ? `打开 ${serialStatus.log}`
-      : "本次会话没有日志文件";
+      ? t("input.logHint")
+      : t("input.noLog");
   } else {
     ibLog.disabled = true;
   }
@@ -1461,7 +1801,7 @@ async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
       try {
         status = await invoke<SerialStatus>("serial_status", { id });
       } catch (err) {
-        showNotice(`读取串口状态失败：${String(err)}`, true);
+        showNotice(t("globalSettings.updateFailed", { error: String(err) }), true);
         return;
       }
     }
@@ -1470,7 +1810,7 @@ async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
       if (down) await invoke("serial_connect", { id });
       else await invoke("serial_disconnect", { id });
     } catch (err) {
-      if (id === sessionId) showNotice(`连接失败：${String(err)}`, true, 8000);
+      if (id === sessionId) showNotice(t("input.connectFailed") + ": " + String(err), true, 8000);
       else console.warn(`[serial] ${String(err)}`);
     }
     if (id === sessionId) await syncSerial(id);
@@ -1559,8 +1899,8 @@ ibHex.addEventListener("click", () => {
   hexBySession.set(sessionId, hexMode);
   ibHex.classList.toggle("on", hexMode);
   ib.placeholder = serialKind
-    ? hexMode ? "HEX：48 65 6C 6C 6F" : "输入要发送的内容"
-    : "提示符就绪后可在这里输入";
+    ? hexMode ? t("input.placeholderHex") : t("input.placeholderSerial")
+    : t("input.placeholder");
   if (hexMode) {
     ib.value = normalizeHexInput(ib.value);
     autoGrow();
@@ -1574,7 +1914,7 @@ ibHex.addEventListener("click", () => {
 ibLog.addEventListener("click", () => {
   const path = serialStatus?.log;
   if (!path) {
-    showNotice("本次会话没有日志文件", true);
+    showNotice(t("input.noLog"), true);
     return;
   }
   void invoke("fs_open", { path }).catch((err) => showNotice(String(err), true));
@@ -1646,7 +1986,7 @@ function sendLine(line: string) {
       ib.value = line;
       autoGrow();
       ib.setSelectionRange(ib.value.length, ib.value.length);
-      showNotice("HEX 字符数必须为偶数，每个字节需要两位", true);
+      showNotice(t("input.hexOdd"), true);
       return;
     }
     line = normalizeHexInput(clean);
@@ -1675,7 +2015,7 @@ function sendLine(line: string) {
 
 async function executeShortcut(command: string): Promise<void> {
   const id = sessionId;
-  if (!id) throw new Error("当前没有会话");
+  if (!id) throw new Error(t("input.noSession"));
   const transport = serialKind ? "serial" : "terminal";
   const isPaused = serialKind
     ? !!serialStatus?.paused || serialStatus?.status !== "open"
@@ -1685,7 +2025,7 @@ async function executeShortcut(command: string): Promise<void> {
     const stillPaused = serialKind
       ? !!serialStatus?.paused || serialStatus?.status !== "open"
       : paused;
-    if (stillPaused || sessionId !== id) throw new Error("会话恢复失败，指令未发送");
+    if (stillPaused || sessionId !== id) throw new Error(t("input.paused"));
   }
   await invoke("pty_write", { id, data: `${command}\r` });
 }
@@ -2066,7 +2406,7 @@ async function runBench() {
 }
 
 // 左栏先装配：文件面板的宽度上限要量它当前多宽，顺序反了第一帧会算错
-setupSidebar({ layoutChanged: () => syncSize() });
+setupSidebarHandle = setupSidebar({ layoutChanged: () => syncSize() });
 setupInputbarResize({ layoutChanged: () => syncSize() });
 
 filePanel = setupFilePanel({
@@ -2074,6 +2414,26 @@ filePanel = setupFilePanel({
   cwdOf: (id) => tree.find((session) => session.id === id)?.cwd ?? null,
   fillInput: (text) => fillInputBar(text),
   layoutChanged: () => syncSize()
+});
+
+// 自绘标题栏：窗口按钮 + 左右栏折叠。两栏都已装配完，这里拿它们的句柄接线。
+const filePanelHandle = filePanel;
+setupTitlebar({
+  left: setupSidebarHandle,
+  right: filePanelHandle
+});
+
+sessionSettingsUi = setupSessionSettingsUi({
+  saved: async (id) => {
+    await refreshTree();
+    if (id === sessionId) {
+      filePanel?.onCwd(id);
+      applyFontSize(tree.find((session) => session.id === id)?.settings.font_size ?? DEFAULT_FONT_SIZE);
+    }
+  },
+  fontSizePreview: (id, size) => {
+    if (id === sessionId) applyFontSize(size);
+  }
 });
 
 shortcutsUi = setupShortcutsUi({
@@ -2095,7 +2455,7 @@ serialDialog = setupSerialDialog({
   }
 });
 
-setupSerialPortsPanel({ open: (port) => serialDialog?.open(port) });
+setupSerialPortsPanel({ open: (port) => { if (port) serialDialog?.open(port); } });
 
 void Promise.all([
   listenOut,
@@ -2106,3 +2466,7 @@ void Promise.all([
   listenHistory,
   listenHistoryDegraded
 ]).then(boot);
+
+// 首帧兜底样式在 index.html 里：静态 DOM、样式表与各模块都已装配完，
+// 现在放行界面，避免启动瞬间闪出未样式化的原生控件。
+document.documentElement.classList.add("app-ready");

@@ -1,0 +1,15 @@
+{
+  "version": "0.1.1",
+  "notes": "",
+  "pub_date": "2026-11-19T00:00:00Z",
+  "platforms": {
+    "windows-x86_64-nsis": {
+      "signature": "REPLACE_WITH_GENERATED_SIGNATURE",
+      "url": "https://github.com/ixuhan/PinShell/releases/download/v0.1.1/PinShell_0.1.1_x64-setup.exe"
+    },
+    "windows-x86_64-msi": {
+      "signature": "REPLACE_WITH_GENERATED_SIGNATURE",
+      "url": "https://github.com/ixuhan/PinShell/releases/download/v0.1.1/PinShell_0.1.1_x64_en-US.msi"
+    }
+  }
+}

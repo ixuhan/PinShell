@@ -35,19 +35,21 @@ mod imp {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::core::{w, PCSTR, PCWSTR};
-    use windows::Win32::Foundation::{GetLastError, SetLastError, HWND, LPARAM, WPARAM, WIN32_ERROR};
+    use windows::Win32::Foundation::{
+        GetLastError, SetLastError, HWND, LPARAM, WIN32_ERROR, WPARAM,
+    };
     use windows::Win32::System::Com::{
-        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        IContextMenu, IShellFolder, SHBindToParent, SHParseDisplayName, CMF_EXPLORE, CMF_NORMAL,
-        CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
+        IContextMenu, IShellFolder, SHBindToParent, SHGetDesktopFolder, SHParseDisplayName,
+        CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, CreateWindowExW, DestroyMenu, DestroyWindow, GetCursorPos,
         GetMenuItemCount, PostMessageW, SetForegroundWindow, TrackPopupMenuEx, SW_SHOWNORMAL,
-        TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL, WINDOW_EX_STYLE, WS_POPUP,
+        TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_NULL, WS_POPUP,
     };
 
     /// 菜单命令 id 的起点。`QueryContextMenu` 从它开始编号，`TrackPopupMenuEx` 返回
@@ -63,6 +65,7 @@ mod imp {
         let mut path: Option<String> = None;
         let mut hwnd_value: usize = 0;
         let mut probe = false;
+        let mut background = false;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut index = 0;
         while index < args.len() {
@@ -81,6 +84,8 @@ mod imp {
                 // 自检：走完 QueryContextMenu 就退出，不弹菜单。用来验证 COM 链路
                 // 与 shell 扩展是否正常，也方便排障时判断「是不是 helper 本身起不来」。
                 "--probe" => probe = true,
+                // 目录空白处的背景菜单（新建 / 粘贴 / 属性……），与条目菜单不是同一份
+                "--background" => background = true,
                 _ => {}
             }
             index += 1;
@@ -90,6 +95,9 @@ mod imp {
         if !std::path::Path::new(&path).exists() {
             return Err(format!("路径不存在: {path}"));
         }
+        if background && !std::path::Path::new(&path).is_dir() {
+            return Err(format!("不是目录: {path}"));
+        }
 
         // IContextMenu 要求线程已初始化 COM；STA 是 shell 扩展的既定要求。
         // 初始化失败直接退出：前端会退回自建菜单，而不是弹一个残废的菜单。
@@ -97,7 +105,14 @@ mod imp {
             .ok()
             .map_err(|err| format!("CoInitializeEx: {err}"))?;
 
-        let outcome = unsafe { show(&path, HWND(hwnd_value as *mut core::ffi::c_void), probe) };
+        let hwnd = HWND(hwnd_value as *mut core::ffi::c_void);
+        let outcome = unsafe {
+            if background {
+                show_background(&path, hwnd, probe)
+            } else {
+                show_item(&path, hwnd, probe)
+            }
+        };
         unsafe { CoUninitialize() };
         match outcome {
             Ok(outcome) => {
@@ -131,7 +146,7 @@ mod imp {
         .map_err(|err| format!("CreateWindowExW: {err}"))
     }
 
-    unsafe fn show(path: &str, parent_window: HWND, probe: bool) -> Result<&'static str, String> {
+    unsafe fn show_item(path: &str, parent_window: HWND, probe: bool) -> Result<&'static str, String> {
         let wide = to_wide(path);
         let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
         SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None)
@@ -152,68 +167,7 @@ mod imp {
             let menu: IContextMenu = parent
                 .GetUIObjectOf(owner, &children, None)
                 .map_err(|err| format!("GetUIObjectOf: {err}"))?;
-
-            let popup = CreatePopupMenu().map_err(|err| format!("CreatePopupMenu: {err}"))?;
-            menu.QueryContextMenu(popup, 0, ID_FIRST, ID_LAST, CMF_NORMAL | CMF_EXPLORE)
-                .ok()
-                .map_err(|err| format!("QueryContextMenu: {err}"))?;
-
-            // 自检模式到这里就够了：菜单项已经生成，说明 COM 与 shell 扩展都是通的。
-            if probe {
-                eprintln!("[shellmenu] probe items={}", GetMenuItemCount(Some(popup)));
-                let _ = DestroyMenu(popup);
-                return Ok("ready");
-            }
-
-            let mut point = Default::default();
-            GetCursorPos(&mut point).map_err(|err| format!("GetCursorPos: {err}"))?;
-
-            // 菜单的 owner 必须在前台，否则点菜单外面它不会消失（Win32 的老规矩）。
-            // 主进程 spawn 之后会调 `AllowSetForegroundWindow` 把这份权限授予本进程。
-            let _ = SetForegroundWindow(owner);
-            let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
-
-            SetLastError(WIN32_ERROR(0));
-            let command = TrackPopupMenuEx(
-                popup,
-                (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
-                point.x,
-                point.y,
-                owner,
-                None,
-            );
-            let menu_error = GetLastError();
-
-            let _ = DestroyMenu(popup);
-            // 菜单期间前台被我们拿走了，还回主窗口，别让终端打不进字。
-            if !parent_window.0.is_null() {
-                let _ = SetForegroundWindow(parent_window);
-            }
-
-            if command.0 == 0 {
-                // 0 既可能是「用户取消」，也可能是调用失败——只有看错误码才分得清。
-                // 失败必须报错退出（前端据此画自建菜单）；报「取消」会让右键看起来毫无反应。
-                if menu_error.0 != 0 {
-                    return Err(format!("TrackPopupMenuEx: {menu_error:?}"));
-                }
-                return Ok("cancelled");
-            }
-
-            let offset = (command.0 as u32).saturating_sub(ID_FIRST);
-            let info = CMINVOKECOMMANDINFOEX {
-                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-                fMask: CMIC_MASK_UNICODE,
-                hwnd: owner,
-                // MAKEINTRESOURCE(偏移)：低地址当整数用，不是真的指针。
-                lpVerb: PCSTR(offset as *const u8),
-                lpVerbW: PCWSTR(offset as *const u16),
-                nShow: SW_SHOWNORMAL.0,
-                ..Default::default()
-            };
-
-            menu.InvokeCommand((&info as *const CMINVOKECOMMANDINFOEX).cast::<CMINVOKECOMMANDINFO>())
-                .map_err(|err| format!("InvokeCommand: {err}"))?;
-            Ok("handled")
+            present(&menu, owner, parent_window, probe)
         })();
 
         if !pidl.is_null() {
@@ -221,6 +175,108 @@ mod imp {
         }
         let _ = DestroyWindow(owner);
         result
+    }
+
+    /// 目录自己的背景菜单：`IShellFolder::CreateViewObject` 请求到的 `IContextMenu`
+    /// 就是资源管理器里右键空白处的那一份（新建 / 粘贴 / 属性……），
+    /// 与右键某个文件得到的条目菜单不是同一个对象。
+    unsafe fn show_background(
+        path: &str,
+        parent_window: HWND,
+        probe: bool,
+    ) -> Result<&'static str, String> {
+        let wide = to_wide(path);
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None)
+            .map_err(|err| format!("SHParseDisplayName: {err}"))?;
+        let owner = create_owner_window()?;
+        let result = (|| -> Result<&'static str, String> {
+            let desktop =
+                SHGetDesktopFolder().map_err(|err| format!("SHGetDesktopFolder: {err}"))?;
+            let folder: IShellFolder = desktop
+                .BindToObject(pidl, None::<&IBindCtx>)
+                .map_err(|err| format!("BindToObject: {err}"))?;
+            let menu: IContextMenu = folder
+                .CreateViewObject(owner)
+                .map_err(|err| format!("CreateViewObject: {err}"))?;
+            present(&menu, owner, parent_window, probe)
+        })();
+
+        if !pidl.is_null() {
+            CoTaskMemFree(Some(pidl as *const core::ffi::c_void));
+        }
+        let _ = DestroyWindow(owner);
+        result
+    }
+
+    /// 弹出菜单并把用户选中的命令交回 Shell。条目菜单与目录背景菜单共用这一段。
+    unsafe fn present(
+        menu: &IContextMenu,
+        owner: HWND,
+        parent_window: HWND,
+        probe: bool,
+    ) -> Result<&'static str, String> {
+        let popup = CreatePopupMenu().map_err(|err| format!("CreatePopupMenu: {err}"))?;
+        menu.QueryContextMenu(popup, 0, ID_FIRST, ID_LAST, CMF_NORMAL | CMF_EXPLORE)
+            .ok()
+            .map_err(|err| format!("QueryContextMenu: {err}"))?;
+
+        // 自检模式到这里就够了：菜单项已经生成，说明 COM 与 shell 扩展都是通的。
+        if probe {
+            eprintln!("[shellmenu] probe items={}", GetMenuItemCount(Some(popup)));
+            let _ = DestroyMenu(popup);
+            return Ok("ready");
+        }
+
+        let mut point = Default::default();
+        GetCursorPos(&mut point).map_err(|err| format!("GetCursorPos: {err}"))?;
+
+        // 菜单的 owner 必须在前台，否则点菜单外面它不会消失（Win32 的老规矩）。
+        // 主进程 spawn 之后会调 `AllowSetForegroundWindow` 把这份权限授予本进程。
+        let _ = SetForegroundWindow(owner);
+        let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+
+        SetLastError(WIN32_ERROR(0));
+        let command = TrackPopupMenuEx(
+            popup,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+            point.x,
+            point.y,
+            owner,
+            None,
+        );
+        let menu_error = GetLastError();
+
+        let _ = DestroyMenu(popup);
+        // 菜单期间前台被我们拿走了，还回主窗口，别让终端打不进字。
+        if !parent_window.0.is_null() {
+            let _ = SetForegroundWindow(parent_window);
+        }
+
+        if command.0 == 0 {
+            // 0 既可能是「用户取消」，也可能是调用失败——只有看错误码才分得清。
+            // 失败必须报错退出（前端据此画自建菜单）；报「取消」会让右键看起来毫无反应。
+            if menu_error.0 != 0 {
+                return Err(format!("TrackPopupMenuEx: {menu_error:?}"));
+            }
+            return Ok("cancelled");
+        }
+
+        let offset = (command.0 as u32).saturating_sub(ID_FIRST);
+        let info = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: CMIC_MASK_UNICODE,
+            hwnd: owner,
+            // MAKEINTRESOURCE(偏移)：低地址当整数用，不是真的指针。
+            lpVerb: PCSTR(offset as *const u8),
+            lpVerbW: PCWSTR(offset as *const u16),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+
+        menu.InvokeCommand((&info as *const CMINVOKECOMMANDINFOEX).cast::<CMINVOKECOMMANDINFO>())
+            .map_err(|err| format!("InvokeCommand: {err}"))?;
+        Ok("handled")
     }
 
     fn to_wide(value: &str) -> Vec<u16> {

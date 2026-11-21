@@ -7,6 +7,7 @@ import {
   AUTO_REFRESH_SLOW_MS,
   AUTO_REFRESH_SLOW_TOTAL,
   autoRefreshDelay,
+  blankMenu,
   clampMenuPosition,
   clampPanelWidth,
   formatSize,
@@ -16,8 +17,12 @@ import {
   normalizePanelStore,
   panelTarget,
   parentPath,
+  parseSortDir,
+  parseSortField,
+  pathSegments,
   rowMenu,
   sameListing,
+  sortEntries,
   type FsEntry,
   type FsListing
 } from "./filePanel";
@@ -129,6 +134,38 @@ describe("parentPath", () => {
   });
 });
 
+describe("pathSegments", () => {
+  it("盘符根是第一段，后面逐级拼出可点击的完整路径", () => {
+    expect(pathSegments("C:\\work\\src")).toEqual([
+      { name: "C:", path: "C:\\" },
+      { name: "work", path: "C:\\work" },
+      { name: "src", path: "C:\\work\\src" }
+    ]);
+  });
+
+  it("UNC 把 server 与 share 合成一段，点它回到共享根", () => {
+    expect(pathSegments("\\\\server\\share\\dir")).toEqual([
+      { name: "\\\\server\\share", path: "\\\\server\\share" },
+      { name: "dir", path: "\\\\server\\share\\dir" }
+    ]);
+  });
+
+  it("空路径没有面包屑；正斜杠与重复分隔符先归一化", () => {
+    expect(pathSegments("")).toEqual([]);
+    expect(pathSegments("C:/work//src/")).toEqual([
+      { name: "C:", path: "C:\\" },
+      { name: "work", path: "C:\\work" },
+      { name: "src", path: "C:\\work\\src" }
+    ]);
+  });
+
+  it("每一段都指向真实存在的目录前缀", () => {
+    const segments = pathSegments("C:\\Users\\96485\\Documents");
+    expect(segments.at(-1)?.path).toBe("C:\\Users\\96485\\Documents");
+    expect(segments.map((segment) => segment.name)).toEqual(["C:", "Users", "96485", "Documents"]);
+  });
+});
+
 describe("panelTarget", () => {
   it("跟随模式交给后端按会话 CWD 解析", () => {
     expect(panelTarget("follow", "C:\\work", "C:\\elsewhere")).toBeNull();
@@ -217,6 +254,74 @@ describe("sameListing", () => {
   });
 });
 
+describe("排序字段与方向", () => {
+  it("方向缺省时名称正序、创建时间倒序（最新优先）", () => {
+    expect(parseSortField("created")).toBe("created");
+    expect(parseSortField("name")).toBe("name");
+    expect(parseSortField(null)).toBe("name");
+    expect(parseSortField("size")).toBe("name");
+
+    expect(parseSortDir("asc")).toBe("asc");
+    expect(parseSortDir("desc")).toBe("desc");
+    expect(parseSortDir(null, "name")).toBe("asc");
+    expect(parseSortDir(null, "created")).toBe("desc");
+    expect(parseSortDir("sideways", "created")).toBe("desc");
+  });
+
+  it("名称正序按数字大小比较，倒序完全反过来", () => {
+    const entries = [
+      entry({ name: "file10.txt" }),
+      entry({ name: "file2.txt" }),
+      entry({ name: "Alpha.txt" })
+    ];
+    expect(sortEntries(entries, "name", "asc").map((item) => item.name)).toEqual([
+      "Alpha.txt",
+      "file2.txt",
+      "file10.txt"
+    ]);
+    expect(sortEntries(entries, "name", "desc").map((item) => item.name)).toEqual([
+      "file10.txt",
+      "file2.txt",
+      "Alpha.txt"
+    ]);
+    // 不改动传入的数组
+    expect(entries[0].name).toBe("file10.txt");
+  });
+
+  it("创建时间排序时目录始终在前，组内按方向排，缺失时间排在最后", () => {
+    const entries = [
+      entry({ name: "old.txt", created_ms: 100 }),
+      entry({ name: "new.txt", created_ms: 300 }),
+      entry({ name: "no-time.txt", created_ms: null }),
+      entry({ name: "dir-new", kind: "dir", created_ms: 200 }),
+      entry({ name: "dir-old", kind: "dir", created_ms: 50 })
+    ];
+    expect(sortEntries(entries, "created", "asc").map((item) => item.name)).toEqual([
+      "dir-old",
+      "dir-new",
+      "old.txt",
+      "new.txt",
+      "no-time.txt"
+    ]);
+    expect(sortEntries(entries, "created", "desc").map((item) => item.name)).toEqual([
+      "dir-new",
+      "dir-old",
+      "new.txt",
+      "old.txt",
+      "no-time.txt"
+    ]);
+  });
+
+  it("创建时间相同时按名称兜底，方向与当前方向一致", () => {
+    const entries = [
+      entry({ name: "b.txt", created_ms: 100 }),
+      entry({ name: "a.txt", created_ms: 100 })
+    ];
+    expect(sortEntries(entries, "created", "asc").map((item) => item.name)).toEqual(["a.txt", "b.txt"]);
+    expect(sortEntries(entries, "created", "desc").map((item) => item.name)).toEqual(["b.txt", "a.txt"]);
+  });
+});
+
 describe("autoRefreshDelay", () => {
   it("普通目录 3 秒，大目录放慢到 10 秒", () => {
     expect(autoRefreshDelay(20, 0)).toBe(AUTO_REFRESH_MS);
@@ -260,6 +365,11 @@ describe("降级右键菜单", () => {
       "fill"
     ]);
   });
+
+  it("空白处的降级菜单：打开、定位、复制、刷新", () => {
+    expect(blankMenu().map((item) => item.command)).toEqual(["open", "reveal", "copy", "refresh"]);
+    expect(blankMenu()[3].label).toBe("刷新");
+  });
 });
 
 describe("菜单定位", () => {
@@ -286,9 +396,27 @@ describe("文件面板设置按会话存储", () => {
   it("旧版顶层的全局设置迁移成默认值，已有会话仍按它显示", () => {
     const store = normalizePanelStore({ expanded: false, width: 240, mode: "fixed", auto: true, showHidden: true });
     expect(store.expanded).toBe(false);
+    expect(store.collapsed).toBe(false);
     expect(store.width).toBe(240);
     expect(store.defaults).toEqual({ mode: "fixed", auto: true, showHidden: true, path: null });
     expect(store.sessions).toEqual({});
+  });
+
+  it("整栏折叠与子栏折叠是两个独立状态，缺省都按展开处理", () => {
+    expect(normalizePanelStore(null)).toMatchObject({ collapsed: false, expanded: true });
+    // 只收起整栏时，子栏自己的折叠状态不被改写
+    expect(normalizePanelStore({ collapsed: true })).toMatchObject({ collapsed: true, expanded: true });
+    // 只收起文件子栏时，整栏仍展开
+    expect(normalizePanelStore({ expanded: false })).toMatchObject({ collapsed: false, expanded: false });
+    expect(normalizePanelStore({ collapsed: true, expanded: false })).toMatchObject({
+      collapsed: true,
+      expanded: false
+    });
+  });
+
+  it("整栏折叠只认布尔 true，别的值都当展开", () => {
+    expect(normalizePanelStore({ collapsed: "true" }).collapsed).toBe(false);
+    expect(normalizePanelStore({ collapsed: 1 }).collapsed).toBe(false);
   });
 
   it("每个会话各存一套：跟随/自动/隐藏互不影响", () => {

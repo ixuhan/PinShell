@@ -2,26 +2,37 @@
 // 排序、隐藏过滤与截断都在 core-domain；这里不做第二份规则。
 
 import { invoke } from "@tauri-apps/api/core";
+import { setupFoldPanel } from "./panelFold";
+import { onLocaleChange, t } from "./i18n";
+import { closePopupMenu, isPopupMenuOpen, showPopupMenu } from "./popupMenu";
 import {
   AUTO_REFRESH_MS,
   autoRefreshDelay,
-  clampMenuPosition,
+  blankMenu,
   clampPanelWidth,
   formatSize,
   formatTime,
   joinPath,
   normalizePanelStore,
+  normalizePath,
   panelTarget,
   parentPath,
+  parseSortDir,
+  parseSortField,
+  pathSegments,
   rowMenu,
   sameListing,
+  sortEntries,
+  SORT_DIR_KEY,
+  SORT_FIELD_KEY,
   type FilePanelMode,
   type FilePanelPrefs,
   type FilePanelStore,
+  type FileSortDir,
+  type FileSortField,
   type FsEntry,
   type FsListing,
   type MenuCommand,
-  type MenuItem,
   type RowKind
 } from "./filePanel";
 // 拖动调宽的手势与 body 上的类名左右两栏共用，别各自再写一份
@@ -56,9 +67,8 @@ function loadStored(): FilePanelStore {
 export function setupFilePanel(deps: FilePanelDeps) {
   const root = document.getElementById("files") as HTMLElement;
   const expandBtn = document.getElementById("files-expand") as HTMLButtonElement;
-  const collapseBtn = document.getElementById("files-collapse") as HTMLButtonElement;
   const modeBtn = document.getElementById("files-mode") as HTMLButtonElement;
-  const sortBtn = document.getElementById("files-sort") as HTMLSelectElement;
+  const sortBtn = document.getElementById("files-sort") as HTMLButtonElement;
   const refreshBtn = document.getElementById("files-refresh") as HTMLButtonElement;
   const hiddenBtn = document.getElementById("files-hidden") as HTMLButtonElement;
   const pathEl = document.getElementById("files-path") as HTMLDivElement;
@@ -73,8 +83,31 @@ export function setupFilePanel(deps: FilePanelDeps) {
     clampPanelWidth(desired, window.innerWidth, sidebar?.getBoundingClientRect().width ?? 196);
 
   const stored = loadStored();
+  /// 整栏是否向右收起成 26px 竖条（窗口级布局）
+  let collapsed = stored.collapsed;
+  /// 文件子栏是否收起（只隐藏列表，标题栏留在原处）
   let expanded = stored.expanded;
   let width = stored.width;
+
+  // 文件子栏的标题栏折叠：与串口、快捷指令共用 panelFold，样式与交互一致
+  const filesBody = document.getElementById("files-body");
+  /// 文件子栏收起时让快捷指令吃掉剩余高度，把「文件」标题栏顶到右栏底部（见样式里的 files-folded）。
+  const applyFoldClass = (collapsed: boolean) => filesBody?.classList.toggle("files-folded", collapsed);
+  const fold = setupFoldPanel({
+    root: document.getElementById("files-panel") as HTMLElement,
+    toggle: document.getElementById("files-toggle") as HTMLElement,
+    chevron: document.getElementById("files-chevron"),
+    label: t("files.title"),
+    collapsed: !expanded,
+    onChange: (next) => {
+      expanded = !next;
+      applyFoldClass(next);
+      save();
+      deps.layoutChanged();
+      scheduleAuto();
+      if (expanded && !lastListing) void reload();
+    }
+  });
   /// 每个会话各自的设置；`defaults` 给还没有自己记录的会话（也是旧版数据的迁移落点）
   const sessions = stored.sessions;
   let defaults = stored.defaults;
@@ -83,8 +116,13 @@ export function setupFilePanel(deps: FilePanelDeps) {
   let mode: FilePanelMode = defaults.mode;
   let showHidden = defaults.showHidden;
   let auto = defaults.auto;
-  let sortMode: "name" | "created" = localStorage.getItem("pinshell.files.sort") === "created" ? "created" : "name";
+  let sortField: FileSortField = parseSortField(localStorage.getItem(SORT_FIELD_KEY));
+  let sortDir: FileSortDir = parseSortDir(localStorage.getItem(SORT_DIR_KEY), sortField);
   let currentPath: string | null = null;
+  /// 路径栏此刻显示的路径：面包屑与「编辑路径」都用它，错误目录也能显示。
+  let shownPath = "";
+  /// 路径栏正在输入：自动刷新重画列表时不能把输入框换掉，否则打了一半的路径会丢。
+  let pathEditing = false;
   let lastListing: FsListing | null = null;
   /// 列表拉不到时后端给不出 `parent`，这份值由前端按路径算出来，
   /// 保证「读不出来的目录」也能通过列表里的 `..` 退出去。
@@ -99,73 +137,27 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   // ---------- 右键菜单 ----------
   // 原生菜单由 helper 进程弹（系统 Shell 的 IContextMenu）；它起不来时用这份自建
-  // 菜单兜底，所以两边都在。菜单不抢焦点：键盘走 document 捕获阶段，点外面即关。
+  // 菜单兜底，所以两边都在。自建菜单走 `popupMenu`，与会话菜单共用一套字体与键盘操作。
   interface MenuTarget {
     path: string;
     kind: RowKind;
   }
-  const menuEl = document.createElement("div");
-  menuEl.className = "f-menu";
-  menuEl.hidden = true;
-  menuEl.setAttribute("role", "menu");
-  document.body.append(menuEl);
-  let menuTarget: MenuTarget | null = null;
-  let menuItems: MenuItem[] = [];
-  let menuIndex = -1;
   /// 右键序号：期间又右键了别的行，先回来的那次就作废（不能弹两个菜单）
   let menuToken = 0;
 
-  function hideMenu() {
-    if (menuEl.hidden) return;
-    menuEl.hidden = true;
-    menuEl.textContent = "";
-    menuTarget = null;
-    menuItems = [];
-    menuIndex = -1;
-  }
-
-  function setMenuIndex(index: number) {
-    if (!menuItems.length) return;
-    menuIndex = (index + menuItems.length) % menuItems.length;
-    Array.from(menuEl.children).forEach((row, position) =>
-      row.classList.toggle("sel", position === menuIndex)
-    );
-  }
-
   function showFallbackMenu(x: number, y: number, target: MenuTarget) {
-    menuTarget = target;
-    menuItems = rowMenu(target.kind);
-    menuIndex = -1;
-    menuEl.textContent = "";
-    menuItems.forEach((item, index) => {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "f-menu-item";
-      row.setAttribute("role", "menuitem");
-      row.textContent = item.label;
-      row.addEventListener("mousedown", (event) => event.preventDefault());
-      row.addEventListener("click", () => void runMenuCommand(item.command));
-      row.addEventListener("pointerenter", () => setMenuIndex(index));
-      menuEl.append(row);
-    });
-    // 先渲染再量尺寸：菜单贴到右下角时要往回收，量 0×0 会把它顶到角上
-    menuEl.hidden = false;
-    const rect = menuEl.getBoundingClientRect();
-    const spot = clampMenuPosition(
-      x,
-      y,
-      rect.width,
-      rect.height,
-      window.innerWidth,
-      window.innerHeight
+    showPopupMenu(
+      { x, y },
+      rowMenu(target.kind).map((item) => ({
+        label: item.label,
+        run: () => void runMenuCommand(target, item.command)
+      })),
+      { minWidth: 180 }
     );
-    menuEl.style.left = `${spot.x}px`;
-    menuEl.style.top = `${spot.y}px`;
-    setMenuIndex(0);
   }
 
   async function openContextMenu(x: number, y: number, target: MenuTarget) {
-    hideMenu();
+    closePopupMenu();
     const mine = ++menuToken;
     try {
       const outcome = await invoke<string>("fs_context_menu", { path: target.path });
@@ -177,10 +169,33 @@ export function setupFilePanel(deps: FilePanelDeps) {
     }
   }
 
-  async function runMenuCommand(command: MenuCommand) {
-    const target = menuTarget;
-    hideMenu();
-    if (!target) return;
+  /// 空白处的原生菜单：目录自己的背景菜单（新建 / 粘贴 / 属性……），
+  /// 与右键某个文件时的条目菜单不是同一份，所以单独走 `background`。
+  async function openBlankMenu(x: number, y: number, path: string) {
+    closePopupMenu();
+    const mine = ++menuToken;
+    try {
+      const outcome = await invoke<string>("fs_context_menu", { path, background: true });
+      if (mine !== menuToken) return;
+      if (outcome === "unavailable") showBlankFallback(x, y, path);
+    } catch {
+      if (mine !== menuToken) return;
+      showBlankFallback(x, y, path);
+    }
+  }
+
+  function showBlankFallback(x: number, y: number, path: string) {
+    showPopupMenu(
+      { x, y },
+      blankMenu().map((item) => ({
+        label: item.label,
+        run: () => void runMenuCommand({ path, kind: "dir" }, item.command)
+      })),
+      { minWidth: 180 }
+    );
+  }
+
+  async function runMenuCommand(target: MenuTarget, command: MenuCommand) {
     try {
       if (command === "open") {
         if (target.kind === "dir" || target.kind === "parent") {
@@ -192,7 +207,9 @@ export function setupFilePanel(deps: FilePanelDeps) {
         await invoke("fs_reveal", { path: target.path });
       } else if (command === "copy") {
         await navigator.clipboard.writeText(target.path);
-        footEl.textContent = "已复制路径";
+        footEl.textContent = t("files.copied");
+      } else if (command === "refresh") {
+        await reload();
       } else {
         deps.fillInput(target.path);
       }
@@ -201,45 +218,6 @@ export function setupFilePanel(deps: FilePanelDeps) {
     }
   }
 
-  // 菜单打开时，键盘事件在捕获阶段截住：输入条仍有焦点也不能把 ↑↓/Enter 吃掉
-  document.addEventListener(
-    "keydown",
-    (event) => {
-      if (menuEl.hidden) return;
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        hideMenu();
-      } else if (event.key === "ArrowDown") {
-        event.preventDefault();
-        event.stopPropagation();
-        setMenuIndex(menuIndex + 1);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        event.stopPropagation();
-        setMenuIndex(menuIndex - 1);
-      } else if (event.key === "Enter") {
-        event.preventDefault();
-        event.stopPropagation();
-        const item = menuItems[menuIndex];
-        if (item) void runMenuCommand(item.command);
-      }
-    },
-    true
-  );
-
-  document.addEventListener(
-    "pointerdown",
-    (event) => {
-      if (menuEl.hidden) return;
-      if (event.target instanceof Node && menuEl.contains(event.target)) return;
-      hideMenu();
-    },
-    true
-  );
-  window.addEventListener("blur", hideMenu);
-  window.addEventListener("resize", hideMenu);
-
   /// 当前会话此刻的设置快照。跟随模式不记路径：路径由后端按 CWD 解析。
   function capturePrefs(): FilePanelPrefs {
     return { mode, auto, showHidden, path: mode === "fixed" ? currentPath : null };
@@ -247,7 +225,10 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   function persist() {
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ expanded, width, defaults, sessions }));
+      localStorage.setItem(
+        STORE_KEY,
+        JSON.stringify({ collapsed, expanded, width, defaults, sessions })
+      );
     } catch {
       // 存不下就只影响下次打开的默认值，不打断使用
     }
@@ -279,6 +260,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     auto = prefs.auto;
     showHidden = prefs.showHidden;
     currentPath = prefs.path;
+    pathEditing = false;
     // 上一个会话的列表、选中行与菜单都不能留在新会话里
     lastListing = null;
     selected = null;
@@ -286,38 +268,64 @@ export function setupFilePanel(deps: FilePanelDeps) {
     upTarget = null;
     autoFailures = 0;
     stopAuto();
-    hideMenu();
+    closePopupMenu();
     syncChrome();
   }
 
+  /// 文件子栏折叠：只收起内容，标题栏与工具按钮留在原处。
+  /// 整栏折叠是另一件事（`applyCollapsed`），两者互不覆盖。
+  /// 文件子栏折叠状态上 DOM。只在初始化时调用：之后由 `fold` 的 onChange 接管。
   function applyExpanded() {
-    root.classList.toggle("collapsed", !expanded);
-    expandBtn.hidden = expanded;
-    save();
-    deps.layoutChanged();
-    // 收起时 canAuto() 为 false 会停掉定时器；展开则重新开始计时
+    fold.set(!expanded, true);
+    applyFoldClass(!expanded);
+  }
+
+  /// 整栏折叠：宽度收成 26px 竖条，只留一个竖排的展开按钮。
+  /// `silent` 为 true 时不重排终端（初始化阶段由调用方统一做一次）。
+  function applyCollapsed(silent = false) {
+    root.classList.toggle("collapsed", collapsed);
+    expandBtn.hidden = !collapsed;
+    expandBtn.title = t("files.expand");
+    expandBtn.setAttribute("aria-label", t("files.expand"));
+    persist();
+    // 收起时没有列表可刷，展开时立刻补一次
     scheduleAuto();
+    if (!silent) deps.layoutChanged();
+  }
+
+  /// 设置整栏折叠状态。展开时若还没有列表就顺手拉一次。
+  function setCollapsed(next: boolean) {
+    if (next === collapsed) return;
+    collapsed = next;
+    applyCollapsed();
+    if (!collapsed && !lastListing) void reload();
+  }
+
+  /// 排序按钮上的文案：字段 + 方向箭头。
+  function sortLabel(field: FileSortField, dir: FileSortDir): string {
+    const name = field === "name" ? t("files.sortName") : t("files.sortCreated");
+    return `${name} ${dir === "asc" ? "↑" : "↓"}`;
   }
 
   /// 与列表内容无关的按钮状态：自动刷新跳过重画时，这些也要跟着更新。
   function syncChrome() {
-    modeBtn.textContent = mode === "follow" ? "跟随" : "固定";
-    modeBtn.title =
-      mode === "follow"
-        ? "面板跟随当前会话的 CWD；点一下改成固定路径"
-        : "面板停在固定路径；点一下恢复跟随当前会话";
+    modeBtn.textContent = mode === "follow" ? t("files.follow") : t("files.fixed");
+    modeBtn.title = mode === "follow" ? t("files.followHint") : t("files.fixedHint");
     modeBtn.classList.toggle("on", mode === "follow");
     hiddenBtn.classList.toggle("on", showHidden);
     autoBtn.classList.toggle("on", auto);
     const seconds = Math.round(autoRefreshDelay(lastListing?.total ?? 0, 0) / 1000);
     autoBtn.title = auto
-      ? `自动刷新已开：当前目录每 ${seconds} 秒刷新一次，点一下关闭`
-      : `自动刷新：每 ${AUTO_REFRESH_MS / 1000} 秒刷新一次（大目录自动放慢），点一下开启`;
+      ? t("files.autoOn", { n: seconds })
+      : t("files.autoOff", { n: AUTO_REFRESH_MS / 1000 });
+    autoBtn.setAttribute("aria-label", t("files.auto"));
     refreshedEl.dataset.auto = String(auto);
     refreshedEl.hidden = !auto;
-    if (auto && !refreshedEl.textContent) refreshedEl.textContent = "等待刷新";
-    sortBtn.value = sortMode;
-    sortBtn.title = sortMode === "name" ? "按名称排序" : "按创建时间排序，最新优先";
+    if (auto && !refreshedEl.textContent) refreshedEl.textContent = t("files.waiting");
+    // 排序按钮的文案就是当前排序方式；点它弹出的菜单里再选字段与方向
+    const sort = sortLabel(sortField, sortDir);
+    sortBtn.textContent = sort;
+    sortBtn.title = t("files.sortHint", { sort });
     sortBtn.setAttribute("aria-label", sortBtn.title);
   }
 
@@ -325,34 +333,109 @@ export function setupFilePanel(deps: FilePanelDeps) {
     const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
       .map((part) => String(part).padStart(2, "0"))
       .join(":");
-    refreshedEl.textContent = `刷新于：${time}`;
+    refreshedEl.textContent = t("files.refreshedAt", { time });
     refreshedEl.dataset.auto = String(auto);
     refreshedEl.hidden = !auto;
   }
 
+  /// 路径栏：可点的面包屑 + 右侧「编辑路径」。单击某一段直接进那个目录，
+  /// 点 ✎（或双击路径栏空白处）换成输入框，输入完整路径后回车跳转。
+  function showPath(path: string) {
+    shownPath = path;
+    if (pathEditing) return;
+    pathEl.textContent = "";
+    pathEl.title = path;
+    if (!path) {
+      pathEl.textContent = t("files.noSession");
+      return;
+    }
+    const crumbs = document.createElement("div");
+    crumbs.className = "f-crumbs";
+    pathSegments(path).forEach((segment, index) => {
+      if (index > 0) {
+        const sep = document.createElement("span");
+        sep.className = "f-crumb-sep";
+        sep.textContent = "›";
+        crumbs.append(sep);
+      }
+      const crumb = document.createElement("span");
+      crumb.className = "f-crumb";
+      crumb.textContent = segment.name;
+      crumb.title = segment.path;
+      crumb.addEventListener("mousedown", (event) => event.preventDefault());
+      crumb.addEventListener("click", () => {
+        if (segment.path !== currentPath) enter(segment.path);
+      });
+      crumbs.append(crumb);
+    });
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "f-path-edit";
+    edit.textContent = "✎";
+    edit.title = t("files.editPath");
+    edit.setAttribute("aria-label", edit.title);
+    edit.addEventListener("mousedown", (event) => event.preventDefault());
+    edit.addEventListener("click", () => startEditPath());
+    pathEl.append(crumbs, edit);
+  }
+
+  /// 路径栏进入编辑态：输入完整路径，回车跳转、Esc 或失焦还原。
+  function startEditPath() {
+    if (!shownPath) return;
+    const input = document.createElement("input");
+    input.className = "f-path-input";
+    input.type = "text";
+    input.value = shownPath;
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    pathEl.textContent = "";
+    pathEl.append(input);
+    pathEditing = true;
+    let done = false;
+    const restore = () => {
+      if (done) return;
+      done = true;
+      pathEditing = false;
+      showPath(shownPath);
+    };
+    input.addEventListener("keydown", (event) => {
+      // 路径输入框里的按键不往外走：否则 Enter / Ctrl+R 会被全局快捷键拿走
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const next = normalizePath(input.value);
+        done = true;
+        pathEditing = false;
+        if (next && next !== shownPath) {
+          enter(next);
+        } else {
+          showPath(shownPath);
+        }
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        restore();
+      }
+    });
+    input.addEventListener("blur", restore);
+    // 编辑态允许放光标，所以不阻止默认（单击面包屑时才阻止，避免抢走终端焦点）
+    input.addEventListener("mousedown", (event) => event.stopPropagation());
+    input.focus();
+    input.select();
+  }
+
   function render(listing: FsListing) {
     // 列表重建时菜单还开着，就会指向一行已经不存在的条目
-    hideMenu();
+    closePopupMenu();
     // 同一目录自动刷新时保住滚动位置与选中行；换了目录才从头开始
     const sameDir = lastListing !== null && lastListing.path === listing.path;
     const keepScroll = sameDir ? listEl.scrollTop : 0;
     const keepSelected = sameDir ? selectedName : null;
 
     lastListing = listing;
-    const entries = [...listing.entries].sort((a, b) => {
-      if (sortMode === "created") {
-        if (a.kind === "dir" && b.kind !== "dir") return -1;
-        if (a.kind !== "dir" && b.kind === "dir") return 1;
-        const timeOrder = (b.created_ms ?? -Infinity) - (a.created_ms ?? -Infinity);
-        const nameOrder = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-        return Number.isNaN(timeOrder) || timeOrder === 0 ? nameOrder : timeOrder;
-      }
-      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-    });
+    const entries = sortEntries(listing.entries, sortField, sortDir);
     // 跟随模式下后端按会话 CWD 解析出了实际路径；固定模式下就是请求的那条
     currentPath = listing.path;
-    pathEl.textContent = listing.path;
-    pathEl.title = listing.path;
+    showPath(listing.path);
     upTarget = listing.parent;
 
     listEl.textContent = "";
@@ -371,7 +454,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     if (!listing.entries.length) {
       const empty = document.createElement("div");
       empty.className = "f-empty";
-      empty.textContent = listing.hidden_count && !showHidden ? "（只有隐藏项）" : "（空目录）";
+      empty.textContent = listing.hidden_count && !showHidden ? t("files.emptyHidden") : t("files.emptyDir");
       listEl.append(empty);
     }
     for (const entry of entries) {
@@ -385,9 +468,9 @@ export function setupFilePanel(deps: FilePanelDeps) {
     }
     listEl.scrollTop = keepScroll;
 
-    const parts = [`${listing.entries.length} 项`];
-    if (listing.hidden_count) parts.push(`隐藏 ${listing.hidden_count}`);
-    if (listing.truncated) parts.push(`只显示前 ${listing.entries.length} 项`);
+    const parts = [t("files.count", { n: listing.entries.length })];
+    if (listing.hidden_count) parts.push(t("files.hiddenCount", { n: listing.hidden_count }));
+    if (listing.truncated) parts.push(t("files.truncated", { n: listing.entries.length }));
     footEl.textContent = parts.join(" · ");
   }
 
@@ -430,7 +513,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
   function renderRow(dir: string, entry: FsEntry): HTMLElement {
     const row = document.createElement("div");
     row.className = "f-row" + (entry.kind === "dir" ? " dir" : "");
-    row.title = entry.name + (entry.hidden ? "（隐藏）" : "");
+    row.title = entry.name + (entry.hidden ? t("files.hiddenMark") : "");
 
     const icon = document.createElement("span");
     icon.className = "f-icon";
@@ -443,7 +526,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       const mark = document.createElement("span");
       mark.className = "f-link";
       mark.textContent = "↗";
-      mark.title = "符号链接";
+      mark.title = t("files.link");
       name.append(mark);
     }
 
@@ -485,15 +568,58 @@ export function setupFilePanel(deps: FilePanelDeps) {
     void reload();
   }
 
-  /// 现在允许自动刷新吗：开关开着、面板展开、有会话、窗口可见、且不在拖拽中。
+  // ---------- 路径栏 ----------
+  // 单击面包屑进目录；编辑按钮（或双击路径栏空白处）进编辑态。
+  pathEl.addEventListener("mousedown", (event) => {
+    // 编辑态要允许放光标；其余情况阻止默认，别把焦点从终端抢走
+    if ((event.target as HTMLElement).closest(".f-path-input")) return;
+    event.preventDefault();
+  });
+  pathEl.addEventListener("dblclick", (event) => {
+    if ((event.target as HTMLElement).closest(".f-path-input, .f-path-edit, .f-crumb")) return;
+    startEditPath();
+  });
+
+  // ---------- 列表空白处 ----------
+  // 点空白：让列表自己拿到焦点（随后 F5 才有落点），并清掉行选中。
+  // 行自己的 mousedown 会阻止默认，这里按事件目标区分，不抢终端焦点。
+  listEl.addEventListener("mousedown", (event) => {
+    const target = event.target as HTMLElement;
+    if (target !== listEl && !target.classList.contains("f-empty")) return;
+    event.preventDefault();
+    listEl.focus();
+    selected?.classList.remove("sel");
+    selected = null;
+    selectedName = null;
+  });
+  // 空白处右键：目录自己的 Shell 背景菜单（新建 / 粘贴 / 属性……）
+  listEl.addEventListener("contextmenu", (event) => {
+    const target = event.target as HTMLElement;
+    if (target !== listEl && !target.classList.contains("f-empty")) return;
+    event.preventDefault();
+    listEl.focus();
+    const path = lastListing?.path ?? currentPath ?? shownPath;
+    if (path) void openBlankMenu(event.clientX, event.clientY, path);
+  });
+  // 文件栏里按 F5 刷新：只在列表（空白处点过之后）有焦点时接管，
+  // 终端里的 F5 照常发给 Shell。
+  listEl.addEventListener("keydown", (event) => {
+    if (event.key !== "F5") return;
+    event.preventDefault();
+    event.stopPropagation();
+    void reload();
+  });
+
+  /// 现在允许自动刷新吗：开关开着、面板展开、整栏没收起、有会话、窗口可见、且不在拖拽中。
   /// 任一不满足就不排期，省掉白读盘，也不会在拖动面板时插进一次重绘。
   function canAuto(): boolean {
     return (
       auto &&
       expanded &&
+      !collapsed &&
       deps.sessionId() !== "" &&
       document.visibilityState === "visible" &&
-      menuEl.hidden &&
+      !isPopupMenuOpen() &&
       !document.body.classList.contains(DRAGGING_CLASS)
     );
   }
@@ -529,7 +655,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     // 切了会话就先换上它自己的设置，再按那套设置决定列哪个目录
     bindSession(id);
     if (!id) {
-      pathEl.textContent = "无会话";
+      showPath("");
       listEl.textContent = "";
       footEl.textContent = "";
       upTarget = null;
@@ -562,8 +688,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       // 头部 ↑ 与列表顶部的「..」照常可用（否则一个没有权限的目录会把人卡死在里面）。
       const shown = target ?? currentPath ?? deps.cwdOf(id) ?? "";
       upTarget = parentPath(shown);
-      pathEl.textContent = shown;
-      pathEl.title = shown;
+      showPath(shown);
       listEl.textContent = "";
       if (upTarget) listEl.append(renderParentRow(upTarget));
       const row = document.createElement("div");
@@ -579,26 +704,43 @@ export function setupFilePanel(deps: FilePanelDeps) {
   }
 
   // 面板按钮一律不抢焦点：点完还能接着在终端里敲键盘
-  for (const button of [expandBtn, collapseBtn, modeBtn, refreshBtn, hiddenBtn, autoBtn]) {
+  for (const button of [expandBtn, modeBtn, sortBtn, refreshBtn, hiddenBtn, autoBtn]) {
     button.addEventListener("mousedown", (event) => event.preventDefault());
   }
 
-  sortBtn.addEventListener("change", () => {
-    sortMode = sortBtn.value === "created" ? "created" : "name";
-    localStorage.setItem("pinshell.files.sort", sortMode);
+  // 排序方式：按钮上是当前值，点开是一份菜单（原生 select 的下拉列表由系统绘制，
+  // 字体与配色都跟主界面不一致，暗黑主题下尤其突兀）。
+  // 菜单把「字段 × 方向」四种组合直接列出来，一次点击就选完。
+  function setSort(field: FileSortField, dir: FileSortDir) {
+    if (field === sortField && dir === sortDir) return;
+    sortField = field;
+    sortDir = dir;
+    localStorage.setItem(SORT_FIELD_KEY, field);
+    localStorage.setItem(SORT_DIR_KEY, dir);
     syncChrome();
     if (lastListing) render(lastListing);
+  }
+
+  sortBtn.addEventListener("click", () => {
+    const options: Array<{ field: FileSortField; dir: FileSortDir; label: string }> = [
+      { field: "name", dir: "asc", label: t("files.sortNameAsc") },
+      { field: "name", dir: "desc", label: t("files.sortNameDesc") },
+      { field: "created", dir: "asc", label: t("files.sortCreatedAsc") },
+      { field: "created", dir: "desc", label: t("files.sortCreatedDesc") }
+    ];
+    showPopupMenu(
+      sortBtn,
+      options.map((option) => ({
+        label: option.label,
+        checked: option.field === sortField && option.dir === sortDir,
+        run: () => setSort(option.field, option.dir)
+      })),
+      { minWidth: 168 }
+    );
   });
 
-  expandBtn.addEventListener("click", () => {
-    expanded = true;
-    applyExpanded();
-    if (!lastListing) void reload();
-  });
-  collapseBtn.addEventListener("click", () => {
-    expanded = false;
-    applyExpanded();
-  });
+  // 整栏展开的入口只剩收起后那条竖条；收起动作由标题栏上的按钮发起
+  expandBtn.addEventListener("click", () => setCollapsed(false));
   refreshBtn.addEventListener("click", () => void reload());
   autoBtn.addEventListener("click", () => {
     auto = !auto;
@@ -655,16 +797,20 @@ export function setupFilePanel(deps: FilePanelDeps) {
   });
 
   if (width > 0) {
-    // 上次退出时的窗口可能比现在宽：先夹一遍，别一启动就把终端挤没
+    // 上次退出时的窗口可能比现在宽：先夹一遍，别把终端挤到看不见
     width = clampWidth(width);
     root.style.setProperty("--files-width", `${width}px`);
   }
   syncChrome();
+  // 整栏折叠先上 DOM：子栏折叠状态与之无关，两者分别恢复
+  applyCollapsed(true);
   applyExpanded();
+  // 初始化阶段统一重排一次，别让上面两步各触发一遍终端 fit
+  deps.layoutChanged();
 
   // 窗口变窄时把已保存的宽度重新夹一遍，否则固定的 px 会把终端挤到看不见
   window.addEventListener("resize", () => {
-    if (!width || !expanded) return;
+    if (!width || collapsed) return;
     const next = clampWidth(width);
     if (next === width) return;
     width = next;
@@ -682,6 +828,15 @@ export function setupFilePanel(deps: FilePanelDeps) {
     }
   });
 
+  // 语言变了：静态标注由 main 统一刷，这里补面板名、按钮与当前列表
+  onLocaleChange(() => {
+    const title = document.getElementById("files-panel")?.querySelector(".panel-title");
+    if (title) title.textContent = t("files.title");
+    fold.set(fold.collapsed, true);
+    syncChrome();
+    if (lastListing) render(lastListing);
+  });
+
   return {
     /// 会话切换后调用：跟随模式会立刻按新会话的 CWD 重画
     reload,
@@ -693,6 +848,15 @@ export function setupFilePanel(deps: FilePanelDeps) {
     onCwd(id: string) {
       if (mode !== "follow" || id !== deps.sessionId()) return;
       void reload();
-    }
+    },
+    /// 整栏是否收起
+    get collapsed() {
+      return collapsed;
+    },
+    /// 切换整栏折叠；标题栏按钮与「展开」竖条都走这里
+    toggle() {
+      setCollapsed(!collapsed);
+    },
+    setCollapsed
   };
 }

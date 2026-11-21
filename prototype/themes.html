@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PinShell · 主题原型（9 套）</title>
+<style>
+  :root{
+    --page-bg:#f3f4f6; --page-panel:#ffffff; --page-line:#e2e5e9;
+    --page-text:#171b21; --page-muted:#59636f; --page-faint:#8b96a3;
+    --ui: system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
+    --mono:"Cascadia Mono","JetBrains Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--page-bg);color:var(--page-text);font-family:var(--ui);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1280px;margin:0 auto;padding:36px 28px 80px}
+
+  header.top{display:flex;flex-direction:column;gap:9px;margin-bottom:20px}
+  .eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--page-faint)}
+  h1{margin:0;font-size:26px;line-height:1.25;letter-spacing:-.012em;font-weight:650}
+  h1 span{color:var(--page-faint);font-weight:500}
+  .lede{margin:0;max-width:80ch;font-size:13.5px;line-height:1.75;color:var(--page-muted)}
+  .lede code{font-family:var(--mono);font-size:11.5px;background:#e7eaee;border-radius:4px;padding:1px 5px;color:#2b323b}
+
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:20px 0 16px}
+  .chip{display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 11px 0 9px;
+        border:1px solid var(--page-line);border-radius:9px;background:var(--page-panel);
+        color:var(--page-text);font:inherit;font-size:12.5px;cursor:pointer;transition:.12s}
+  .chip:hover{border-color:#c4cbd4}
+  .chip .dot{width:11px;height:11px;border-radius:3px;border:1px solid rgba(0,0,0,.12)}
+  .chip .new{font-size:9.5px;letter-spacing:.06em;color:#8a5a16;background:#fbf0d8;border-radius:4px;padding:1px 4px}
+  .chip.on{border-color:#1a1f26;box-shadow:0 0 0 1px #1a1f26 inset;font-weight:600}
+
+  /* ---------- 大窗口 ---------- */
+  .stage{background:var(--page-panel);border:1px solid var(--page-line);border-radius:14px;padding:12px}
+  .stage-win{height:664px;border-radius:9px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,32,.08)}
+  .stage-foot{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding:12px 4px 2px;font-size:12.5px;color:var(--page-muted)}
+  .stage-foot b{color:var(--page-text);font-size:13.5px;font-weight:650}
+
+  .metrics{display:flex;flex-wrap:wrap;gap:7px;margin-left:auto}
+  .metric{font-family:var(--mono);font-size:11px;padding:3px 7px;border-radius:6px;background:#f2f4f6;border:1px solid var(--page-line);color:#3d4650}
+  .metric.bad{background:#fdeceb;border-color:#f3cfcb;color:#93231d}
+
+  /* ---------- 画廊 ---------- */
+  h2{margin:38px 0 4px;font-size:15px;font-weight:650;letter-spacing:-.005em}
+  .sub{margin:0 0 18px;font-size:12.5px;color:var(--page-muted)}
+  .gallery{display:flex;flex-wrap:wrap;gap:18px}
+  .card{width:543px;padding:0;border:1px solid var(--page-line);border-radius:12px;background:var(--page-panel);
+        overflow:hidden;cursor:pointer;text-align:left;font:inherit;color:inherit;transition:.14s}
+  .card:hover{border-color:#b9c1cb;box-shadow:0 6px 20px -12px rgba(16,24,32,.35)}
+  .card.on{border-color:#1a1f26;box-shadow:0 0 0 1px #1a1f26}
+  .card-win{width:543px;height:341px;overflow:hidden;background:#000}
+  .card-win .win{width:1180px;height:742px;transform:scale(.46);transform-origin:0 0;pointer-events:none}
+  .card-meta{padding:11px 13px 13px;border-top:1px solid var(--page-line)}
+  .card-name{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650}
+  .card-name em{font-style:normal;font-weight:400;font-size:11px;color:var(--page-faint);font-family:var(--mono)}
+  .card-desc{margin-top:3px;font-size:12px;line-height:1.55;color:var(--page-muted)}
+  .swatches{display:flex;gap:3px;margin-top:9px}
+  .swatches i{display:block;flex:1;height:8px;border-radius:2px;border:1px solid rgba(0,0,0,.07)}
+
+  footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--page-line);
+         font-size:12.5px;line-height:1.85;color:var(--page-muted);max-width:90ch}
+  footer b{color:var(--page-text)}
+  footer code{font-family:var(--mono);font-size:11.5px;background:#e7eaee;border-radius:4px;padding:1px 5px}
+
+  /* =======================================================================
+     下面是应用外壳的 1:1 复刻（尺寸取自 src/styles.css），配色全部走变量
+     ======================================================================= */
+  .win{display:flex;flex-direction:column;height:100%;background:var(--bg-app);color:var(--text);
+       font:12px/1.6 var(--mono);overflow:hidden}
+
+  /* 标题栏 */
+  .win .tb{flex:none;height:32px;display:flex;align-items:stretch;background:var(--bg-chrome);
+           border-bottom:1px solid var(--border-subtle);font:11px/1 var(--ui);color:var(--text-muted);user-select:none}
+  .win .tb-title{display:flex;align-items:center;padding:0 10px 0 12px;color:var(--text);letter-spacing:.3px;flex:1;min-width:0}
+  .win .tb-tools{display:flex;align-items:center;gap:2px;padding:0 4px}
+  .win .tbtn{width:30px;height:24px;display:grid;place-items:center;border:0;border-radius:4px;
+             background:transparent;color:var(--text-muted);padding:0}
+  .win .tbtn.hot{background:var(--border-subtle);color:var(--text-strong)}
+  .win .tbtn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.1;stroke-linejoin:round}
+  .win .tbtn .barfill{fill:currentColor;stroke:none;opacity:.85}
+  .win .tbtn .gearf{fill:currentColor;stroke:none}
+  .win .tb-actions{display:flex}
+  .win .wbtn{width:44px;display:grid;place-items:center;border:0;background:transparent;color:var(--text-muted);padding:0}
+  .win .wbtn svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1}
+  .win .wbtn.close{background:var(--danger-solid);color:var(--on-danger)}
+
+  .win .body{flex:1 1 auto;display:flex;min-height:0}
+
+  /* 左栏 */
+  .win .sidebar{width:196px;flex:none;display:flex;flex-direction:column;background:var(--bg-chrome);
+                border-right:1px solid var(--border-subtle);user-select:none}
+  .win .panel{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0}
+  .win .panel.grow{flex:1 1 auto}
+  .win .phead{flex:none;min-height:28px;display:flex;align-items:center;gap:4px;padding:0 6px 0 4px;
+              border-bottom:1px solid var(--border-subtle);color:var(--text-muted);font-size:11px;letter-spacing:.4px}
+  .win .chev{width:10px;text-align:center;font-size:10px;line-height:1;color:var(--text-dim)}
+  .win .ptitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .win .ptools{margin-left:auto;display:flex;align-items:center;gap:3px}
+  .win .ptools button{height:20px;min-width:20px;padding:0 5px;border:1px solid var(--border);border-radius:4px;
+                      background:var(--bg-panel);color:var(--text-muted);font:inherit;font-size:10px;line-height:1}
+  .win .ptools button.on{color:var(--accent);border-color:var(--accent-border)}
+  .win .pbody{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+  .win .list{padding:0 6px;overflow:hidden}
+
+  .win .srow{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:6px;color:var(--text-muted);
+             white-space:nowrap}
+  .win .srow.active{position:relative;background:var(--bg-active);color:var(--text-strong);
+                    box-shadow:inset 0 0 0 1px var(--focus-ring)}
+  .win .srow.active::before{content:"";position:absolute;left:0;top:4px;bottom:4px;width:3px;border-radius:0 3px 3px 0;
+                            background:var(--info)}
+  .win .srow.active .sname{font-weight:600}
+  .win .sdot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--dot-idle)}
+  .win .sdot.connected{background:var(--accent);box-shadow:0 0 6px -1px var(--accent)}
+  .win .sname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .win .smenu{flex:none;width:20px;height:20px;border:0;border-radius:4px;background:transparent;
+              color:var(--text-dim);font-size:14px;line-height:1}
+  .win .srow.active .smenu{background:var(--bg-active);color:var(--text-strong)}
+
+  .win .ports{flex:none;height:150px;border-top:1px solid var(--border)}
+  .win .prow{display:flex;align-items:center;gap:8px;padding:3px 8px;border-radius:4px;color:var(--text-muted);font-size:11.5px}
+  .win .prow.sel{background:var(--bg-active);color:var(--text-strong)}
+  .win .prow .baud{margin-left:auto;color:var(--text-dim);font-size:10.5px}
+
+  /* 终端区 */
+  .win .term{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;position:relative;background:var(--bg-app)}
+  .win .hud{position:absolute;top:10px;right:12px;padding:3px 8px;border:1px solid var(--border-subtle);border-radius:6px;
+            background:var(--bg-dialog);font-size:10.5px;color:var(--text-dim);opacity:.92;white-space:nowrap}
+  .win .screen{flex:1 1 auto;min-height:0;padding:9px 12px;overflow:hidden;font-size:12px;line-height:1.56}
+  .win .tl{white-space:pre;overflow:hidden;text-overflow:ellipsis}
+  .win .tp{color:var(--text-strong)}
+  .win .tg{color:var(--t-green)}
+  .win .tc{color:var(--t-cyan)}
+  .win .ty{color:var(--t-yellow)}
+  .win .tr{color:var(--t-red)}
+  .win .tm{color:var(--t-magenta)}
+  .win .td{color:var(--text-dim)}
+  .win .tf{color:var(--text-faint)}
+
+  /* 输入条 */
+  .win .inputbar{flex:none;margin:0 10px 8px;padding:8px 10px 7px;border:1px solid var(--border);border-radius:12px;
+                 background:linear-gradient(var(--bg-panel-hi),var(--bg-dialog));color:var(--text-muted)}
+  .win .ibline{display:flex;align-items:center;min-height:22px;color:var(--text-strong);white-space:nowrap;overflow:hidden}
+  .win .caret{display:inline-block;width:7px;height:14px;margin-left:2px;background:var(--accent);vertical-align:-2px}
+  .win .ibfoot{display:flex;align-items:center;gap:8px;min-height:30px;padding-top:4px}
+  .win .btn{height:26px;padding:0 9px;display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:6px;
+            background:var(--bg-panel);color:var(--text-muted);font:inherit;font-size:10.5px;white-space:nowrap}
+  .win .btn.on{background:var(--bg-chip);border-color:var(--border-hover);color:var(--text-strong)}
+  .win .btn.primary{min-width:54px;justify-content:center;background:var(--accent-solid);border-color:var(--accent-strong);
+                    color:var(--on-accent);font-size:11px}
+  .win .ownstat{display:flex;align-items:center;gap:7px;font-size:10.5px;color:var(--accent);margin-right:2px}
+  .win .owndot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 7px -1px var(--accent)}
+  .win .ghost{margin-left:auto;font-size:10.5px;color:var(--text-ghost)}
+
+  /* 右栏 */
+  .win .files{width:238px;flex:none;display:flex;flex-direction:column;background:var(--bg-chrome);
+              border-left:1px solid var(--border-subtle);user-select:none}
+  .win .ptoolbar{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:4px 8px;
+                 border-bottom:1px solid var(--border-subtle)}
+  .win .ptoolbar button{height:22px;padding:0 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg-panel);
+                        color:var(--text-muted);font:inherit;font-size:11px;line-height:1}
+  .win .ptoolbar button.on{color:var(--accent);border-color:var(--accent-border)}
+  .win .fpath{flex:none;display:flex;align-items:center;gap:4px;padding:5px 8px;font-size:11px;color:var(--text-dim);
+              border-bottom:1px solid var(--border-subtle);overflow:hidden;white-space:nowrap}
+  .win .fpath b{font-weight:400;color:var(--text-muted);background:var(--bg-chip);border-radius:4px;padding:1px 5px;font-size:10.5px}
+  .win .flist{padding:0 4px;overflow:hidden}
+  .win .frow{display:flex;align-items:center;gap:6px;height:22px;padding:0 6px;border-radius:4px;font-size:11.5px;color:var(--text-muted)}
+  .win .frow.sel{background:var(--bg-active);color:var(--text-strong)}
+  .win .frow .ico{width:11px;color:var(--text-dim);font-size:10px;text-align:center}
+  .win .frow.dir .ico{color:var(--accent)}
+  .win .frow .sz{margin-left:auto;font-size:10px;color:var(--text-faint)}
+  .win .ffoot{flex:none;padding:5px 8px;border-top:1px solid var(--border-subtle);font-size:10px;color:var(--text-faint)}
+  .win .scrow{display:flex;align-items:center;gap:6px;padding:4px 8px;font-size:11.5px;color:var(--text-muted)}
+  .win .scrow .k{margin-left:auto;font-size:9.5px;color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:0 4px}
+  .win .scrow .k.exec{color:var(--accent);border-color:var(--accent-border)}
+
+  @media (max-width:1140px){
+    .card{width:100%}
+    .card-win{width:100%}
+    .card-win .win{transform:scale(.46);transform-origin:0 0}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">PinShell · UI/UX · Theme System</div>
+    <h1>主题系统：9 套配色 <span>·</span> 3 现有 + 6 新增</h1>
+    <p class="lede">配色全部沿用 <code>src/styles.css</code> 现有的变量名（<code>--bg-app</code>、<code>--accent-solid</code>…），
+      变量块换掉即可整套生效。终端色同步给了 <code>src/theme.ts</code> 的 16 色。点任意缩略图可切到大窗口看细节，
+      下方标注的是实际计算出的对比度（基于面板底色 <code>--bg-panel</code>）。</p>
+  </header>
+
+  <div class="chips" id="chips"></div>
+
+  <section class="stage">
+    <div class="stage-win" id="live"></div>
+    <div class="stage-foot">
+      <b id="live-name">—</b>
+      <span id="live-desc">—</span>
+      <div class="metrics" id="metrics"></div>
+    </div>
+  </section>
+
+  <h2>全部主题（同屏）</h2>
+  <p class="sub">前 3 套是仓库里已有的，后面 6 套是新做的；顺序按「暗 → 亮」排。</p>
+  <div class="gallery" id="gallery"></div>
+
+  <footer>
+    <b>已经落地</b>：9 套全部进了仓库。<code>src/styles.css</code> 新增 8 个 <code>html[data-theme="…"]</code> 变量块（每套 46 个变量，与 <code>:root</code> 逐一对齐）；
+    <code>src/theme.ts</code> 扩了 <code>Theme</code> 联合类型、<code>THEMES</code> 顺序表、<code>parseTheme</code> 白名单和 <code>XTERM_THEMES</code> 的 9 份 16 色；
+    <code>index.html</code> 设置下拉 9 项；<code>src/i18n.ts</code> 补了中英文名；<code>theme.test.ts</code> 改成遍历 <code>THEMES</code> 断言（原来的「三套两两不同」写死成 3 会挂）。
+    <br />
+    <b>同时修掉的对比度问题</b>：乳白 / 明亮的「发送」按钮原来是 <code>--accent-solid</code> 底 + <code>--text-strong</code> 字，
+    深绿底配深墨字只有约 <b>2.4:1</b>。现在九套统一走 <code>--on-accent</code>（主色块上的文字色），最低也有 <b>4.9:1</b>。
+  </footer>
+</div>
+
+<script type="json" id="theme-data">
+[
+  {
+    "id": "dark",
+    "name": "暗黑",
+    "en": "Dark",
+    "kind": "dark",
+    "tag": "现有",
+    "desc": "近黑蓝底 + 薄荷绿主色，默认值。长时间盯输出不刺眼。",
+    "t": {
+      "bg-app": "#0b0e14", "bg-chrome": "#0d1219", "bg-panel": "#131a23", "bg-panel-hi": "#141b26",
+      "bg-sunken": "#0b1017", "bg-raised": "#141c28", "bg-active": "#1c3045", "bg-dialog": "#0f1620",
+      "bg-chip": "#223247",
+      "border-subtle": "#1b2531", "border": "#24303f", "border-strong": "#344353", "border-hover": "#3f5468",
+      "focus-ring": "#385b7b",
+      "text-bright": "#ffffff", "text-strong": "#e8eef7", "text": "#d7e3f0", "text-muted": "#8a9ab0",
+      "text-dim": "#65758c", "text-faint": "#4a5a70", "text-disabled": "#5b6a7f", "text-ghost": "#4b5b70",
+      "text-link": "#5d7fa3",
+      "accent": "#46d19a", "accent-strong": "#368568", "accent-solid": "#24674f", "accent-border": "#2c5a46",
+      "accent-bg": "#1c3a2d", "accent-section": "#83b59a", "on-accent": "#eafff5",
+      "danger": "#e35d6a", "danger-border": "#5a2a30", "danger-bg": "#261a1d", "danger-solid": "#c42b1c",
+      "on-danger": "#ffffff", "warn": "#d6a34a", "warn-strong": "#f0c477", "warn-bg": "#3a2f1c",
+      "warn-border": "#4a3a22", "info": "#56b4ff", "info-bg": "#24405a", "dot-idle": "#3c4a5c",
+      "overlay-strong": "#05090fb8", "shadow-color": "#000000", "shadow-soft": "#00000099", "shadow-strong": "#000000cc"
+    },
+    "term": {"red":"#e35d6a","green":"#46d19a","yellow":"#d6a34a","blue":"#56b4ff","magenta":"#c58af9","cyan":"#4fd1c5"}
+  },
+  {
+    "id": "midnight",
+    "name": "深空蓝",
+    "en": "Midnight",
+    "kind": "dark",
+    "tag": "新增",
+    "desc": "靛蓝底 + 冷蓝主色，比暗黑更「夜」。适合整晚开着写固件。",
+    "t": {
+      "bg-app": "#10121a", "bg-chrome": "#0c0e15", "bg-panel": "#151824", "bg-panel-hi": "#1a1e2c",
+      "bg-sunken": "#0b0d13", "bg-raised": "#1b2030", "bg-active": "#24314e", "bg-dialog": "#131724",
+      "bg-chip": "#242d44",
+      "border-subtle": "#1c2130", "border": "#272e40", "border-strong": "#364059", "border-hover": "#475573",
+      "focus-ring": "#3f5f92",
+      "text-bright": "#ffffff", "text-strong": "#e6ebfa", "text": "#ccd6ec", "text-muted": "#98a3bd",
+      "text-dim": "#7883a0", "text-faint": "#565f7a", "text-disabled": "#626d88", "text-ghost": "#4f5772",
+      "text-link": "#7aa2f7",
+      "accent": "#6ea8ff", "accent-strong": "#4c86d9", "accent-solid": "#2b4f80", "accent-border": "#33527d",
+      "accent-bg": "#17243a", "accent-section": "#8cb8f5", "on-accent": "#eaf2ff",
+      "danger": "#f07178", "danger-border": "#54282f", "danger-bg": "#2a151b", "danger-solid": "#c4303f",
+      "on-danger": "#ffffff", "warn": "#e0af68", "warn-strong": "#f3cb85", "warn-bg": "#2f2718",
+      "warn-border": "#463a23", "info": "#7dcfff", "info-bg": "#1b3345", "dot-idle": "#3c465c",
+      "overlay-strong": "#060810b8", "shadow-color": "#000000", "shadow-soft": "#00000099", "shadow-strong": "#000000cc"
+    },
+    "term": {"red":"#f07178","green":"#9ece6a","yellow":"#e0af68","blue":"#7aa2f7","magenta":"#bb9af7","cyan":"#7dcfff"}
+  },
+  {
+    "id": "ember",
+    "name": "炭火",
+    "en": "Ember",
+    "kind": "dark",
+    "tag": "新增",
+    "desc": "暖炭底 + 琥珀主色。蓝色光最少的一档，夜里看久了眼睛最松。",
+    "t": {
+      "bg-app": "#17130f", "bg-chrome": "#110e0b", "bg-panel": "#1e1813", "bg-panel-hi": "#241d17",
+      "bg-sunken": "#0f0c09", "bg-raised": "#261e18", "bg-active": "#3a2a1a", "bg-dialog": "#1b1511",
+      "bg-chip": "#32251a",
+      "border-subtle": "#271f18", "border": "#342a20", "border-strong": "#46382a", "border-hover": "#5b4835",
+      "focus-ring": "#7a5630",
+      "text-bright": "#fff8f1", "text-strong": "#f4e8da", "text": "#ded0bf", "text-muted": "#b09e86",
+      "text-dim": "#93816d", "text-faint": "#6b5d4e", "text-disabled": "#78695a", "text-ghost": "#5f5245",
+      "text-link": "#e0a565",
+      "accent": "#e8a95f", "accent-strong": "#c9863f", "accent-solid": "#7a4a1e", "accent-border": "#6d4724",
+      "accent-bg": "#332210", "accent-section": "#e8b884", "on-accent": "#fff6ea",
+      "danger": "#e8695f", "danger-border": "#552a24", "danger-bg": "#2a1714", "danger-solid": "#c43d2f",
+      "on-danger": "#fff8f1", "warn": "#e8c07a", "warn-strong": "#f5d79c", "warn-bg": "#312716",
+      "warn-border": "#4a3a20", "info": "#86bcd8", "info-bg": "#1e2d36", "dot-idle": "#4b3c2f",
+      "overlay-strong": "#0a0705b8", "shadow-color": "#000000", "shadow-soft": "#000000aa", "shadow-strong": "#000000d9"
+    },
+    "term": {"red":"#e8695f","green":"#a3be8c","yellow":"#e8c07a","blue":"#86bcd8","magenta":"#c08db0","cyan":"#8ecfc6"}
+  },
+  {
+    "id": "nord",
+    "name": "极地雾",
+    "en": "Polar",
+    "kind": "dark",
+    "tag": "新增",
+    "desc": "低饱和蓝灰 + 冰青主色，对比压得比暗黑软，长时间不累但也不糊。",
+    "t": {
+      "bg-app": "#262b35", "bg-chrome": "#20242d", "bg-panel": "#2c323d", "bg-panel-hi": "#313845",
+      "bg-sunken": "#1e222a", "bg-raised": "#333a47", "bg-active": "#3b4a61", "bg-dialog": "#2a2f3a",
+      "bg-chip": "#3a4251",
+      "border-subtle": "#343b47", "border": "#404855", "border-strong": "#4e5867", "border-hover": "#5f6a7c",
+      "focus-ring": "#5e81ac",
+      "text-bright": "#ffffff", "text-strong": "#eceff4", "text": "#d8dee9", "text-muted": "#a4aebd",
+      "text-dim": "#8993a2", "text-faint": "#6a7483", "text-disabled": "#737d8d", "text-ghost": "#626b7b",
+      "text-link": "#88c0d0",
+      "accent": "#88c0d0", "accent-strong": "#6ba3b4", "accent-solid": "#3a6470", "accent-border": "#48646f",
+      "accent-bg": "#2a3b42", "accent-section": "#9dccd9", "on-accent": "#eef4f7",
+      "danger": "#bf616a", "danger-border": "#553038", "danger-bg": "#2c1b20", "danger-solid": "#b04a53",
+      "on-danger": "#ffffff", "warn": "#ebcb8b", "warn-strong": "#f5ddaa", "warn-bg": "#332b1e",
+      "warn-border": "#4c4227", "info": "#81a1c1", "info-bg": "#2b3543", "dot-idle": "#4d5766",
+      "overlay-strong": "#0d1117b8", "shadow-color": "#0a0d12", "shadow-soft": "#0a0d12aa", "shadow-strong": "#0a0d12d9"
+    },
+    "term": {"red":"#bf616a","green":"#a3be8c","yellow":"#ebcb8b","blue":"#81a1c1","magenta":"#b48ead","cyan":"#88c0d0"}
+  },
+  {
+    "id": "cream",
+    "name": "乳白",
+    "en": "Cream",
+    "kind": "light",
+    "tag": "现有",
+    "desc": "暖白纸底 + 深墨字，主色压暗一档。仓库里唯一的暖色浅色主题。",
+    "t": {
+      "bg-app": "#f6f1e7", "bg-chrome": "#efe8db", "bg-panel": "#faf6ee", "bg-panel-hi": "#fdfaf4",
+      "bg-sunken": "#f1ebdf", "bg-raised": "#f0e9dc", "bg-active": "#dceadf", "bg-dialog": "#fbf7f0",
+      "bg-chip": "#e8e0d2",
+      "border-subtle": "#e2d9c9", "border": "#d8cdb9", "border-strong": "#c4b69d", "border-hover": "#b0a184",
+      "focus-ring": "#9dbfd8",
+      "text-bright": "#1a1712", "text-strong": "#2a2620", "text": "#3a352c", "text-muted": "#5f574a",
+      "text-dim": "#786f60", "text-faint": "#8d8271", "text-disabled": "#a89c8a", "text-ghost": "#b0a493",
+      "text-link": "#2f6d9e",
+      "accent": "#1f7a55", "accent-strong": "#17694a", "accent-solid": "#1f7a55", "accent-border": "#a8c8b6",
+      "accent-bg": "#e2efe6", "accent-section": "#3f7d5f", "on-accent": "#ffffff",
+      "danger": "#b3353f", "danger-border": "#e0b9bc", "danger-bg": "#f7e6e6", "danger-solid": "#c42b1c",
+      "on-danger": "#ffffff", "warn": "#8a6216", "warn-strong": "#a8791f", "warn-bg": "#f6ecd8",
+      "warn-border": "#ddc79b", "info": "#1d5fa8", "info-bg": "#e3edf8", "dot-idle": "#bdb2a0",
+      "overlay-strong": "#3a332a99", "shadow-color": "#3a332a", "shadow-soft": "#3a332a33", "shadow-strong": "#3a332a55"
+    },
+    "term": {"red":"#b3353f","green":"#1f7a55","yellow":"#8a6216","blue":"#1d5fa8","magenta":"#8b4a9c","cyan":"#166f74"}
+  },
+  {
+    "id": "sand",
+    "name": "沙岩",
+    "en": "Sand",
+    "kind": "light",
+    "tag": "新增",
+    "desc": "中性砂底 + 深青主色。和乳白同为暖调，但底色去掉了黄，字体对比更高。",
+    "t": {
+      "bg-app": "#ece6da", "bg-chrome": "#e5ded0", "bg-panel": "#f4efe5", "bg-panel-hi": "#faf6ee",
+      "bg-sunken": "#e8e1d3", "bg-raised": "#f0eade", "bg-active": "#dfe7db", "bg-dialog": "#f8f4ea",
+      "bg-chip": "#ddd5c4",
+      "border-subtle": "#e0d8c8", "border": "#d3c9b5", "border-strong": "#bcb09a", "border-hover": "#a3977e",
+      "focus-ring": "#9cb6c9",
+      "text-bright": "#17140f", "text-strong": "#241f18", "text": "#35302a", "text-muted": "#5a5346",
+      "text-dim": "#6f6759", "text-faint": "#847b6a", "text-disabled": "#9c9280", "text-ghost": "#a99f8c",
+      "text-link": "#2f6a94",
+      "accent": "#2f6e63", "accent-strong": "#245a51", "accent-solid": "#2f6e63", "accent-border": "#a8c3b6",
+      "accent-bg": "#dfeae4", "accent-section": "#33705f", "on-accent": "#ffffff",
+      "danger": "#a8342f", "danger-border": "#ddb9b4", "danger-bg": "#f6e7e4", "danger-solid": "#a8342f",
+      "on-danger": "#ffffff", "warn": "#7d5a14", "warn-strong": "#946a1c", "warn-bg": "#f6eeda",
+      "warn-border": "#ddcda3", "info": "#256098", "info-bg": "#e2ecf5", "dot-idle": "#c3b9a5",
+      "overlay-strong": "#3a332a99", "shadow-color": "#3a332a", "shadow-soft": "#3a332a33", "shadow-strong": "#3a332a55"
+    },
+    "term": {"red":"#a8342f","green":"#2f6e63","yellow":"#7d5a16","blue":"#2a6094","magenta":"#7c4a80","cyan":"#216b70"}
+  },
+  {
+    "id": "bright",
+    "name": "明亮",
+    "en": "Bright",
+    "kind": "light",
+    "tag": "现有",
+    "desc": "纯白底 + 冷灰描边，日光/明亮办公室最稳的一档。",
+    "t": {
+      "bg-app": "#ffffff", "bg-chrome": "#f5f6f8", "bg-panel": "#ffffff", "bg-panel-hi": "#fafbfc",
+      "bg-sunken": "#f3f5f7", "bg-raised": "#f7f9fb", "bg-active": "#e3f2ea", "bg-dialog": "#ffffff",
+      "bg-chip": "#e9edf2",
+      "border-subtle": "#e8ebef", "border": "#dbe0e6", "border-strong": "#c3cad3", "border-hover": "#a7b2be",
+      "focus-ring": "#8fb9dd",
+      "text-bright": "#0b0f14", "text-strong": "#161b22", "text": "#2b323b", "text-muted": "#565f6a",
+      "text-dim": "#6b7581", "text-faint": "#828d99", "text-disabled": "#a3adb9", "text-ghost": "#b3bcc7",
+      "text-link": "#1f6fb2",
+      "accent": "#16805c", "accent-strong": "#116b4c", "accent-solid": "#16805c", "accent-border": "#a5cdb9",
+      "accent-bg": "#e4f2ea", "accent-section": "#2f7a5c", "on-accent": "#ffffff",
+      "danger": "#c02a35", "danger-border": "#eec3c7", "danger-bg": "#fbeaeb", "danger-solid": "#c42b1c",
+      "on-danger": "#ffffff", "warn": "#9a6c12", "warn-strong": "#b07f1c", "warn-bg": "#fbf1dd",
+      "warn-border": "#e6d2a6", "info": "#1763b0", "info-bg": "#e5f0fb", "dot-idle": "#c2cad4",
+      "overlay-strong": "#101820a6", "shadow-color": "#1a2432", "shadow-soft": "#1a24322e", "shadow-strong": "#1a24324d"
+    },
+    "term": {"red":"#c02a35","green":"#16805c","yellow":"#9a6c12","blue":"#1763b0","magenta":"#8b3fa8","cyan":"#10707f"}
+  },
+  {
+    "id": "mist",
+    "name": "雾灰",
+    "en": "Mist",
+    "kind": "light",
+    "tag": "新增",
+    "desc": "冷灰白底 + 青蓝主色。比纯白少一层眩光，白天看也不至于太「亮」。",
+    "t": {
+      "bg-app": "#eceef1", "bg-chrome": "#e4e7eb", "bg-panel": "#f4f6f8", "bg-panel-hi": "#fafbfc",
+      "bg-sunken": "#e6e9ed", "bg-raised": "#eef1f4", "bg-active": "#dbe7f4", "bg-dialog": "#f8fafb",
+      "bg-chip": "#dfe4ea",
+      "border-subtle": "#e0e4e9", "border": "#d2d8df", "border-strong": "#b9c1ca", "border-hover": "#9aa5b1",
+      "focus-ring": "#8fb2d4",
+      "text-bright": "#0d1319", "text-strong": "#1a222b", "text": "#2e3944", "text-muted": "#58636f",
+      "text-dim": "#6d7985", "text-faint": "#858f9b", "text-disabled": "#98a2ae", "text-ghost": "#a7b1bc",
+      "text-link": "#1e6db5",
+      "accent": "#1a7f9e", "accent-strong": "#14657e", "accent-solid": "#14657e", "accent-border": "#a9ccd8",
+      "accent-bg": "#e0eef2", "accent-section": "#2a7285", "on-accent": "#ffffff",
+      "danger": "#c02a35", "danger-border": "#eec3c7", "danger-bg": "#fbeaeb", "danger-solid": "#c42b1c",
+      "on-danger": "#ffffff", "warn": "#8f6712", "warn-strong": "#a87c1c", "warn-bg": "#fbf1dd",
+      "warn-border": "#e6d2a6", "info": "#14639f", "info-bg": "#e3eef8", "dot-idle": "#c0c8d1",
+      "overlay-strong": "#0f1620a6", "shadow-color": "#16202b", "shadow-soft": "#16202b2e", "shadow-strong": "#16202b4d"
+    },
+    "term": {"red":"#b3353b","green":"#1d7a5a","yellow":"#7d5a10","blue":"#1a5f9e","magenta":"#7d4497","cyan":"#146b78"}
+  },
+  {
+    "id": "paper",
+    "name": "素纸",
+    "en": "Paper",
+    "kind": "light",
+    "tag": "新增",
+    "desc": "近单色：米白纸 + 墨蓝主色，只有语义色带彩。最安静的一档，适合截图/写文档。",
+    "t": {
+      "bg-app": "#fbfaf6", "bg-chrome": "#f3f1eb", "bg-panel": "#fdfcf9", "bg-panel-hi": "#ffffff",
+      "bg-sunken": "#f2f0e9", "bg-raised": "#f8f6f1", "bg-active": "#e9ecf0", "bg-dialog": "#fefdfb",
+      "bg-chip": "#eae7de",
+      "border-subtle": "#eae7df", "border": "#ddd8cc", "border-strong": "#c7c1b2", "border-hover": "#a7a192",
+      "focus-ring": "#a9b6c4",
+      "text-bright": "#000000", "text-strong": "#12100c", "text": "#23201a", "text-muted": "#56514a",
+      "text-dim": "#6d675c", "text-faint": "#857f73", "text-disabled": "#969084", "text-ghost": "#a6a094",
+      "text-link": "#27527f",
+      "accent": "#27527f", "accent-strong": "#1d3f63", "accent-solid": "#27527f", "accent-border": "#b0c0d1",
+      "accent-bg": "#e9eef5", "accent-section": "#2b5279", "on-accent": "#ffffff",
+      "danger": "#a02527", "danger-border": "#dfb9b7", "danger-bg": "#f7e8e6", "danger-solid": "#a02527",
+      "on-danger": "#ffffff", "warn": "#74540f", "warn-strong": "#8a6616", "warn-bg": "#f6efdb",
+      "warn-border": "#ddd0a8", "info": "#1f5787", "info-bg": "#e7eef6", "dot-idle": "#ccc6b8",
+      "overlay-strong": "#2a261d99", "shadow-color": "#2a261d", "shadow-soft": "#2a261d24", "shadow-strong": "#2a261d44"
+    },
+    "term": {"red":"#a02527","green":"#1f6b4a","yellow":"#77540f","blue":"#27527f","magenta":"#6f3d7a","cyan":"#1a6470"}
+  }
+]
+</script>
+
+<script>
+(function () {
+  var THEMES = JSON.parse(document.getElementById("theme-data").textContent);
+
+  // 用 token 生成 CSS 变量块：和 styles.css 里的写法一一对应
+  var css = THEMES.map(function (t) {
+    var vars = Object.keys(t.t).map(function (k) { return "--" + k + ":" + t.t[k] + ";"; }).join("");
+    var term = Object.keys(t.term).map(function (k) { return "--t-" + k + ":" + t.term[k] + ";"; }).join("");
+    return '[data-theme="' + t.id + '"]{' + vars + term + '}';
+  }).join("\n");
+  var style = document.createElement("style");
+  style.textContent = css;
+  document.head.appendChild(style);
+
+  // ---- 对比度 ----
+  function lum(hex) {
+    var h = hex.slice(1, 7), c = [0, 2, 4].map(function (i) {
+      var v = parseInt(h.substr(i, 2), 16) / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+  function ratio(a, b) {
+    var l1 = lum(a), l2 = lum(b), hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  // ---- 应用外壳 markup（结构复刻 index.html）----
+  function appHtml(id) {
+    return '' +
+      '<div class="win" data-theme="' + id + '">' +
+        '<div class="tb">' +
+          '<div class="tb-title">PinShell</div>' +
+          '<div class="tb-tools">' +
+            '<button class="tbtn hot"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none"/><path d="M6 2.5v11" fill="none"/><path class="barfill" d="M1.5 2.5h4.5v11H1.5z"/></svg></button>' +
+            '<button class="tbtn"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none"/><path d="M10 2.5v11" fill="none"/></svg></button>' +
+            '<button class="tbtn"><svg class="gear" viewBox="0 0 24 24"><path class="gearf" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>' +
+          '</div>' +
+          '<div class="tb-actions">' +
+            '<button class="wbtn"><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>' +
+            '<button class="wbtn"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="0.5"/></svg></button>' +
+            '<button class="wbtn"><svg viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="body">' +
+          '<aside class="sidebar">' +
+            '<section class="panel grow">' +
+              '<div class="phead"><span class="chev">▾</span><span class="ptitle">会话</span>' +
+                '<div class="ptools"><button style="border:0;background:transparent">＋</button></div></div>' +
+              '<div class="pbody"><div class="list">' +
+                '<div class="srow active"><span class="sdot connected"></span><span class="sname">pwsh · 3281</span><button class="smenu">⋯</button></div>' +
+                '<div class="srow"><span class="sdot"></span><span class="sname">esptool · COM3</span></div>' +
+                '<div class="srow"><span class="sdot connected"></span><span class="sname">build · 1288</span></div>' +
+                '<div class="srow"><span class="sdot"></span><span class="sname">串口日志 · COM7</span></div>' +
+              '</div></div>' +
+            '</section>' +
+            '<section class="panel ports">' +
+              '<div class="phead"><span class="chev">▾</span><span class="ptitle">串口</span>' +
+                '<div class="ptools"><button>⟳</button><button class="on">刷</button></div></div>' +
+              '<div class="pbody"><div class="list">' +
+                '<div class="prow sel"><span class="sdot connected" style="width:5px;height:5px"></span>COM3<span class="baud">115200</span></div>' +
+                '<div class="prow"><span class="sdot" style="width:5px;height:5px"></span>COM7<span class="baud">9600</span></div>' +
+                '<div class="prow"><span class="sdot" style="width:5px;height:5px"></span>COM11<span class="baud">—</span></div>' +
+              '</div></div>' +
+            '</section>' +
+          '</aside>' +
+
+          '<main class="term">' +
+            '<div class="hud">可写 95ms · spawn 31ms · webgl</div>' +
+            '<div class="screen">' +
+              '<div class="tl"><span class="tp">PS C:\\Users\\96485\\Documents\\PinShell&gt;</span> <span class="tc">npm run test</span></div>' +
+              '<div class="tl"> </div>' +
+              '<div class="tl"><span class="tg"> ✓</span> src/theme.test.ts      <span class="tg">6 passed</span>   <span class="td">12ms</span></div>' +
+              '<div class="tl"><span class="tg"> ✓</span> src/sidebar.test.ts   <span class="tg">11 passed</span>    <span class="td">8ms</span></div>' +
+              '<div class="tl"><span class="tg"> ✓</span> src/serialUi.test.ts  <span class="tg">14 passed</span>   <span class="td">21ms</span></div>' +
+              '<div class="tl"> </div>' +
+              '<div class="tl"> <span class="td">Test Files</span>  <span class="ty">3 passed (3)</span></div>' +
+              '<div class="tl">      <span class="td">Tests</span>  <span class="ty">31 passed (31)</span></div>' +
+              '<div class="tl">   <span class="td">Duration</span>  <span class="td">412ms</span></div>' +
+              '<div class="tl"> </div>' +
+              '<div class="tl"><span class="tp">PS C:\\Users\\96485\\Documents\\PinShell&gt;</span> <span class="tc">git status -sb</span></div>' +
+              '<div class="tl"><span class="tc">## main...origin/main</span></div>' +
+              '<div class="tl"> <span class="ty">M</span> src/styles.css</div>' +
+              '<div class="tl"> <span class="tf">??</span> src/theme.ts</div>' +
+              '<div class="tl"> <span class="tr">!</span> 串口 COM3 正在被 esptool 占用，发送已排队</div>' +
+              '<div class="tl"> </div>' +
+              '<div class="tl"><span class="tp">PS C:\\Users\\96485\\Documents\\PinShell&gt;</span></div>' +
+            '</div>' +
+            '<div class="inputbar">' +
+              '<div class="ibline">提示符折叠 · 可接管 → 提示符跳动后可在这里输入<span class="caret"></span></div>' +
+              '<div class="ibfoot">' +
+                '<button class="btn">历史</button>' +
+                '<span class="ownstat"><span class="owndot"></span></span>' +
+                '<span class="ghost">Ctrl+R 检索</span>' +
+                '<button class="btn" style="margin-left:8px">直通</button>' +
+                '<button class="btn on">接管</button>' +
+                '<button class="btn primary">发送</button>' +
+              '</div>' +
+            '</div>' +
+          '</main>' +
+
+          '<aside class="files">' +
+            '<section class="panel">' +
+              '<div class="phead"><span class="chev">▾</span><span class="ptitle">快捷指令</span>' +
+                '<div class="ptools"><button>＋</button><button>导入</button><button>导出</button></div></div>' +
+              '<div class="pbody">' +
+                '<div class="scrow">构建固件<span class="k exec">执行</span></div>' +
+                '<div class="scrow">查 COM 列表<span class="k">填入</span></div>' +
+              '</div>' +
+            '</section>' +
+            '<section class="panel grow">' +
+              '<div class="phead"><span class="chev">▾</span><span class="ptitle">文件</span></div>' +
+              '<div class="pbody">' +
+                '<div class="ptoolbar"><button class="on">跟随</button><button>名称 ↑</button><button>⟳</button><button>刷</button><button>隐</button></div>' +
+                '<div class="fpath"><b>src</b>/<b>components</b>/ …</div>' +
+                '<div class="flist">' +
+                  '<div class="frow dir"><span class="ico">▸</span>src<span class="sz">—</span></div>' +
+                  '<div class="frow dir"><span class="ico">▸</span>src-tauri<span class="sz">—</span></div>' +
+                  '<div class="frow sel"><span class="ico">▪</span>styles.css<span class="sz">62K</span></div>' +
+                  '<div class="frow"><span class="ico">▪</span>theme.ts<span class="sz">3.4K</span></div>' +
+                  '<div class="frow"><span class="ico">▪</span>main.ts<span class="sz">18K</span></div>' +
+                  '<div class="frow dir"><span class="ico">▸</span>docs<span class="sz">—</span></div>' +
+                '</div>' +
+                '<div class="ffoot">双击目录进入 · 双击文件填入输入条</div>' +
+              '</div>' +
+            '</section>' +
+          '</aside>' +
+        '</div>' +
+      '</div>';
+  }
+
+  // ---- 渲染 ----
+  var chipsEl = document.getElementById("chips");
+  var galleryEl = document.getElementById("gallery");
+  var liveEl = document.getElementById("live");
+  var current = "dark";
+
+  THEMES.forEach(function (t) {
+    var b = document.createElement("button");
+    b.className = "chip";
+    b.dataset.theme = t.id;
+    b.innerHTML = '<span class="dot" style="background:' + t.t["accent"] + '"></span>' + t.name +
+      (t.tag === "新增" ? '<span class="new">新增</span>' : "");
+    b.addEventListener("click", function () { select(t.id); });
+    chipsEl.appendChild(b);
+
+    var card = document.createElement("button");
+    card.className = "card";
+    card.dataset.theme = t.id;
+    var sw = ["bg-app", "bg-panel", "bg-active", "accent", "text-muted", "text"].map(function (k) {
+      return '<i style="background:' + t.t[k] + '"></i>';
+    }).join("");
+    card.innerHTML =
+      '<div class="card-win">' + appHtml(t.id) + '</div>' +
+      '<div class="card-meta">' +
+        '<div class="card-name">' + t.name + ' <em>' + t.en + '</em>' +
+          (t.tag === "新增" ? '<span class="new" style="font-size:9.5px;letter-spacing:.06em;color:#8a5a16;background:#fbf0d8;border-radius:4px;padding:1px 4px">新增</span>' : '') +
+        '</div>' +
+        '<div class="card-desc">' + t.desc + '</div>' +
+        '<div class="swatches">' + sw + '</div>' +
+      '</div>';
+    card.addEventListener("click", function () { select(t.id); });
+    galleryEl.appendChild(card);
+  });
+
+  function select(id) {
+    current = id;
+    var t = THEMES.filter(function (x) { return x.id === id; })[0];
+    liveEl.innerHTML = appHtml(id);
+    document.getElementById("live-name").textContent = t.name + " · " + t.en;
+    document.getElementById("live-desc").textContent = t.desc;
+
+    var bg = t.t["bg-panel"];
+    var rows = [
+      ["正文", t.t["text"], bg, 4.5],
+      ["弱化", t.t["text-muted"], bg, 4.5],
+      ["主色", t.t["accent"], bg, 3],
+      ["主按钮", t.t["on-accent"], t.t["accent-solid"], 4.5]
+    ];
+    document.getElementById("metrics").innerHTML = rows.map(function (r) {
+      var v = ratio(r[1], r[2]);
+      return '<span class="metric' + (v < r[3] ? " bad" : "") + '">' + r[0] + " " + v.toFixed(1) + ":1</span>";
+    }).join("");
+
+    [].forEach.call(document.querySelectorAll(".chip"), function (el) {
+      el.classList.toggle("on", el.dataset.theme === id);
+    });
+    [].forEach.call(document.querySelectorAll(".card"), function (el) {
+      el.classList.toggle("on", el.dataset.theme === id);
+    });
+  }
+
+  document.addEventListener("keydown", function (e) {
+    var i = THEMES.findIndex(function (t) { return t.id === current; });
+    if (e.key === "ArrowRight") { select(THEMES[(i + 1) % THEMES.length].id); e.preventDefault(); }
+    if (e.key === "ArrowLeft") { select(THEMES[(i - 1 + THEMES.length) % THEMES.length].id); e.preventDefault(); }
+  });
+
+  // 支持 #主题名 直链，方便单独看某一套
+  var hash = decodeURIComponent(location.hash.slice(1));
+  select(THEMES.some(function (t) { return t.id === hash; }) ? hash : "dark");
+})();
+</script>
+</body>
+</html>

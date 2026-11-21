@@ -4,36 +4,115 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PinShell</title>
+    <!-- 启动首帧兜底：样式表与 JS 就绪前先铺窗口底色并藏住未样式化的 DOM。
+         WebView 会在模块脚本执行前先画一帧 HTML，不挡住的话就会闪出原生按钮。
+         main.ts 装配完成后给 <html> 加 .app-ready 再放行。 -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0b0e14;
+        color-scheme: dark;
+      }
+      #titlebar,
+      #app {
+        visibility: hidden;
+      }
+      html.app-ready #titlebar,
+      html.app-ready #app {
+        visibility: visible;
+      }
+    </style>
   </head>
   <body>
+    <!-- 自绘标题栏：原生标题栏已在 tauri.conf.json 里关掉（decorations: false），
+         这一条就是窗口顶栏。空白处可拖动窗口、双击最大化；右侧是最小化/最大化/关闭。 -->
+    <header id="titlebar">
+      <!-- 左：应用名。拖动区跟着名字一起铺满中段，双击最大化。 -->
+      <div id="titlebar-drag" data-tauri-drag-region="deep">
+        <span id="titlebar-title">PinShell</span>
+      </div>
+      <!-- 右：侧栏折叠 + 全局设置，再往右是窗口按钮。 -->
+      <div id="titlebar-tools">
+        <button id="bar-toggle-left" type="button" data-i18n-title="titlebar.collapseLeft" data-i18n-aria="titlebar.collapseLeft" aria-pressed="false">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <rect class="frame" x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <path class="frame" d="M6 2.5v11" />
+            <path class="bar-fill" d="M1.5 2.5h4.5v11H1.5z" />
+          </svg>
+        </button>
+        <button id="bar-toggle-right" type="button" data-i18n-title="titlebar.collapseRight" data-i18n-aria="titlebar.collapseRight" aria-pressed="false">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <rect class="frame" x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <path class="frame" d="M10 2.5v11" />
+            <path class="bar-fill" d="M10 2.5h4.5v11H10z" />
+          </svg>
+        </button>
+        <button id="settings-open" type="button" data-i18n-title="titlebar.settings" data-i18n-aria="titlebar.settings">
+          <svg class="icon-gear" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
+          </svg>
+        </button>
+      </div>
+      <div id="titlebar-actions">
+        <button id="win-minimize" type="button" data-i18n-title="titlebar.minimize" data-i18n-aria="titlebar.minimize">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8" /></svg>
+        </button>
+        <button id="win-maximize" type="button" data-i18n-title="titlebar.maximize" data-i18n-aria="titlebar.maximize">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" rx="0.5" /></svg>
+        </button>
+        <button id="win-close" type="button" data-i18n-title="titlebar.close" data-i18n-aria="titlebar.close">
+          <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" /></svg>
+        </button>
+      </div>
+    </header>
     <div id="app">
       <aside id="sidebar">
-        <div id="sess-head">
-          <span>会话</span>
-          <button id="sess-new" title="新建终端会话">＋</button>
-          <button id="sess-collapse" title="收起会话栏">‹</button>
-        </div>
-        <!-- 收起后只剩这条竖条：点它展开，宽度与折叠状态会记住 -->
-        <button id="sess-expand" title="展开会话栏" hidden>会话</button>
-        <div id="sess-list"></div>
-        <div id="sess-hint">双击名字改名 · ✕ 关闭</div>
-        <section id="ports-panel" aria-label="串口枚举">
-          <div id="ports-head">
-            <div id="ports-resizer" title="拖动调整串口面板高度"></div>
-            <div class="ports-heading">
-              <button id="ports-toggle" type="button" aria-expanded="true" aria-controls="ports-body" title="收起串口面板"><span class="ports-chevron" aria-hidden="true">▾</span>串口</button>
-              <span id="ports-refreshed" hidden></span>
+        <!-- 子栏统一结构：.panel > .panel-head(标题栏，单击折叠) + .panel-body -->
+        <section id="sess-panel" class="panel" data-i18n-aria="sidebar.sessions">
+          <div id="sess-head" class="panel-head">
+            <button id="sess-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="sess-body" data-i18n-title="panel.collapse">
+              <span id="sess-chevron" class="panel-chevron" aria-hidden="true">▾</span><span class="panel-title"><span data-i18n="sidebar.sessions">会话</span></span>
+            </button>
+            <div class="panel-tools">
+              <button id="sess-select" class="icon-btn" type="button" aria-pressed="false" data-i18n-title="bulk.selectSessions" data-i18n-aria="bulk.selectSessions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5" /><path d="M5.3 8.1l2 2 3.6-4" /></svg></button>
+              <button id="sess-new" type="button" data-i18n-title="sidebar.newTerminal" data-i18n-aria="sidebar.newTerminal">＋</button>
             </div>
-            <button id="ports-refresh" type="button" title="刷新串口列表" aria-label="刷新串口列表">⟳</button>
-            <button id="ports-auto" type="button" aria-pressed="false" title="自动刷新：每 1 秒枚举一次">自动</button>
           </div>
-          <div id="ports-body">
+          <div id="sess-body" class="panel-body">
+            <!-- 批量模式：进入后行前多出勾选框，点行只勾选不切会话 -->
+            <div id="sess-bulk" class="bulk-bar" hidden>
+              <button id="sess-select-all" type="button" data-i18n="bulk.selectAll">全选</button>
+              <button id="sess-select-invert" type="button" data-i18n="bulk.invert">反选</button>
+              <button id="sess-delete-selected" type="button" class="danger" data-i18n-title="bulk.deleteHint">删除</button>
+              <button id="sess-select-done" type="button" data-i18n="bulk.done">完成</button>
+            </div>
+            <div id="sess-list"></div>
+          </div>
+        </section>
+        <!-- 整栏收起后只剩这条竖条：点它展开，宽度与折叠状态会记住 -->
+        <button id="sess-expand" data-i18n-title="sidebar.expand" hidden><span data-i18n="sidebar.sessions">会话</span></button>
+        <section id="ports-panel" class="panel" data-i18n-aria="sidebar.serial">
+          <div id="ports-head" class="panel-head">
+            <div id="ports-resizer" data-fold-ignore data-i18n-title="sidebar.portsResize"></div>
+            <button id="ports-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="ports-body" data-i18n-title="panel.collapse">
+              <span id="ports-chevron" class="panel-chevron" aria-hidden="true">▾</span><span class="panel-title"><span data-i18n="sidebar.serial">串口</span></span>
+            </button>
+            <div class="panel-tools">
+              <button id="ports-refresh" type="button" data-i18n-title="sidebar.refreshPorts" data-i18n-aria="sidebar.refreshPorts">⟳</button>
+              <button id="ports-auto" type="button" aria-pressed="false" data-i18n-aria="sidebar.autoPorts" data-i18n-title="sidebar.autoPortsOff"><span data-i18n="files.autoShort">刷</span></button>
+            </div>
+          </div>
+          <div id="ports-body" class="panel-body">
+            <div id="ports-refreshed" hidden></div>
             <div id="ports-list"></div>
             <div id="ports-status" role="status"></div>
           </div>
         </section>
         <!-- 右边缘的拖拽手柄：和文件面板一样，拖动只改宽度、松手才重排终端 -->
-        <div id="sess-resizer" title="拖动调整会话栏宽度 · 双击恢复默认"></div>
+        <div id="sess-resizer" data-i18n-title="sidebar.resize"></div>
       </aside>
 
       <main id="main">
@@ -43,10 +122,10 @@
         <!-- Ctrl+R：输入条上方的历史检索覆盖层。Enter 只填不送，Esc 恢复草稿。 -->
         <div id="hist-overlay" hidden>
           <div id="hist-head">
-            <span id="hist-title">命令历史</span>
+            <span id="hist-title"><span data-i18n="history.title">命令历史</span></span>
             <span id="hist-count"></span>
-            <button id="hist-clear" title="只清空当前会话的命令历史">清空本会话</button>
-            <button id="hist-close" title="关闭（Esc）">✕</button>
+            <button id="hist-clear" data-i18n-title="history.clearHint"><span data-i18n="history.clear">清空本会话</span></button>
+            <button id="hist-close" data-i18n-title="history.closeHint">✕</button>
           </div>
           <input
             id="hist-query"
@@ -54,13 +133,13 @@
             spellcheck="false"
             autocomplete="off"
             autocapitalize="off"
-            placeholder="检索（含大写则区分大小写）"
+            data-i18n-ph="history.search"
           />
           <div id="hist-list"></div>
-          <div id="hist-foot">↑↓ 选择 · Enter 填入输入条 · Esc / Ctrl+R 关闭</div>
+          <div id="hist-foot"><span data-i18n="history.foot">↑↓ 选择 · Enter 填入输入条 · Esc / Ctrl+R 关闭</span></div>
         </div>
 
-        <div id="inputbar-resizer" title="拖动调整输入区高度 · 双击恢复默认"></div>
+        <div id="inputbar-resizer" data-i18n-title="input.resize"></div>
         <div id="inputbar" class="pass">
           <div id="ib-wrap">
             <textarea
@@ -69,94 +148,161 @@
               spellcheck="false"
               autocomplete="off"
               autocapitalize="off"
-              placeholder="输入命令"
+              data-i18n-ph="input.placeholder"
               disabled
             ></textarea>
             <span id="ib-ghost" aria-hidden="true"></span>
           </div>
           <div id="ib-footer">
-            <button id="ib-history" type="button" title="命令历史" aria-label="命令历史">历史</button>
+            <button id="ib-history" type="button" data-i18n-title="input.historyHint" data-i18n-aria="input.historyHint"><span data-i18n="input.history">历史</span></button>
             <div id="ib-status">
               <span id="own-dot"></span>
               <span id="own-label"></span>
             </div>
-            <span id="ib-paused" hidden>暂停中</span>
+            <span id="ib-paused" hidden><span data-i18n="input.paused">暂停中</span></span>
             <div id="ib-actions">
-              <button id="ib-override" title="切换直通 / 接管">直通</button>
-              <button id="ib-hex" title="切换 HEX 输入（仅限十六进制字符，自动按字节分隔）" hidden>HEX</button>
-              <button id="ib-log" title="打开本会话的串口日志" hidden>日志</button>
+              <button id="ib-override" data-i18n-title="input.overrideHint"><span data-i18n="session.passthrough">直通</span></button>
+              <button id="ib-hex" data-i18n-title="input.hexHint" hidden>HEX</button>
+              <button id="ib-log" data-i18n-title="input.logHint" hidden><span data-i18n="input.log">日志</span></button>
             </div>
-            <button id="ib-send" type="button" title="发送（Enter）" aria-label="发送" disabled>发送</button>
+            <button id="ib-send" type="button" data-i18n-title="input.sendHint" data-i18n-aria="input.sendHint" disabled><span data-i18n="input.send">发送</span></button>
           </div>
         </div>
       </main>
 
       <!-- 文件面板（M4）：默认跟随焦点会话的 CWD，手动导航后转为固定路径 -->
       <aside id="files">
-        <div id="files-resizer" title="拖动调整宽度 · 双击恢复默认"></div>
-        <button id="files-expand" title="展开文件面板" hidden>◧</button>
+        <div id="files-resizer" data-i18n-title="files.resize"></div>
+        <!-- 整栏收起后只剩这条竖条：点它展开，宽度与折叠状态会记住 -->
+        <button id="files-expand" data-i18n-title="files.expand" hidden><span data-i18n="files.title">文件</span></button>
         <div id="files-body">
-          <section id="shortcuts-panel" aria-label="快捷指令">
-            <div id="shortcuts-resizer" title="拖动调整快捷指令区高度"></div>
-            <div id="shortcuts-head">
-              <button id="shortcuts-toggle" type="button" aria-expanded="true" title="收起快捷指令"><span id="shortcuts-chevron" aria-hidden="true">▾</span>快捷指令</button>
-              <button id="shortcuts-new" type="button" title="新建快捷指令">＋</button>
-              <button id="shortcuts-import" type="button" title="导入指令集 JSON">导入</button>
-              <button id="shortcuts-export" type="button" title="导出当前会话指令集 JSON">导出</button>
+          <section id="shortcuts-panel" class="panel" data-i18n-aria="shortcuts.title">
+            <div id="shortcuts-head" class="panel-head">
+              <div id="shortcuts-resizer" data-fold-ignore data-i18n-title="shortcuts.resize"></div>
+              <button id="shortcuts-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="shortcuts-body" data-i18n-title="panel.collapse">
+                <span id="shortcuts-chevron" class="panel-chevron" aria-hidden="true">▾</span><span class="panel-title"><span data-i18n="shortcuts.title">快捷指令</span></span>
+              </button>
+              <div class="panel-tools">
+                <button id="shortcuts-select" class="icon-btn" type="button" aria-pressed="false" data-i18n-title="bulk.selectShortcuts" data-i18n-aria="bulk.selectShortcuts"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5" /><path d="M5.3 8.1l2 2 3.6-4" /></svg></button>
+                <button id="shortcuts-new" type="button" data-i18n-title="shortcuts.new">＋</button>
+                <button id="shortcuts-import" type="button" data-i18n-title="shortcuts.importHint"><span data-i18n="shortcuts.import">导入</span></button>
+                <button id="shortcuts-export" type="button" data-i18n-title="shortcuts.exportHint"><span data-i18n="shortcuts.export">导出</span></button>
+              </div>
               <input id="shortcuts-file" type="file" accept="application/json,.json" hidden />
             </div>
-            <div id="shortcuts-body">
+            <div id="shortcuts-body" class="panel-body">
+              <!-- 批量模式：与左栏会话列表同一条操作栏，勾选后一次删除多条 -->
+              <div id="shortcuts-bulk" class="bulk-bar" hidden>
+                <button id="shortcuts-select-all" type="button" data-i18n="bulk.selectAll">全选</button>
+                <button id="shortcuts-select-invert" type="button" data-i18n="bulk.invert">反选</button>
+                <button id="shortcuts-delete-selected" type="button" class="danger" data-i18n-title="bulk.deleteHint">删除</button>
+                <button id="shortcuts-select-done" type="button" data-i18n="bulk.done">完成</button>
+              </div>
               <div id="shortcuts-list"></div>
               <div id="shortcuts-status" role="status"></div>
             </div>
           </section>
-          <div id="files-head">
-            <button id="files-mode" class="on" title="跟随当前会话的 CWD">跟随</button>
-            <select id="files-sort" title="文件排序方式" aria-label="文件排序方式">
-              <option value="name">名称排序</option>
-              <option value="created">创建时间</option>
-            </select>
-            <button id="files-refresh" title="刷新">⟳</button>
-            <button id="files-auto" title="自动刷新：每 3 秒一次（大目录自动放慢）">自动</button>
-            <button id="files-hidden" title="显示隐藏项（以点开头或带隐藏属性）">隐</button>
-            <button id="files-collapse" title="收起面板">›</button>
-          </div>
-          <div id="files-path"></div>
-          <div id="files-refreshed" hidden></div>
-          <div id="files-list"></div>
-          <div id="files-foot">双击目录进入 · 双击文件填入输入条</div>
+          <section id="files-panel" class="panel" data-i18n-aria="files.title">
+            <div id="files-head" class="panel-head">
+              <button id="files-toggle" class="panel-toggle" type="button" aria-expanded="true" aria-controls="files-main" data-i18n-title="panel.collapse">
+                <span id="files-chevron" class="panel-chevron" aria-hidden="true">▾</span><span class="panel-title"><span data-i18n="files.title">文件</span></span>
+              </button>
+            </div>
+            <div id="files-main" class="panel-body">
+              <!-- 操作行：按钮多，单独占一行，窄栏时自己换行，不挤标题栏 -->
+              <div id="files-tools" class="panel-toolbar">
+                <button id="files-mode" class="on" data-i18n-title="files.followHint"><span data-i18n="files.follow">跟随</span></button>
+                <button id="files-sort" data-i18n-title="files.sort" data-i18n-aria="files.sort" aria-haspopup="menu">名称 ↑</button>
+                <button id="files-refresh" data-i18n-title="files.refresh">⟳</button>
+                <button id="files-auto" data-i18n-aria="files.auto" data-i18n-title="files.autoOff"><span data-i18n="files.autoShort">刷</span></button>
+                <button id="files-hidden" data-i18n-title="files.hidden"><span data-i18n="files.hiddenShort">隐</span></button>
+              </div>
+              <div id="files-path"></div>
+              <div id="files-refreshed" hidden></div>
+              <div id="files-list" tabindex="-1"></div>
+              <div id="files-foot"><span data-i18n="files.foot">双击目录进入 · 双击文件填入输入条</span></div>
+            </div>
+          </section>
         </div>
       </aside>
 
+      <!-- 全局设置：语言、主题、版本与更新。终端字体大小属于会话，放在会话设置里。 -->
+      <div id="settings-overlay" hidden>
+        <section id="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+          <header>
+            <h2 id="settings-title" data-i18n="globalSettings.title">全局设置</h2>
+            <button id="settings-close" type="button" data-i18n-title="globalSettings.close" data-i18n-aria="globalSettings.close">×</button>
+          </header>
+          <div class="settings-section">
+            <h3 data-i18n="globalSettings.sectionGeneral">常规</h3>
+            <label>
+              <span data-i18n="globalSettings.language">语言</span>
+              <select id="setting-language">
+                <option value="zh" data-i18n="globalSettings.langZh">中文</option>
+                <option value="en" data-i18n="globalSettings.langEn">English</option>
+              </select>
+            </label>
+            <label>
+              <span data-i18n="globalSettings.theme">主题</span>
+              <select id="setting-theme">
+                <!-- 顺序与 src/theme.ts 的 THEMES 一致：先暗后亮 -->
+                <option value="dark" data-i18n="globalSettings.themeDark">暗黑</option>
+                <option value="midnight" data-i18n="globalSettings.themeMidnight">深空蓝</option>
+                <option value="ember" data-i18n="globalSettings.themeEmber">炭火</option>
+                <option value="nord" data-i18n="globalSettings.themeNord">极地雾</option>
+                <option value="cream" data-i18n="globalSettings.themeCream">乳白</option>
+                <option value="sand" data-i18n="globalSettings.themeSand">沙岩</option>
+                <option value="bright" data-i18n="globalSettings.themeBright">明亮</option>
+                <option value="mist" data-i18n="globalSettings.themeMist">雾灰</option>
+                <option value="paper" data-i18n="globalSettings.themePaper">素纸</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-section">
+            <h3 data-i18n="globalSettings.sectionAbout">关于</h3>
+            <div class="settings-update">
+              <span id="settings-version"></span>
+              <button id="settings-check-update" type="button" data-i18n="globalSettings.checkUpdate">检查更新</button>
+            </div>
+            <div class="settings-update"><span id="update-status" role="status"></span></div>
+          </div>
+          <footer><button id="settings-done" type="button" data-i18n="globalSettings.done">完成</button></footer>
+        </section>
+      </div>
+
       <div id="shortcut-overlay" hidden>
-        <form id="shortcut-form">
-          <div id="shortcut-dialog-head"><span id="shortcut-dialog-title">快捷指令</span><button id="shortcut-dialog-close" type="button" title="关闭">×</button></div>
-          <label>名称<input id="shortcut-name" type="text" maxlength="80" autocomplete="off" /></label>
-          <label>命令<textarea id="shortcut-command" rows="7" spellcheck="false"></textarea></label>
-          <fieldset><legend>点击行为</legend><label><input type="radio" name="shortcut-mode" value="execute" checked /> 执行</label><label><input type="radio" name="shortcut-mode" value="fill" /> 填入</label></fieldset>
-          <div id="shortcut-dialog-foot"><span id="shortcut-error" role="alert"></span><button id="shortcut-cancel" type="button">取消</button><button type="submit">保存</button></div>
+        <form id="shortcut-form" autocomplete="off">
+          <div id="shortcut-dialog-head"><span id="shortcut-dialog-title"><span data-i18n="shortcuts.title">快捷指令</span></span><button id="shortcut-dialog-close" type="button" data-i18n-title="common.close">×</button></div>
+          <label><span data-i18n="shortcuts.nameLabel">名称</span><input id="shortcut-name" type="text" maxlength="80" autocomplete="off" /></label>
+          <label><span data-i18n="shortcuts.commandLabel">命令</span><textarea id="shortcut-command" rows="7" spellcheck="false"></textarea></label>
+          <fieldset><legend><span data-i18n="shortcuts.modeLegend">点击行为</span></legend><label><input type="radio" name="shortcut-mode" value="execute" checked /> <span data-i18n="shortcuts.execute">执行</span></label><label><input type="radio" name="shortcut-mode" value="fill" /> <span data-i18n="shortcuts.fill">填入</span></label></fieldset>
+          <div id="shortcut-dialog-foot"><span id="shortcut-error" role="alert"></span><button id="shortcut-cancel" type="button"><span data-i18n="serial.cancel">取消</span></button><button type="submit"><span data-i18n="shortcuts.save">保存</span></button></div>
         </form>
       </div>
 
       <!-- 新建串口会话：连接参数只在创建时填一次，之后随工作区落盘，冷会话按它重连 -->
       <div id="serial-overlay" hidden>
-        <form id="serial-form">
+        <form id="serial-form" autocomplete="off">
           <div id="serial-head">
-            <span>新建串口会话</span>
-            <button type="button" id="serial-close" title="关闭（Esc）">✕</button>
+            <span data-i18n="serial.title">新建串口会话</span>
+            <button type="button" id="serial-close" data-i18n-title="serial.closeHint">✕</button>
           </div>
           <div id="serial-grid">
-            <label class="wide">端口
+            <label class="wide"><span data-i18n="serial.port">端口</span>
               <span class="serial-inline">
-                <input id="serial-port" list="serial-port-list" placeholder="COM3" spellcheck="false" autocomplete="off" autocapitalize="off" />
-                <button type="button" id="serial-refresh" title="重新枚举串口">⟳</button>
+                <!-- 端口由「从哪个串口行点进来」决定：这里只显示，不让改。
+                     想换端口就去左侧串口列表点另一个口。 -->
+                <input id="serial-port" placeholder="COM3" spellcheck="false" autocomplete="off" autocapitalize="off" readonly />
               </span>
             </label>
-            <datalist id="serial-port-list"></datalist>
-            <label>波特率
-              <input id="serial-baud" type="number" min="50" max="4000000" step="1" value="115200" />
+            <label><span data-i18n="serial.baud">波特率</span>
+              <!-- 常用值来自 src/serialUi.ts 的 COMMON_BAUD_RATES：可直接改数字，也可点箭头挑一个 -->
+              <span class="baud-field">
+                <input id="serial-baud" type="number" min="50" max="4000000" step="1" value="115200" autocomplete="off" data-i18n-title="serial.baudHint" />
+                <button type="button" id="serial-baud-pick" data-i18n-title="serial.baudPick" data-i18n-aria="serial.baudPick" aria-haspopup="menu">▾</button>
+              </span>
             </label>
-            <label>数据位
+            <label><span data-i18n="serial.dataBits">数据位</span>
               <select id="serial-data">
                 <option value="8" selected>8</option>
                 <option value="7">7</option>
@@ -164,50 +310,49 @@
                 <option value="5">5</option>
               </select>
             </label>
-            <label>校验
+            <label><span data-i18n="serial.parity">校验</span>
               <select id="serial-parity">
-                <option value="none" selected>无</option>
-                <option value="odd">奇</option>
-                <option value="even">偶</option>
+                <option value="none" selected data-i18n="serial.parityNone">无</option>
+                <option value="odd" data-i18n="serial.parityOdd">奇</option>
+                <option value="even" data-i18n="serial.parityEven">偶</option>
               </select>
             </label>
-            <label>停止位
+            <label><span data-i18n="serial.stopBits">停止位</span>
               <select id="serial-stop">
                 <option value="one" selected>1</option>
                 <option value="two">2</option>
               </select>
             </label>
-            <label>流控
+            <label><span data-i18n="serial.flow">流控</span>
               <select id="serial-flow">
-                <option value="none" selected>无</option>
+                <option value="none" selected data-i18n="serial.flowNone">无</option>
                 <option value="software">XON/XOFF</option>
                 <option value="hardware">RTS/CTS</option>
               </select>
             </label>
-            <label>行结束符
+            <label><span data-i18n="serial.lineEnding">行结束符</span>
               <select id="serial-ending">
                 <option value="crlf" selected>CRLF（\r\n）</option>
                 <option value="cr">CR（\r）</option>
                 <option value="lf">LF（\n）</option>
               </select>
             </label>
-            <label>发送方式
+            <label><span data-i18n="serial.sendMode">发送方式</span>
               <select id="serial-mode">
-                <option value="line" selected>行缓冲</option>
-                <option value="direct">直发</option>
+                <option value="line" selected data-i18n="serial.modeLine">行缓冲</option>
+                <option value="direct" data-i18n="serial.modeDirect">直发</option>
               </select>
             </label>
           </div>
           <div id="serial-flags">
             <label><input id="serial-dtr" type="checkbox" checked /> DTR</label>
             <label><input id="serial-rts" type="checkbox" checked /> RTS</label>
-            <span>打开端口时把这两条握手线拉高；多数 USB 转串口需要</span>
+            <span data-i18n="serial.flagsHint">打开端口时把这两条握手线拉高；多数 USB 转串口需要</span>
           </div>
           <div id="serial-error"></div>
           <div id="serial-foot">
-            <span id="serial-ports-hint"></span>
-            <button type="button" id="serial-cancel">取消</button>
-            <button type="submit" id="serial-create">创建</button>
+            <button type="button" id="serial-cancel"><span data-i18n="serial.cancel">取消</span></button>
+            <button type="submit" id="serial-create"><span data-i18n="serial.create">创建</span></button>
           </div>
         </form>
       </div>

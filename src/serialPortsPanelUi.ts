@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import { parseFolded, serializeFolded, setupFoldPanel } from "./panelFold";
 import { dragHeight, DRAGGING_CLASS } from "./resize";
 import { createPortPolling, samePorts } from "./serialPortsPanel";
 import { portLabel, type SerialPort } from "./serialUi";
+import { onLocaleChange, t } from "./i18n";
+import { showPopupMenu } from "./popupMenu";
+
+const FOLD_KEY = "pinshell.ports.folded";
 
 export interface SerialPortsPanelDeps {
   open(port: string): void;
@@ -10,7 +15,6 @@ export interface SerialPortsPanelDeps {
 export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
   const root = document.getElementById("ports-panel") as HTMLElement;
   const sidebar = document.getElementById("sidebar") as HTMLElement;
-  const toggle = document.getElementById("ports-toggle") as HTMLButtonElement;
   const resizer = document.getElementById("ports-resizer") as HTMLElement;
   const refresh = document.getElementById("ports-refresh") as HTMLButtonElement;
   const autoButton = document.getElementById("ports-auto") as HTMLButtonElement;
@@ -60,16 +64,25 @@ export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
         add.className = "port-add";
         add.textContent = "＋";
         row.addEventListener("mousedown", (event) => event.preventDefault());
-        row.addEventListener("click", () => {
-          selectedPort = row!.dataset.port ?? null;
-          for (const item of rows.values()) {
-            item.classList.toggle("sel", item.dataset.port === selectedPort);
-          }
+        row.addEventListener("click", () => selectPort(row!.dataset.port ?? null));
+        row.addEventListener("dblclick", () => deps.open(row!.dataset.port ?? ""));
+        // 右键：菜单里直接给出「新建串口会话」，不必再去找行尾的小加号
+        row.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          const target = row!.dataset.port ?? "";
+          selectPort(target);
+          showPopupMenu(
+            { x: event.clientX, y: event.clientY },
+            [
+              { label: t("serial.title"), run: () => deps.open(target) },
+              { label: t("sidebar.refreshPorts"), run: () => void polling.refresh() }
+            ],
+            { minWidth: 168 }
+          );
         });
-        row.addEventListener("dblclick", () => deps.open(row!.dataset.port!));
         add.addEventListener("click", (event) => {
           event.stopPropagation();
-          deps.open(row!.dataset.port!);
+          deps.open(row!.dataset.port ?? "");
         });
         add.addEventListener("dblclick", (event) => event.stopPropagation());
         row.append(name, add);
@@ -79,18 +92,24 @@ export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
       row.title = portLabel(port);
       row.querySelector<HTMLElement>(".port-label")!.textContent = portLabel(port);
       const add = row.querySelector<HTMLButtonElement>(".port-add")!;
-      add.title = `新建 ${port.port} 串口会话`;
+      add.title = t("serial.title");
       add.setAttribute("aria-label", add.title);
       const current = list.children[index];
       if (current !== row) list.insertBefore(row, current ?? null);
     });
   }
 
+  /// 串口列表的选中行：同一时刻只有一行带 `sel`。
+  function selectPort(port: string | null) {
+    selectedPort = port;
+    for (const item of rows.values()) item.classList.toggle("sel", item.dataset.port === selectedPort);
+  }
+
   function showLastRefresh(now: Date) {
     const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
       .map((part) => String(part).padStart(2, "0"))
       .join(":");
-    refreshed.textContent = `刷新于：${time}`;
+    refreshed.textContent = t("sidebar.portsRefreshed", { time });
     refreshed.dataset.auto = String(auto);
     refreshed.hidden = !auto;
   }
@@ -100,7 +119,7 @@ export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
     read: async () => {
       refresh.disabled = true;
       root.setAttribute("aria-busy", "true");
-      if (previous === null) status.textContent = "正在枚举串口…";
+      if (previous === null) status.textContent = t("sidebar.enumerating");
       try {
         return await invoke<SerialPort[]>("serial_ports");
       } finally {
@@ -112,21 +131,44 @@ export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
       if (!samePorts(previous, ports)) render(ports);
       previous = ports;
       status.classList.remove("error");
-      status.textContent = ports.length ? `${ports.length} 个端口` : "没有枚举到串口";
+      status.textContent = ports.length
+        ? t("sidebar.portsCount", { n: ports.length })
+        : t("sidebar.portsEmpty");
       status.title = "";
       showLastRefresh(new Date());
     },
     error: (error) => {
       previous = null;
       status.classList.add("error");
-      status.textContent = "枚举串口失败";
+      status.textContent = t("sidebar.portsFailed");
       status.title = String(error);
     }
   });
 
-  for (const button of [toggle, refresh, autoButton]) {
+  for (const button of [refresh, autoButton]) {
     button.addEventListener("mousedown", (event) => event.preventDefault());
   }
+
+  // 标题栏单击折叠：只收起列表，刷新与自动刷新按钮留在标题栏上照常可用
+  const fold = setupFoldPanel({
+    root,
+    toggle: document.getElementById("ports-toggle") as HTMLElement,
+    chevron: document.getElementById("ports-chevron"),
+    label: t("sidebar.serial"),
+    collapsed: parseFolded(localStorage.getItem(FOLD_KEY)),
+    onChange: (next) => {
+      expanded = !next;
+      try {
+        localStorage.setItem(FOLD_KEY, serializeFolded(next));
+      } catch {
+        // 存不下只影响下次打开的默认值
+      }
+      polling.sync();
+      if (expanded && previous === null) void polling.refresh();
+    }
+  });
+  expanded = !fold.collapsed;
+
   resizer.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !expanded) return;
     event.preventDefault();
@@ -152,20 +194,13 @@ export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
     applyHeight();
     localStorage.setItem("pinshell.ports.height", String(height));
   });
-  toggle.addEventListener("click", () => {
-    expanded = !expanded;
-    root.classList.toggle("collapsed", !expanded);
-    toggle.setAttribute("aria-expanded", String(expanded));
-    toggle.title = expanded ? "收起串口面板" : "展开串口面板";
-    polling.sync();
-    if (expanded && previous === null) void polling.refresh();
-  });
   refresh.addEventListener("click", () => void polling.refresh());
   autoButton.addEventListener("click", () => {
     auto = !auto;
     autoButton.classList.toggle("on", auto);
     autoButton.setAttribute("aria-pressed", String(auto));
-    autoButton.title = auto ? "自动刷新已开：每 1 秒枚举一次，点一下关闭" : "自动刷新：每 1 秒枚举一次";
+    autoButton.setAttribute("aria-label", t("sidebar.autoPorts"));
+    autoButton.title = auto ? t("sidebar.autoPortsOn") : t("sidebar.autoPortsOff");
     refreshed.dataset.auto = String(auto);
     refreshed.hidden = !auto || previous === null;
     polling.setAuto(auto);
@@ -187,6 +222,21 @@ export function setupSerialPortsPanel(deps: SerialPortsPanelDeps) {
   observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
   applyHeight();
   if (visible()) void polling.refresh();
+
+  // 语言变了：面板名、行提示、自动刷新的说明都要换
+  onLocaleChange(() => {
+    const label = root.querySelector(".panel-title");
+    if (label) label.textContent = t("sidebar.serial");
+    fold.set(fold.collapsed, true);
+    if (previous) render(previous);
+    autoButton.title = auto ? t("sidebar.autoPortsOn") : t("sidebar.autoPortsOff");
+    autoButton.setAttribute("aria-label", t("sidebar.autoPorts"));
+    if (previous) {
+      status.textContent = previous.length
+        ? t("sidebar.portsCount", { n: previous.length })
+        : t("sidebar.portsEmpty");
+    }
+  });
 
   window.addEventListener("resize", () => {
     if (!expanded) return;

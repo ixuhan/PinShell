@@ -14,7 +14,7 @@ use core_domain::ownership::TransportKind;
 use core_domain::serial::{
     DataBits, FlowControl, LineEnding, Parity, SendMode, SerialConfig, StopBits,
 };
-use core_domain::workspace::{Axis, Layout, Rect, SessionMeta, Window, Workspace};
+use core_domain::workspace::{Axis, Layout, Rect, SessionMeta, SessionSettings, Window, Workspace};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -309,7 +309,68 @@ struct SessionFile {
     #[serde(default)]
     serial: Option<SerialFile>,
     #[serde(default)]
+    settings: SettingsFile,
+    #[serde(default)]
     hot: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SettingsFile {
+    cr_as_newline: bool,
+    console_timestamps: bool,
+    file_timestamps: bool,
+    timestamp_format: Option<String>,
+    log_directory: Option<String>,
+    log_filename: Option<String>,
+    logging: bool,
+    /// 暂停/继续（断开/连接）时换新日志文件。老文件没有这个字段就按默认关闭读回。
+    new_log_on_toggle: bool,
+    /// 终端字号。老文件没有这个字段时按默认值读回；serde 会忽略未知字段，
+    /// 所以不必为此升 `WORKSPACE_VERSION`（旧版读到新文件也不会失败）。
+    font_size: Option<u16>,
+}
+
+impl From<&SessionSettings> for SettingsFile {
+    fn from(settings: &SessionSettings) -> Self {
+        Self {
+            cr_as_newline: settings.cr_as_newline,
+            console_timestamps: settings.console_timestamps,
+            file_timestamps: settings.file_timestamps,
+            timestamp_format: Some(settings.timestamp_format.clone()),
+            log_directory: settings.log_directory.clone(),
+            log_filename: Some(settings.log_filename.clone()),
+            logging: settings.logging,
+            new_log_on_toggle: settings.new_log_on_toggle,
+            font_size: Some(settings.font_size),
+        }
+    }
+}
+
+impl SettingsFile {
+    fn to_settings(&self) -> SessionSettings {
+        let defaults = SessionSettings::default();
+        SessionSettings {
+            cr_as_newline: self.cr_as_newline,
+            console_timestamps: self.console_timestamps,
+            file_timestamps: self.file_timestamps,
+            timestamp_format: self
+                .timestamp_format
+                .clone()
+                .unwrap_or(defaults.timestamp_format),
+            log_directory: self.log_directory.clone(),
+            log_filename: self.log_filename.clone().unwrap_or(defaults.log_filename),
+            logging: self.logging,
+            new_log_on_toggle: self.new_log_on_toggle,
+            font_size: self
+                .font_size
+                .unwrap_or(defaults.font_size)
+                .clamp(
+                    core_domain::workspace::MIN_FONT_SIZE,
+                    core_domain::workspace::MAX_FONT_SIZE,
+                ),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -472,17 +533,41 @@ pub enum WorkspaceLoad {
 }
 
 pub fn load_workspace(dir: &Path) -> WorkspaceLoad {
-    match read_with_backup::<WorkspaceFile>(&dir.join(WORKSPACE_FILE)) {
-        Load::Missing => WorkspaceLoad::Missing,
-        Load::Unreadable(err) => WorkspaceLoad::Unreadable(err),
-        Load::Primary(file) => match workspace_from_file(file) {
-            Ok(workspace) => WorkspaceLoad::Loaded(workspace),
-            Err(err) => WorkspaceLoad::Unreadable(err),
-        },
-        Load::Backup(file) => match workspace_from_file(file) {
-            Ok(workspace) => WorkspaceLoad::Recovered(workspace),
-            Err(err) => WorkspaceLoad::Unreadable(err),
-        },
+    let path = dir.join(WORKSPACE_FILE);
+    let mut errors = Vec::new();
+    for (candidate, primary) in [(path.clone(), true), (sibling(&path, ".bak"), false)] {
+        let bytes = match fs::read(&candidate) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                errors.push(format!("{}: {err}", candidate.display()));
+                continue;
+            }
+        };
+        // 先读取版本，避免未来版本新增字段导致反序列化失败后误用旧备份。
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(version) = value.get("version").and_then(|v| v.as_u64()) {
+                if version > u64::from(WORKSPACE_VERSION) {
+                    return WorkspaceLoad::Unreadable(format!(
+                        "{}: workspace version {version} is newer than {WORKSPACE_VERSION}",
+                        candidate.display()
+                    ));
+                }
+            }
+        }
+        let workspace = serde_json::from_slice::<WorkspaceFile>(&bytes)
+            .map_err(|err| err.to_string())
+            .and_then(workspace_from_file);
+        match workspace {
+            Ok(workspace) if primary => return WorkspaceLoad::Loaded(workspace),
+            Ok(workspace) => return WorkspaceLoad::Recovered(workspace),
+            Err(err) => errors.push(format!("{}: {err}", candidate.display())),
+        }
+    }
+    if errors.is_empty() {
+        WorkspaceLoad::Missing
+    } else {
+        WorkspaceLoad::Unreadable(errors.join("; "))
     }
 }
 
@@ -518,6 +603,7 @@ fn workspace_to_file(workspace: &Workspace) -> WorkspaceFile {
                 cwd: session.cwd.clone(),
                 shell: session.shell.clone(),
                 serial: session.serial.as_ref().map(SerialFile::from),
+                settings: SettingsFile::from(&session.settings),
                 hot: session.hot,
             })
             .collect(),
@@ -567,14 +653,26 @@ fn workspace_from_file(file: WorkspaceFile) -> Result<Workspace, String> {
         sessions: file
             .sessions
             .iter()
-            .map(|session| SessionMeta {
-                id: session.id.clone(),
-                title: session.title.clone(),
-                transport: session.transport.into(),
-                cwd: session.cwd.clone(),
-                shell: session.shell.clone(),
-                serial: session.serial.as_ref().map(SerialFile::to_config),
-                hot: false,
+            .map(|session| {
+                let serial = session.serial.as_ref().map(SerialFile::to_config);
+                // 旧版本的串口默认标题是「COM3 · 115200」。只有这个出厂名才收成纯端口：
+                // 用户改过的名字（哪怕碰巧长得像）保持原样。
+                let title = match &serial {
+                    Some(config) if session.title == config.legacy_default_title() => {
+                        config.default_title()
+                    }
+                    _ => session.title.clone(),
+                };
+                SessionMeta {
+                    id: session.id.clone(),
+                    title,
+                    transport: session.transport.into(),
+                    cwd: session.cwd.clone(),
+                    shell: session.shell.clone(),
+                    serial,
+                    settings: session.settings.to_settings(),
+                    hot: false,
+                }
             })
             .collect(),
     };
@@ -631,6 +729,61 @@ mod tests {
     }
 
     #[test]
+    fn invalid_primary_workspace_recovers_from_valid_backup() {
+        let dir = temp_dir("invalid-primary-backup");
+        let ws = sample_workspace();
+        save_workspace(&dir, &ws).unwrap();
+        let path = dir.join(WORKSPACE_FILE);
+        fs::write(&path, br#"{"version":2,"windows":[{"id":1,"x":0,"y":0,"width":800,"height":600,"layout":{"kind":"leaf","session":"ghost"}}],"sessions":[]}"#).unwrap();
+        let backup = sibling(&path, ".bak");
+        fs::write(
+            &backup,
+            serde_json::to_vec(&workspace_to_file(&ws)).unwrap(),
+        )
+        .unwrap();
+
+        match load_workspace(&dir) {
+            WorkspaceLoad::Recovered(back) => assert_eq!(back, ws),
+            other => panic!("expected Recovered, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn future_workspace_version_is_rejected_without_downgrade() {
+        let dir = temp_dir("future-version");
+        let path = dir.join(WORKSPACE_FILE);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, br#"{"version":99,"windows":[],"sessions":[]}"#).unwrap();
+        fs::write(
+            sibling(&path, ".bak"),
+            br#"{"version":2,"windows":[],"sessions":[]}"#,
+        )
+        .unwrap();
+
+        match load_workspace(&dir) {
+            WorkspaceLoad::Unreadable(err) => assert!(err.contains("newer than")),
+            other => panic!("expected Unreadable, got {:?}", describe(&other)),
+        }
+        assert!(fs::read_to_string(&path).unwrap().contains("99"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_workspace_is_not_replaced_by_an_empty_workspace() {
+        let dir = temp_dir("unreadable-preserved");
+        let path = dir.join(WORKSPACE_FILE);
+        fs::create_dir_all(&dir).unwrap();
+        let invalid = b"not-json";
+        fs::write(&path, invalid).unwrap();
+        fs::write(sibling(&path, ".bak"), invalid).unwrap();
+        assert!(matches!(load_workspace(&dir), WorkspaceLoad::Unreadable(_)));
+        assert_eq!(fs::read(&path).unwrap(), invalid);
+        assert_eq!(fs::read(sibling(&path, ".bak")).unwrap(), invalid);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn workspace_round_trips_through_disk() {
         let dir = temp_dir("roundtrip");
         let ws = sample_workspace();
@@ -671,7 +824,7 @@ mod tests {
         config.dtr = false;
         config.line_ending = LineEnding::Lf;
         config.send_mode = SendMode::Direct;
-        ws.add_session(SessionMeta::serial("ser", "COM7 · 9600", config.clone()))
+        ws.add_session(SessionMeta::serial("ser", "COM7", config.clone()))
             .unwrap();
         save_workspace(&dir, &ws).unwrap();
 
@@ -681,6 +834,76 @@ mod tests {
                 assert_eq!(meta.transport, TransportKind::Serial);
                 assert_eq!(meta.serial.as_ref(), Some(&config));
                 assert_eq!(back, ws);
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_serial_default_title_drops_the_baud_but_renames_survive() {
+        let dir = temp_dir("serial-title");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            r#"{"version":2,"windows":[],"sessions":[
+                {"id":"a","title":"COM7 · 115200","transport":"serial","serial":{"port":"COM7","baud":115200,"data_bits":8,"parity":"none","stop_bits":"one","flow":"none","dtr":true,"rts":true,"line_ending":"crlf","send_mode":"line"}},
+                {"id":"b","title":"我的板子","transport":"serial","serial":{"port":"COM8","baud":9600,"data_bits":8,"parity":"none","stop_bits":"one","flow":"none","dtr":true,"rts":true,"line_ending":"crlf","send_mode":"line"}}
+            ]}"#,
+        )
+        .unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(workspace) => {
+                // 出厂名「COM7 · 115200」收成端口；用户改过的名字原样保留
+                assert_eq!(workspace.session("a").unwrap().title, "COM7");
+                assert_eq!(workspace.session("b").unwrap().title, "我的板子");
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn older_sessions_get_default_log_settings() {
+        let dir = temp_dir("settings-default");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(WORKSPACE_FILE), br#"{"version":2,"windows":[],"sessions":[{"id":"s","title":"sh","transport":"terminal","shell":"pwsh.exe"}]}"#).unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(workspace) => {
+                let settings = &workspace.session("s").unwrap().settings;
+                assert!(!settings.cr_as_newline);
+                assert_eq!(settings.timestamp_format, "yyyy-MM-dd HH:mm:ss.SSS");
+                assert_eq!(settings.log_filename, "%Y%M%D-%h%m%s.log");
+                assert!(!settings.logging);
+                assert!(!settings.new_log_on_toggle);
+                // 老文件没有字号：读回默认值，而不是 0
+                assert_eq!(settings.font_size, SessionSettings::default().font_size);
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn font_size_round_trips_and_is_clamped_on_load() {
+        let dir = temp_dir("settings-font-size");
+        fs::create_dir_all(&dir).unwrap();
+        // 越界值读回时夹到合法区间：0 → MIN，99 → MAX；合法值原样保留
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            br#"{"version":2,"windows":[],"sessions":[
+                {"id":"lo","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":0}},
+                {"id":"hi","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":99}},
+                {"id":"ok","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":18}}
+            ]}"#,
+        )
+        .unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(workspace) => {
+                let size = |id: &str| workspace.session(id).unwrap().settings.font_size;
+                assert_eq!(size("lo"), core_domain::workspace::MIN_FONT_SIZE);
+                assert_eq!(size("hi"), core_domain::workspace::MAX_FONT_SIZE);
+                assert_eq!(size("ok"), 18);
             }
             other => panic!("expected Loaded, got {:?}", describe(&other)),
         }
@@ -824,7 +1047,6 @@ mod tests {
         assert_eq!(resolved, appdata.join("PinShell"));
         let _ = fs::remove_dir_all(&dir);
     }
-
     #[test]
     fn explicit_unwritable_dir_errors_instead_of_falling_back() {
         let dir = temp_dir("explicitbad");

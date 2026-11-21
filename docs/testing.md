@@ -137,7 +137,7 @@
 | `$env:CARGO_TARGET_DIR="<repo>\src-tauri\target-m5"` 后 `.\scripts\test-guard.ps1 -Layer all -Force` | dev 在跑、又必须跑 L1 时：换一份独立 target，不碰被占用的 `target\debug`，也就不用停 dev | 首次全量编译几分钟，之后 ~3 s | 磁盘多一份 target（`src-tauri/target-*/` 已忽略）；`-Force` 只跳过闸门判断，不跳过测试 |
 | `.\scripts\push.ps1` | 先跑 L0 门禁再推；`-SkipTests` 可跳过 | +0.5 s | 无 |
 
-前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）、`src/outQueue.ts`（清屏后的输出过滤）与 `src/serialUi.ts`（端口下拉文案）都是值得测的纯函数模块，用 vitest（node 环境，不起窗口、不占 1420），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
+前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）、`src/outQueue.ts`（清屏后的输出过滤）、`src/serialUi.ts`（端口下拉文案）、`src/displaySettings.ts`（字号区间收敛）、`src/i18n.ts`（中英文词典与占位符）与 `src/theme.ts`（主题偏好与终端配色）都是值得测的纯函数模块，用 vitest（node 环境，不起窗口、不占 1420），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
 
 ## 7. 汇报（已落地）
 
@@ -161,12 +161,29 @@
 | 项 | 步骤 | 期望 |
 |---|---|---|
 | 原生菜单 | `npm run app:dev`，右键文件面板里的文件 | 弹出资源管理器菜单，「打开方式」「发送到」与第三方扩展（7-Zip、TortoiseGit 等）都在；选一项能真的执行 |
+| 空白处背景菜单 | 右键文件列表的空白处（或「（空目录）」提示） | 弹出该目录的背景菜单（新建 / 粘贴 / 属性等，与资源管理器右键空白处同源）；选「新建 → 文本文档」能在当前目录建出文件 |
+| F5 刷新 | 单击文件列表空白处后按 `F5` | 列表立刻重读当前目录；焦点在终端时 `F5` 仍发给 Shell，不会刷新面板 |
+| 路径栏 | 单击面包屑里的某一级名称；点 `✎` 或双击路径栏空白处输入 `C:\Windows` 回车 | 名称单击直接进入该级目录；编辑后回车跳转、`Esc` 取消；输入不存在的路径显示错误并可继续编辑 |
+| 串口行右键 | 右键左侧「串口」栏里的某个端口 | 弹出自建菜单（新建串口会话 / 刷新列表）；选「新建串口会话」直接带该端口打开创建对话框 |
 | 取消 | 同上，点菜单外面或按 `Esc` | 菜单消失，会话、输入条、自动刷新都正常 |
-| 缺失降级 | 把 `src-tauri\target\debug\pinshell-shellmenu.exe` 改名后右键 | 出四项自建菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条），主进程不崩；改回名字并重启应用后恢复原生 |
+| 缺失降级 | 把 `src-tauri\target\debug\pinshell-shellmenu.exe` 改名后右键 | 出四项自建菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条），空白处出（打开 / 在资源管理器中显示 / 复制路径 / 刷新）；主进程不崩；改回名字并重启应用后恢复原生 |
 | 崩溃降级 | 用一个立刻退出的 exe 覆盖 helper（或启动应用前把 `PINSHELL_SHELLMENU` 指向它） | 同上降级，主进程存活，能继续切会话 |
 | 安装版 | 装 `src-tauri\target\release\bundle\nsis\PinShell_0.1.0_x64-setup.exe` 后右键 | 安装目录里有 `pinshell-shellmenu.exe`，右键仍出原生菜单；卸载后不残留 |
 
 打包这一项已自动核对：`npm run app:build` 产出的 MSI 与 NSIS 里各只有一份 `pinshell-shellmenu.exe`（生成的 `main.wxs` 与 `installer.nsi` 各一行），文件名与运行时查找的名字一致。
+
+### 8.3 会话设置、实时日志与文件栏跟随
+
+| 场景 | 操作 | 预期 |
+| --- | --- | --- |
+| Shell 实时日志 | 对 Shell 会话选择“设置”，选择临时目录并启用保存；执行两行命令并输入一条命令 | 文件按模板创建；收到的 Shell 输出按行写入，用户发送行带 `[TX]`；保存开关关闭后文件可完整读取 |
+| 时间戳目标 | 分别只开控制台、只开文件，再同时开启；使用 `yyyy-MM-dd HH:mm:ss.SSS` 默认值 | 两个目标独立生效，完整行每行仅加一次时间戳 |
+| 串口 CR 处理 | 假串口或真串口发送 `A\rB\r\nC`，设置里打开单独 CR 换行 | 显示为三行，CRLF 不产生额外空行，内部诊断日志仍保留原始数据 |
+| 串口参数 | 在连接状态修改波特率/数据位/校验/停止位/流控 | 波特率可从常用值下拉，也可直接输入别的值；端口只读（换口请从左侧串口列表另开会话）；保存后释放并按新参数重连；设备不接受参数时显示错误并保持断开 |
+| 暂停/继续切日志 | 勾选“暂停/继续（连接/断开）时新建日志文件”，暂停再继续并产生输出 | 切换后的第一条记录写进新的编号文件；不勾选时继续写同一个文件；暂停那一刻不留下空日志 |
+| 文件名冲突 | 在同一秒内启动两次保存，保持相同模板 | 后一次创建带序号的新文件，不覆盖原日志 |
+| 目录与跟随 | 选择日志目录，启用保存，文件栏保持“跟随”；停止保存 | 文件栏定位日志目录；停止后仍留在该目录；打开日志文件夹调用系统文件管理器 |
+| 冷会话 | 保存设置、退出并重新启动，打开对应 Shell/串口会话 | 时间戳、CR 选项、目录和模板恢复；日志默认停止，避免未启动的会话创建日志文件 |
 
 ### 8.2 M5 串口手工清单（改过 transport / 发送组包 / 日志后走一遍）
 
@@ -174,7 +191,7 @@
 
 | 项 | 步骤 | 期望 |
 |---|---|---|
-| 新建与回显 | `PINSHELL_FAKE_SERIAL=1` 后点侧栏「⌁」，端口选 `PINSHELL_LOOP`，创建 | 会话出现在树里（行首带 `⌁`），屏幕先出一行「PinShell 假串口」；输入条显示 `串口 PINSHELL_LOOP · 115200 8N1`；回车后内容原样回显 |
+| 新建与回显 | `PINSHELL_FAKE_SERIAL=1` 后点侧栏「⌁」，端口选 `PINSHELL_LOOP`，创建 | 会话出现在树里（行首带 `⌁`，标题就是 `PINSHELL_LOOP`，不再带波特率）；屏幕先出一行「PinShell 假串口」；输入条显示 `串口 PINSHELL_LOOP · 115200 8N1`；回车后内容原样回显 |
 | HEX | 点输入条「HEX」，输入 `41 54 0D 0A` 回车 | 屏幕回显 `AT`（不带行结束符）；输入 `ABC` 回车 → 提示「十六进制位数是奇数」，这一行留在输入条上；`0x41` → 指出 `x` 不是十六进制数字 |
 | 报错不吞输入 | HEX 下输入 `AAA` 回车，或断开端口后随便发一行 | 报错浮在输入条上方、单独占一行，不挤占输入框；这一行仍完整留在输入框里，可以直接改（实测提示 205 px 时输入框仍留 163 px） |
 | 重连清提示 | 断开 → 发一行（出现「端口已断开，先点『连接』」）→ 点「连接」 | 提示立即消失；不会出现状态点已经绿的、提示还写着已断开的画面 |
@@ -216,6 +233,7 @@
 | 会话重命名 | `rename_session` + 侧栏双击 | 规则在 core-domain（L0-17），前端只送文本；冷会话重开不覆盖用户改过的名字 |
 | M2 验收链路（手工） | `PINSHELL_DATA_DIR` 临时目录 + `npm run app:dev` | 首跑记下 CWD → 关窗写快照并留 `hot: false` → 重启读回 1 个冷会话并按 CWD 拉起 → 再关一次快照正好多一条分隔线；提示符后约 3 秒快照自动落盘（不用关窗）；可输入 795–820 ms |
 | 会话树（冷/热） | `session_tree` + `src/main.ts` | 冷会话也在树里，`hot` 由 `pty_list` 对照；点冷会话用同一个 id 重新拉起，位置不变 |
+| 冻结会话 | 右键热会话 → 冻结会话 | 进程/端口结束、行变冷（状态点熄灭），记录、命令历史与屏幕快照都还在；点该行按原参数重新拉起并接回上次屏幕。冻结当前会话时自动切到另一个会话；冷会话上该项禁用 |
 | CWD 跟随 | `note_cwd` + `Workspace::set_cwd` | `OSC 7` 写进会话元数据；冷会话按记住的目录重开，目录没了退回默认目录；只在真变更时落盘 |
 | 门禁取退出码 | `scripts/test-guard.ps1` | 改用 `[Diagnostics.Process]`：`Start-Process -PassThru` 在 PS 5.1 + 重定向下 `ExitCode` 为空，曾把全绿的层判成失败 |
 | 页面重载挂回 | `pty_list` / `pty_replay` / `pty:out.seq` | 启动时挂回存活会话，回放 + seq 去重补画；窗口关闭才结束全部进程 |
@@ -237,7 +255,7 @@
 | 卷轴行数上限 | `src/main.ts` 的 `SCROLLBACK_LINES` | 取 5000 行（约 2 MB）；`scripts/bench-scrollback.mjs` 实测稳态吞吐与上限无关（52–57 MB/s）、内存约 0.4 KB/行，数字见 `docs/bench-m0.md` |
 | 切会话 / 窗口缩放（手工回归） | `.probe/probe_switch_resize.ps1` | 侧栏行按无障碍文本定位再点（行高随 DPI 变，写死 y 会点到标题栏，结论是假的）；两个会话各留一条标记命令，切走再切回后磁盘快照里只有各自的标记（`MARK-A` 只出现在 423c、`MARK-B` 只出现在 c387），回放尾巴完整、无重影；窗口宽度 −300 px 后 Shell 里的 `$Host.UI.RawUI.WindowSize.Width` 由 172 变成 129（探针把它写进 `w_before.txt` / `w_after.txt` 核对），说明 resize 真下到了 PTY |
 | M4 文件面板（第一片） | `core-domain/src/fsview.rs`、`src-tauri/src/fsview.rs`、`src/filePanel.ts`、`src/filePanelUi.ts` | `fs_list` 只读列目录（`path` 为空时跟随会话 CWD，读盘在阻塞线程池）；排序/隐藏过滤/截断/路径归一化在 core-domain（9 个用例）；`std::fs` 填元数据（跟随链接判类型、Windows 隐藏属性）3 个用例；`session:cwd` 只在 CWD 真变更时推；面板显示格式与跟随/固定选择 13 个前端用例；折叠/展开不抢焦点，切换后终端重新 fit |
-| M4 文件面板（右键菜单） | `src-tauri/src/bin/shellmenu.rs`、`src-tauri/src/shellmenu.rs`、`src/filePanelUi.ts`、`src/filePanel.ts` | helper 独立进程走 `IContextMenu`（STA、光标定位、`TPM_RETURNCMD`）；主进程最多等 10 分钟，缺失/崩溃/超时都返回 `unavailable` 并由前端画降级菜单；`fs_open` / `fs_reveal` 走系统关联；`rowMenu` 与 `clampMenuPosition` 由 8 个前端用例覆盖；helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出（不弹菜单）；helper 是普通 `[[bin]]`，`app:build` 随 crate 一起编译并打进 MSI/NSIS（tauri-cli 2.12 自动收录 bin；再声明 `externalBin` 会把同一个文件装两遍，WiX 以 ICE30 拒绝链接）；「没有 helper / 路径写错 / 启动失败」三条降级路径由 3 个 Rust 用例覆盖，崩溃与超时仍靠手工 |
+| M4 文件面板（右键菜单） | `src-tauri/src/bin/shellmenu.rs`、`src-tauri/src/shellmenu.rs`、`src/filePanelUi.ts`、`src/filePanel.ts` | helper 独立进程走 `IContextMenu`（STA、光标定位、`TPM_RETURNCMD`）；条目菜单用 `GetUIObjectOf`，列表空白处的背景菜单用 `IShellFolder::CreateViewObject` 请求 `IContextMenu`（`--background`，probe 在 `F:\PinShell` 实测生成 10 项）；主进程最多等 10 分钟，缺失/崩溃/超时都返回 `unavailable` 并由前端画降级菜单；`fs_open` / `fs_reveal` 走系统关联；`rowMenu`、`blankMenu`、`clampMenuPosition`、`pathSegments` 由 13 个前端用例覆盖；helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出（不弹菜单）；helper 是普通 `[[bin]]`，`app:build` 随 crate 一起编译并打进 MSI/NSIS（tauri-cli 2.12 自动收录 bin；再声明 `externalBin` 会把同一个文件装两遍，WiX 以 ICE30 拒绝链接）；「没有 helper / 路径写错 / 启动失败」三条降级路径由 3 个 Rust 用例覆盖，崩溃与超时仍靠手工 |
 | M4 文件面板（第二片：自动刷新） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 逐项比较 5 个用例（任一字段或顺序变了才算变化）、刷新间隔与失败退避 2 个用例（大目录 10 秒、2 的幂到 24 秒）、宽度夹取 5 个：合计 12 个前端用例。DOM 行为用假 IPC 的浏览器验证台确认：内容不变时 3 秒一次只发 `fs_list`、零 DOM 变更；内容变化时重绘 200 行且 `scrollTop` 与选中行都还在；面板收起、无会话时不发请求；大目录（`total > 1000`）周期变 10 秒；一次读盘失败后下一次等到 6 秒 |
 | M4 文件面板（第三片：`..`、左栏调宽与收起） | `src/filePanelUi.ts`、`src/sidebar.ts`、`src/sidebarUi.ts`、`src/resize.ts`、`src/styles.css` | 两侧拖动共用同一套手势与 `body.layout-dragging`，拖动中只改 CSS、松手才 `layoutChanged`；左栏 150–360px，两栏各自量对方实时宽度定上限。两栏都能收起成 26px 竖条（左栏竖排「会话」展开按钮），折叠状态与宽度一起进 `localStorage`。前端用例 14 个（夹取 7、存储解析 5、序列化 2，坏数据回默认）。浏览器验证台确认：`..` 只在有父目录时出现、单击可选中、双击发出 `path=C:\`（转「固定」）、无父目录与空目录两种情况都对；左栏 196→297 拖动中零次重排、松手一次；拖到 +900px 被夹在 360；窗口缩到 700px 后两栏各自缩到 195/324、终端留住 180；点「‹」收起后宽度 27px、列表与手柄隐藏、展开按钮出现且 `layoutChanged` 一次，点展开恢复原宽度并再 `layoutChanged` 一次；收起状态重载页面后仍在（存的是 `{"width":195,"collapsed":true}`，展开回到 196） |
 | M4 文件面板（第四片：设置绑定会话） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 「跟随 / 固定」「自动」「隐」改为**会话级**：存储形如 `{expanded, width, defaults, sessions: {id: {mode, auto, showHidden, path}}}`，切会话先回写上一个会话、再换上新会话的一套；旧版顶层全局配置迁移成 `defaults`，已有会话不被重置。前端用例 6 个（旧版迁移、两会话互不影响、跟随不保留固定路径、脏字段逐项回退、宽度坏值、空存储默认值）。假 IPC 验证台确认：s1 开「隐」+「自动」、s2 关「隐」并转「固定」后，来回切换分别恢复成 `跟随/隐开/自动开` 与 `固定/隐关/自动开`，重载页面后两套仍在，`localStorage` 里两个会话各一条记录 |
@@ -247,6 +265,6 @@
 | M5 工作区 v2 | `src-tauri/src/persistence.rs` | `WORKSPACE_VERSION = 2`，会话多一个可选 `serial` 段；2 个用例：串口配置往返一致、v1 文件无 serial 字段照常读回为冷会话 |
 | M5 前端 | `index.html`、`src/main.ts`、`src/serialUi.ts`、`src/styles.css` | 「⌁」新建对话框（端口枚举/手输、8N1 各项、DTR/RTS、行结束符、发送方式、错误原文回显）；侧栏串口记号；输入条 `串口 COM3 · 115200 8N1` 摘要与连接失败原因；「暂停」显示成「断开 / 连接」；HEX 开关按会话记忆；「日志」按钮用系统关联打开；没有 Ghost Text 与 Ctrl+R，↑↓ 保留发送历史；发送失败把这一行放回输入条。端口下拉文案由 `src/serialUi.test.ts` 的 3 个用例覆盖（L0-21：产品名/厂商名/类型逐级回退、空串当没有、假串口自带标签） |
 | M5 验收 | 自动层 | `L0` 门禁：core-domain 117 个用例 + 前端 91 个用例全绿；`L1` 门禁：主 crate `cargo test --bin pinshell` 48 个用例（含 transport 10 个、persistence v2 2 个）+ 真 pwsh/bash 标记 3 个全绿。dev 正在跑，这一轮用独立 target 目录 `src-tauri\target-m5` 执行，没有碰被占用的 `target\debug`（跑法见 §6）。GUI 手工项见 §8.2（假串口回环先行；真设备/虚拟串口对按清单走） |
-| M5 验收 | GUI 手工（2026-11-18） | 用 CDP 驱动在跑的 dev 应用（`.probe/m5-*.mjs`，截图在同目录），假串口把 §8.2 里不依赖真硬件的项走通：新建与回显、HEX 的 `41 54` 与两条拒绝原因、LF 会话的卷轴快照末字节是 `0a`（不带 `0d`）、断开后发送把这一行放回、重连继续收发、`PINSHELL_LOOP` 二次创建被 I4 拒绝、能力位（无 Ghost Text 与 Ctrl+R，文件面板回用户目录）、冷会话按 v2 参数重连并画出「上次会话结束于此」分隔线。顺手修两处界面问题：① 报错改为浮在输入条上方——原来它和输入框排在同一行，长文案把输入框挤成 0 宽，待改的那一行看不见；② 断开 / 连接成功后清掉过期提示——原来连上了、提示还写着「端口已断开」。真串口释放、拔线重连与「日志」按钮的系统关联打开仍按 §8.2 手工 |
+| 会话实时日志与 CR 显示 | `session_log` 与会话设置 | 串口单独 CR 转 LF（包括跨读取块 CRLF）；接收与发送写入独立用户日志；文件名按 `%Y%M%D-%h%m%s.log` 本地时间格式化并自动编号；时间戳分别控制控制台和文件；工作区保存目录与设置。菜单中支持串口参数/CR、Shell 与串口时间戳、目录选择和系统打开目录。文件栏跟随优先采用日志目录，无目录时保留 CWD/主目录逻辑。真串口重连与 Explorer 操作按 §8.3 手工验证。 | |
 
 跑法：`.\scripts\test-guard.ps1 -Layer all`（L0 用独立 target，`tauri dev` 跑着也能执行；L1 会被闸门跳过。dev 在跑又必须跑 L1 时，按 §6 表格最后一行先设 `CARGO_TARGET_DIR` 再加 `-Force`）。

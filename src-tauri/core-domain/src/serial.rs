@@ -235,8 +235,19 @@ impl SerialConfig {
         Ok(())
     }
 
-    /// 新会话的默认标题：`COM3 · 115200`，按字符截断（与改名规则同一条上限）。
+    /// 新会话的默认标题：只用端口名（`COM3`），按字符截断（与改名规则同一条上限）。
+    /// 波特率不进标题：它在会话设置里可见，标题里再重复一遍只会把名字挤长。
     pub fn default_title(&self) -> String {
+        self.port
+            .trim()
+            .chars()
+            .take(MAX_TITLE_CHARS)
+            .collect()
+    }
+
+    /// 旧版本给串口会话起的默认标题（`COM3 · 115200`）。工作区读回时用它判断
+    /// 这个名字是不是出厂值：只有出厂值才改成纯端口，用户自己改过的名字不动。
+    pub fn legacy_default_title(&self) -> String {
         let raw = format!("{} · {}", self.port.trim(), self.baud);
         raw.chars().take(MAX_TITLE_CHARS).collect()
     }
@@ -615,7 +626,8 @@ mod tests {
         assert_eq!(config.send_mode, SendMode::Line);
         config.validate().unwrap();
         assert_eq!(config.summary(), "115200 8N1");
-        assert_eq!(config.default_title(), "COM3 · 115200");
+        assert_eq!(config.default_title(), "COM3");
+        assert_eq!(config.legacy_default_title(), "COM3 · 115200");
     }
 
     #[test]
@@ -640,7 +652,8 @@ mod tests {
     fn title_is_trimmed_and_truncated_by_characters() {
         let mut config = SerialConfig::new("  COM12  ");
         config.baud = 9_600;
-        assert_eq!(config.default_title(), "COM12 · 9600");
+        assert_eq!(config.default_title(), "COM12");
+        assert_eq!(config.legacy_default_title(), "COM12 · 9600");
         config.port = "口".repeat(60);
         let title = config.default_title();
         assert_eq!(title.chars().count(), MAX_TITLE_CHARS);

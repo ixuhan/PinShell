@@ -11,7 +11,7 @@ use core_domain::serial::{
     SendMode, SerialConfig, StopBits,
 };
 use core_domain::utf8_stream::Utf8Stream;
-use core_domain::workspace::{SessionMeta, Workspace};
+use core_domain::workspace::{SessionMeta, SessionSettings, Workspace};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
@@ -30,6 +30,7 @@ mod fsview;
 mod history;
 mod persistence;
 mod profiles;
+mod session_log;
 mod shellmenu;
 mod shortcut_export;
 mod transport;
@@ -38,6 +39,9 @@ mod transport;
 /// 标题不在这里：唯一真源是工作区里的 `SessionMeta`，见 `pty_list`。
 struct Session {
     created_ms: u64,
+    settings: Mutex<SessionSettings>,
+    runtime_log: Mutex<Option<session_log::RuntimeLog>>,
+    log_path: Mutex<Option<PathBuf>>,
     /// 通道：终端（ConPTY）或串口。会话层不再直接认识管道或 COM 口。
     transport: Arc<dyn Transport>,
     input: Mutex<InputState>,
@@ -95,17 +99,20 @@ struct AppState {
     workspace: Mutex<Workspace>,
     /// 解析失败时为 `None`：本版没有必需落盘的状态，不挡启动
     data_dir: Option<PathBuf>,
+    /// 读取失败时禁止覆盖原工作区及备份。
+    workspace_writable: bool,
     /// 历史库句柄。`setup` 里拿到 `AppHandle` 后才建（写库线程要发事件）。
     history: OnceLock<Arc<history::History>>,
 }
 
 impl AppState {
-    fn new(data_dir: Option<PathBuf>, workspace: Workspace) -> Self {
+    fn new(data_dir: Option<PathBuf>, workspace: Workspace, workspace_writable: bool) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             tick_running: AtomicBool::new(false),
             workspace: Mutex::new(workspace),
             data_dir,
+            workspace_writable,
             history: OnceLock::new(),
         }
     }
@@ -193,6 +200,63 @@ struct TreeSession {
     cwd: Option<String>,
     /// 串口会话才有：冷会话重新拉起时按这份配置重连，界面也用它显示 8N1 摘要。
     serial: Option<SerialConfigPayload>,
+    settings: SessionSettingsPayload,
+}
+
+#[derive(Clone, Serialize, serde::Deserialize)]
+struct SessionSettingsPayload {
+    cr_as_newline: bool,
+    console_timestamps: bool,
+    file_timestamps: bool,
+    timestamp_format: String,
+    log_directory: Option<String>,
+    log_filename: String,
+    logging: bool,
+    /// 暂停/继续（断开/连接）时换新日志文件。老前端不带这个字段时按关闭处理。
+    #[serde(default)]
+    new_log_on_toggle: bool,
+    /// 终端字号。老前端不带这个字段时按默认值走（见 `#[serde(default)]`）。
+    #[serde(default = "default_font_size")]
+    font_size: u16,
+}
+
+fn default_font_size() -> u16 {
+    core_domain::workspace::DEFAULT_FONT_SIZE
+}
+
+impl From<&SessionSettings> for SessionSettingsPayload {
+    fn from(value: &SessionSettings) -> Self {
+        Self {
+            cr_as_newline: value.cr_as_newline,
+            console_timestamps: value.console_timestamps,
+            file_timestamps: value.file_timestamps,
+            timestamp_format: value.timestamp_format.clone(),
+            log_directory: value.log_directory.clone(),
+            log_filename: value.log_filename.clone(),
+            logging: value.logging,
+            new_log_on_toggle: value.new_log_on_toggle,
+            font_size: value.font_size,
+        }
+    }
+}
+
+impl SessionSettingsPayload {
+    fn into_settings(self) -> SessionSettings {
+        SessionSettings {
+            cr_as_newline: self.cr_as_newline,
+            console_timestamps: self.console_timestamps,
+            file_timestamps: self.file_timestamps,
+            timestamp_format: self.timestamp_format,
+            log_directory: self.log_directory,
+            log_filename: self.log_filename,
+            logging: self.logging,
+            new_log_on_toggle: self.new_log_on_toggle,
+            // 越界值夹回合法区间：宁可显示成 9 或 28，也不要一个看不见字的终端
+            font_size: self
+                .font_size
+                .clamp(core_domain::workspace::MIN_FONT_SIZE, core_domain::workspace::MAX_FONT_SIZE),
+        }
+    }
 }
 
 /// 串口配置的 IPC 形态。core-domain 里的枚举在这里翻成稳定字符串，
@@ -452,6 +516,9 @@ fn now_ms() -> u64 {
 
 /// 工作区落盘。失败只记日志：磁盘问题不该让会话操作失败。
 fn persist_workspace(state: &AppState) {
+    if !state.workspace_writable {
+        return;
+    }
     let Some(dir) = state.data_dir.as_deref() else {
         return;
     };
@@ -542,12 +609,23 @@ fn is_bash(shell: &str) -> bool {
     matches!(name.as_str(), "bash" | "bash.exe")
 }
 
+/// Windows 的 verbatim 前缀（`\\?\`）不能交给 MSYS 程序：Git Bash 打开这种路径会失败，
+/// 而且 `--init-file` 失败时不会报错，集成脚本就整段没跑、会话永远停在「未知 · 直通」。
+/// 资源目录在 Windows 上常常带这个前缀，返回前统一去掉。
+fn unverbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
 /// 集成脚本的位置：安装版取资源目录，开发版回退到仓库里的脚本。
 fn integration_script(app: &AppHandle, name: &str) -> Option<PathBuf> {
     if let Ok(dir) = app.path().resource_dir() {
         let packaged = dir.join("integration").join(name);
         if packaged.is_file() {
-            return Some(packaged);
+            return Some(unverbatim(packaged));
         }
     }
     #[cfg(debug_assertions)]
@@ -687,6 +765,14 @@ fn spawn_session(
         rows,
     ));
     let session = new_session(transport);
+    let saved = state
+        .workspace
+        .lock()
+        .session(&id)
+        .map(|meta| meta.settings.clone())
+        .unwrap_or_default();
+    *session.runtime_log.lock() = Some(session_log::RuntimeLog::new(saved.clone())?);
+    *session.settings.lock() = saved;
 
     // 冷会话重开：把上次的屏幕接在新输出前面。必须在读线程启动前做，
     // 否则新输出会先占序号、快照反而画在后面。
@@ -734,6 +820,9 @@ fn new_session(transport: Arc<dyn Transport>) -> Arc<Session> {
     Arc::new(Session {
         created_ms: now_ms(),
         transport,
+        settings: Mutex::new(SessionSettings::default()),
+        runtime_log: Mutex::new(None),
+        log_path: Mutex::new(None),
         input: Mutex::new(InputState {
             tracker: PromptTracker::new(),
             ovr: Override::None,
@@ -858,11 +947,15 @@ fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
                         // 串口没有 Shell，也就没有 OSC 标记：字节直接当屏幕内容，
                         // 同时按原始字节写日志（用户看到的是解码后的文本，日志保留原样）。
                         thread_session.transport.log_rx(&buf[..n]);
-                        // 串口也要记「最近一次输出」：空闲落盘靠它判断「刷屏结束没有」，
-                        // 不更新的话持续输出时每 300ms 就会写一次卷轴快照。
                         thread_session.input.lock().last_output_ms = now_ms();
-                        let text = stream.push(&buf[..n]);
-                        if !text.is_empty() {
+                        let decoded = stream.push(&buf[..n]);
+                        if !decoded.is_empty() {
+                            let text = thread_session
+                                .runtime_log
+                                .lock()
+                                .as_mut()
+                                .and_then(|log| log.receive(&decoded, true).ok())
+                                .unwrap_or(decoded);
                             let seq = thread_session.replay.lock().push(&text).unwrap_or_default();
                             thread_session.dirty.store(true, Ordering::Relaxed);
                             thread_session.outbox.pending.lock().push(&text, seq);
@@ -898,8 +991,14 @@ fn start_reader(app: AppHandle, session: Arc<Session>, id: String) {
                         }
                         push_ownership(&app, &thread_session, &id);
                     }
-                    let text = stream.push(&buf[..n]);
-                    if !text.is_empty() {
+                    let raw_text = stream.push(&buf[..n]);
+                    if !raw_text.is_empty() {
+                        let text = thread_session
+                            .runtime_log
+                            .lock()
+                            .as_mut()
+                            .and_then(|log| log.receive(&raw_text, false).ok())
+                            .unwrap_or(raw_text);
                         // 先记回放再发事件：凡是被前端看到过的块，一定也能被回放到
                         let seq = thread_session.replay.lock().push(&text).unwrap_or_default();
                         thread_session.dirty.store(true, Ordering::Relaxed);
@@ -1090,6 +1189,14 @@ fn spawn_serial_session(
     };
     let title = config.default_title();
     let session = new_session(transport);
+    let saved = state
+        .workspace
+        .lock()
+        .session(&id)
+        .map(|meta| meta.settings.clone())
+        .unwrap_or_default();
+    *session.runtime_log.lock() = Some(session_log::RuntimeLog::new(saved.clone())?);
+    *session.settings.lock() = saved;
     seed_scrollback(&state, &session, &id);
     state.sessions.lock().insert(id.clone(), session.clone());
 
@@ -1143,6 +1250,14 @@ fn serial_status(state: State<'_, AppState>, id: String) -> Result<SerialStatusP
     Ok(serial_status_of(&id, &session))
 }
 
+/// 暂停/继续（串口是断开/连接）之后的日志切分：按会话设置决定下一条记录是否写进新文件。
+/// 新建的串口会话已经在 `RuntimeLog::new` 里开过文件，这里只管「切换」这一下。
+fn mark_session_log_rotation(session: &Session) {
+    if let Some(log) = session.runtime_log.lock().as_mut() {
+        log.mark_new_file();
+    }
+}
+
 /// 断开串口：真正关闭句柄，让别的程序也能用这个口。会话保持热的，回放与历史都不动。
 fn disconnect_serial(app: &AppHandle, id: &str, session: &Arc<Session>) -> Result<(), String> {
     if session.released.swap(true, Ordering::SeqCst) {
@@ -1153,6 +1268,7 @@ fn disconnect_serial(app: &AppHandle, id: &str, session: &Arc<Session>) -> Resul
     let result = session.transport.release();
     join_reader(session);
     session.outbox.pending.lock().clear();
+    mark_session_log_rotation(session);
     emit_serial_status(app, session, id);
     result
 }
@@ -1194,8 +1310,43 @@ fn connect_serial(
         return Err(err);
     }
     session.released.store(false, Ordering::SeqCst);
+    // 先排上翻页再起读线程：重连后的第一块输出就应该进新文件
+    mark_session_log_rotation(session);
     start_reader(app.clone(), session.clone(), id.to_string());
     emit_serial_status(app, session, id);
+    Ok(())
+}
+
+#[tauri::command]
+fn serial_update_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    config: SerialConfigPayload,
+) -> Result<(), String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or("会话未运行")?;
+    let config = config.into_config()?;
+    if session.transport.kind() != TransportKind::Serial {
+        return Err("不是串口会话".into());
+    }
+    let was_open = !session.released.load(Ordering::Relaxed)
+        && session.transport.status() == TransportStatus::Open;
+    if was_open {
+        disconnect_serial(&app, &id, &session)?;
+    }
+    session.transport.set_serial_config(config.clone())?;
+    if let Some(meta) = state.workspace.lock().session_mut(&id) {
+        meta.serial = Some(config);
+    }
+    persist_workspace(&state);
+    if was_open {
+        connect_serial(&app, &state, &id, &session)?;
+    }
     Ok(())
 }
 
@@ -1290,6 +1441,9 @@ fn write_session(
     }
 
     session.transport.write(data.as_bytes())?;
+    if let Some(log) = session.runtime_log.lock().as_mut() {
+        let _ = log.transmit(data);
+    }
 
     // 先发通道、再排进历史库的单写线程：落盘失败不影响内容已经发出去（M3）
     if from_bar {
@@ -1351,6 +1505,9 @@ fn pty_send_line(
     )
     .map_err(|err| err.to_string())?;
     session.transport.write(&payload)?;
+    if let Some(log) = session.runtime_log.lock().as_mut() {
+        let _ = log.transmit(&line);
+    }
     // 发送历史（↑↓）与命令历史共用一张表：串口没有补全与检索，但仍要能翻上一次写的内容
     if let Some(history) = state.history() {
         history.record(&id, &line, now_ms());
@@ -1507,8 +1664,151 @@ fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
             shell: session.shell.clone(),
             cwd: session.cwd.clone(),
             serial: session.serial.as_ref().map(SerialConfigPayload::from),
+            settings: SessionSettingsPayload::from(&session.settings),
         })
         .collect()
+}
+
+#[derive(Serialize)]
+struct SessionSettingsResult {
+    settings: SessionSettingsPayload,
+    serial: Option<SerialConfigPayload>,
+}
+
+#[tauri::command]
+fn session_settings_get(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<SessionSettingsResult, String> {
+    let workspace = state.workspace.lock();
+    let meta = workspace
+        .session(&id)
+        .ok_or_else(|| format!("no session {id}"))?;
+    Ok(SessionSettingsResult {
+        settings: SessionSettingsPayload::from(&meta.settings),
+        serial: meta.serial.as_ref().map(SerialConfigPayload::from),
+    })
+}
+
+#[tauri::command]
+fn session_settings_save(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    settings: SessionSettingsPayload,
+    serial: Option<SerialConfigPayload>,
+) -> Result<(), String> {
+    let settings = settings.into_settings();
+    let serial_config = serial.map(SerialConfigPayload::into_config).transpose()?;
+    if settings.logging
+        && settings
+            .log_directory
+            .as_deref()
+            .map_or(true, |path| !Path::new(path).is_dir())
+    {
+        return Err("请先选择有效的日志文件夹".into());
+    }
+    let live_session = { state.sessions.lock().get(&id).cloned() };
+    if let Some(session) = live_session {
+        if let Some(config) = serial_config.clone() {
+            if config != session.transport.serial_config().ok_or("不是串口会话")? {
+                let was_open = session.transport.status() == TransportStatus::Open
+                    && !session.released.load(Ordering::Relaxed);
+                if was_open {
+                    disconnect_serial(&app, &id, &session)?;
+                }
+                session.transport.set_serial_config(config.clone())?;
+                if let Some(meta) = state.workspace.lock().session_mut(&id) {
+                    meta.serial = Some(config.clone());
+                }
+                persist_workspace(&state);
+                if was_open {
+                    connect_serial(&app, &state, &id, &session)?;
+                }
+            }
+        }
+        let mut runtime = session.runtime_log.lock();
+        if let Some(log) = runtime.as_mut() {
+            log.update(settings.clone())?;
+        } else {
+            *runtime = Some(session_log::RuntimeLog::new(settings.clone())?);
+        }
+        *session.log_path.lock() = runtime
+            .as_ref()
+            .and_then(|log| log.path().map(Path::to_path_buf));
+        *session.settings.lock() = settings.clone();
+    }
+    let mut workspace = state.workspace.lock();
+    let meta = workspace
+        .session_mut(&id)
+        .ok_or_else(|| format!("no session {id}"))?;
+    if let Some(config) = serial_config {
+        meta.serial = Some(config);
+    }
+    meta.settings = settings;
+    drop(workspace);
+    persist_workspace(&state);
+    let _ = app.emit("session:settings", id);
+    Ok(())
+}
+
+#[tauri::command]
+fn session_log_start(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or("会话未运行")?;
+    let mut settings = state
+        .workspace
+        .lock()
+        .session(&id)
+        .ok_or("会话不存在")?
+        .settings
+        .clone();
+    settings.logging = true;
+    let directory = settings.log_directory.clone().ok_or("请先选择日志文件夹")?;
+    let mut runtime = session.runtime_log.lock();
+    if let Some(log) = runtime.as_mut() {
+        log.update(settings.clone())?;
+    } else {
+        *runtime = Some(session_log::RuntimeLog::new(settings.clone())?);
+    }
+    *session.settings.lock() = settings.clone();
+    state
+        .workspace
+        .lock()
+        .session_mut(&id)
+        .ok_or("会话不存在")?
+        .settings = settings;
+    persist_workspace(&state);
+    let path = runtime
+        .as_ref()
+        .and_then(|log| log.path().map(Path::to_path_buf));
+    *session.log_path.lock() = path.clone();
+    Ok(path.map(|p| p.display().to_string()).unwrap_or(directory))
+}
+
+#[tauri::command]
+fn session_log_stop(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let session = state
+        .sessions
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or("会话未运行")?;
+    let mut settings = session.settings.lock().clone();
+    settings.logging = false;
+    if let Some(log) = session.runtime_log.lock().as_mut() {
+        log.update(settings.clone())?;
+    }
+    *session.settings.lock() = settings.clone();
+    if let Some(meta) = state.workspace.lock().session_mut(&id) {
+        meta.settings = settings;
+    }
+    persist_workspace(&state);
+    Ok(())
 }
 
 /// 文件面板列一层目录（M4）。`path` 为空时跟随 `session` 记下的 CWD；
@@ -1527,7 +1827,12 @@ async fn fs_list(
         session
             .as_deref()
             .and_then(|id| workspace.session(id))
-            .and_then(|meta| meta.cwd.clone())
+            .and_then(|meta| {
+                meta.settings
+                    .log_directory
+                    .clone()
+                    .or_else(|| meta.cwd.clone())
+            })
     });
     let target = PathBuf::from(requested.unwrap_or_else(home_dir));
     let show_hidden = show_hidden.unwrap_or(false);
@@ -1554,9 +1859,22 @@ fn fs_reveal(path: String) -> Result<(), String> {
 
 /// 文件面板的原生右键菜单。helper 在独立进程里跑，返回三态：
 /// `handled` / `cancelled` / `unavailable`（后者由前端画自建菜单）。
+///
+/// `background` 为真时弹目录自己的背景菜单（右键空白处：新建 / 粘贴 / 属性……），
+/// 否则是某个文件或目录条目的菜单。
 #[tauri::command]
-async fn fs_context_menu(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
-    if !Path::new(&path).exists() {
+async fn fs_context_menu(
+    window: tauri::WebviewWindow,
+    path: String,
+    background: Option<bool>,
+) -> Result<String, String> {
+    let background = background.unwrap_or(false);
+    let target = Path::new(&path);
+    if background {
+        if !target.is_dir() {
+            return Err(format!("不是目录: {path}"));
+        }
+    } else if !target.exists() {
         return Err(format!("路径不存在: {path}"));
     }
     #[cfg(windows)]
@@ -1567,9 +1885,10 @@ async fn fs_context_menu(window: tauri::WebviewWindow, path: String) -> Result<S
     let hwnd = 0usize;
 
     // helper 会一直阻塞到用户选完，所以放阻塞线程池，别占着 IPC 线程。
-    let outcome = tauri::async_runtime::spawn_blocking(move || shellmenu::run(&path, hwnd))
-        .await
-        .map_err(|err| format!("菜单线程失败: {err}"))?;
+    let outcome =
+        tauri::async_runtime::spawn_blocking(move || shellmenu::run(&path, hwnd, background))
+            .await
+            .map_err(|err| format!("菜单线程失败: {err}"))?;
     Ok(outcome.as_str().to_string())
 }
 
@@ -1672,6 +1991,7 @@ fn pty_set_paused(
     // 攒着的块：暂停时发出去也没人画，继续时前端按回放整屏重画（再发就等于画两遍）。
     // 直接丢掉，省掉长时间暂停时的内存。
     session.outbox.pending.lock().clear();
+    mark_session_log_rotation(&session);
     Ok(paused)
 }
 
@@ -1741,6 +2061,31 @@ fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> R
 }
 
 #[tauri::command]
+fn pty_freeze(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // 已经是冷会话：没有运行时可结束，保持原样
+    let Some(session) = state.sessions.lock().remove(&id) else {
+        return Ok(());
+    };
+    // 先让旧读线程的收尾作废：冻结不该被当成「进程自然退出」再清理一遍
+    session.reader_gen.fetch_add(1, Ordering::SeqCst);
+    // 再落快照：进程/端口一关，回放缓冲就没了，下次点开要靠这份快照接回屏幕
+    save_session_scrollback(&state, &session, &id);
+    // 与 pty_close 的唯一区别：节点留着，只把它标回冷会话
+    {
+        let mut workspace = state.workspace.lock();
+        let _ = workspace.set_hot(&id, false);
+    }
+    persist_workspace(&state);
+    // 与 pty_close 相同：结束通道（终端 = 杀进程，串口 = 关句柄并 join 读线程）
+    let _ = session.transport.close();
+    if session.transport.kind() == TransportKind::Serial {
+        join_reader(&session);
+    }
+    session.outbox.running.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
 fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
     // 关闭会话 = 节点删除（I2）。先摘节点再结束通道：读线程醒来时看到节点已不在，
     // 就不会把刚删掉的卷轴快照又写回来。
@@ -1771,6 +2116,11 @@ fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn updater_configured() -> bool {
+    std::env::var("PINSHELL_UPDATER_PUBKEY").is_ok_and(|key| !key.trim().is_empty())
+}
+
 /// 空命令，用于测 IPC 往返开销。
 #[tauri::command]
 fn bench_ping() {}
@@ -1789,39 +2139,57 @@ fn main() {
         Ok(dir) => println!("[data] {}", dir.display()),
         Err(err) => eprintln!("[data] {err}"),
     }
+    let mut workspace_writable = true;
     let workspace = match data_dir.as_deref() {
-        Ok(dir) => match persistence::load_workspace(dir) {
-            persistence::WorkspaceLoad::Loaded(ws) => {
-                println!(
-                    "[data] workspace: {} window(s), {} session(s)",
-                    ws.windows.len(),
-                    ws.sessions.len()
-                );
-                ws
+        Ok(dir) => {
+            match persistence::load_workspace(dir) {
+                persistence::WorkspaceLoad::Loaded(ws) => {
+                    println!(
+                        "[data] workspace: {} window(s), {} session(s)",
+                        ws.windows.len(),
+                        ws.sessions.len()
+                    );
+                    ws
+                }
+                persistence::WorkspaceLoad::Recovered(ws) => {
+                    // Preserve the valid backup until recovery can be committed safely.
+                    workspace_writable = false;
+                    println!(
+                        "[data] workspace recovered from .bak: {} session(s)",
+                        ws.sessions.len()
+                    );
+                    ws
+                }
+                persistence::WorkspaceLoad::Missing => {
+                    println!("[data] workspace: first run");
+                    Workspace::new()
+                }
+                persistence::WorkspaceLoad::Unreadable(err) => {
+                    // 原主文件与备份都保留；本次不允许把空工作区写回覆盖它们。
+                    eprintln!("[data] workspace unreadable, starting empty without overwriting source: {err}");
+                    workspace_writable = false;
+                    Workspace::new()
+                }
             }
-            persistence::WorkspaceLoad::Recovered(ws) => {
-                println!(
-                    "[data] workspace recovered from .bak: {} session(s)",
-                    ws.sessions.len()
-                );
-                ws
-            }
-            persistence::WorkspaceLoad::Missing => {
-                println!("[data] workspace: first run");
-                Workspace::new()
-            }
-            persistence::WorkspaceLoad::Unreadable(err) => {
-                // 旧文件不会被覆盖丢失：下次写入时它会成为 .bak
-                eprintln!("[data] workspace unreadable, starting empty: {err}");
-                Workspace::new()
-            }
-        },
-        Err(_) => Workspace::new(),
+        }
+        Err(_) => {
+            workspace_writable = false;
+            Workspace::new()
+        }
     };
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new(data_dir.ok(), workspace))
+    let updater_pubkey = std::env::var("PINSHELL_UPDATER_PUBKEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    if let Some(pubkey) = updater_pubkey {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
+        println!("[updater] signed GitHub Releases updates enabled");
+    } else {
+        println!("[updater] disabled: PINSHELL_UPDATER_PUBKEY is not configured");
+    }
+    builder
+        .manage(AppState::new(data_dir.ok(), workspace, workspace_writable))
         .setup(|app| {
             // 历史库的单写线程要发 `history:append` 事件，所以等 AppHandle 就绪再建
             let state = app.state::<AppState>();
@@ -1875,7 +2243,12 @@ fn main() {
             spawn_session,
             spawn_serial_session,
             serial_ports,
+            session_settings_get,
+            session_settings_save,
+            session_log_start,
+            session_log_stop,
             serial_status,
+            serial_update_config,
             serial_disconnect,
             serial_connect,
             pty_write,
@@ -1899,7 +2272,9 @@ fn main() {
             fs_context_menu,
             rename_session,
             pty_resize,
+            pty_freeze,
             pty_close,
+            updater_configured,
             bench_ping,
             bench_report
         ])
@@ -1919,13 +2294,15 @@ fn main() {
                     save_session_scrollback(&state, session, id);
                 }
                 // 退出后没有任何进程还在跑：落盘就写冷，别让下次启动读到一堆 hot
-                {
-                    let mut workspace = state.workspace.lock();
-                    for (id, _) in &sessions {
-                        let _ = workspace.set_hot(id, false);
+                if state.workspace_writable {
+                    {
+                        let mut workspace = state.workspace.lock();
+                        for (id, _) in &sessions {
+                            let _ = workspace.set_hot(id, false);
+                        }
                     }
+                    persist_workspace(&state);
                 }
-                persist_workspace(&state);
                 for (_, session) in sessions {
                     // 终端 = 结束进程；串口 = 关句柄与日志（I3：不保活）
                     let _ = session.transport.close();
@@ -1938,7 +2315,20 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64_encode, powershell_encoded};
+    use super::{base64_encode, powershell_encoded, unverbatim};
+    use std::path::PathBuf;
+
+    /// 资源目录在 Windows 上带 `\\?\` 前缀；交给 Git Bash 前必须去掉，
+    /// 否则 `--init-file` 静默失败，提示符标记不出现、输入条永远无法接管。
+    #[test]
+    fn verbatim_prefix_is_stripped_before_handing_to_msys() {
+        assert_eq!(
+            unverbatim(PathBuf::from(r"\\?\F:\PinShell\target\debug\integration\pinshell.bash")),
+            PathBuf::from(r"F:\PinShell\target\debug\integration\pinshell.bash")
+        );
+        let plain = PathBuf::from(r"F:\PinShell\scripts\integration\pinshell.bash");
+        assert_eq!(unverbatim(plain.clone()), plain);
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {

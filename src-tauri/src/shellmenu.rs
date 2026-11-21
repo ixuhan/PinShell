@@ -56,21 +56,26 @@ pub fn helper_path() -> Option<PathBuf> {
 }
 
 /// 弹菜单并等用户选完。返回 `Unavailable` 时前端应当自己画菜单。
-pub fn run(path: &str, hwnd: usize) -> Outcome {
-    run_with(helper_path(), path, hwnd)
+pub fn run(path: &str, hwnd: usize, background: bool) -> Outcome {
+    run_with(helper_path(), path, hwnd, background)
 }
 
 /// 指定 helper 的版本。测试用它注入「没有 helper / 不是可执行文件」这两种情况，
 /// 不必去改 `PINSHELL_SHELLMENU`——那是进程级状态，并行跑的测试会互相踩。
-fn run_with(helper: Option<PathBuf>, path: &str, hwnd: usize) -> Outcome {
+fn run_with(helper: Option<PathBuf>, path: &str, hwnd: usize, background: bool) -> Outcome {
     let Some(helper) = helper else {
         return Outcome::Unavailable;
     };
-    let mut child = match Command::new(&helper)
+    let mut command = Command::new(&helper);
+    command
         .arg("--path")
         .arg(path)
         .arg("--hwnd")
-        .arg(hwnd.to_string())
+        .arg(hwnd.to_string());
+    if background {
+        command.arg("--background");
+    }
+    let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -145,14 +150,16 @@ mod tests {
     /// 右键永远得有反应：没有 helper 时返回 `Unavailable`，前端才知道要画自建菜单。
     #[test]
     fn no_helper_anywhere_degrades() {
-        assert_eq!(run_with(None, "C:\\", 0), Outcome::Unavailable);
+        assert_eq!(run_with(None, "C:\\", 0, false), Outcome::Unavailable);
+        assert_eq!(run_with(None, "C:\\", 0, true), Outcome::Unavailable);
     }
 
     /// helper 被删了、路径写错了，都走降级，不 panic、不弹错误框。
     #[test]
     fn a_missing_helper_degrades() {
         let missing = std::env::temp_dir().join("pinshell-no-such-helper.exe");
-        assert_eq!(run_with(Some(missing), "C:\\", 0), Outcome::Unavailable);
+        assert_eq!(run_with(Some(missing.clone()), "C:\\", 0, false), Outcome::Unavailable);
+        assert_eq!(run_with(Some(missing), "C:\\", 0, true), Outcome::Unavailable);
     }
 
     /// 路径存在但不是可执行映像（杀软隔离后留下的占位、拷了一半的文件）：
@@ -163,7 +170,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let fake = dir.join("pinshell-shellmenu.exe");
         std::fs::write(&fake, b"not a PE image").expect("write fake helper");
-        assert_eq!(run_with(Some(fake), "C:\\", 0), Outcome::Unavailable);
+        assert_eq!(run_with(Some(fake), "C:\\", 0, false), Outcome::Unavailable);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

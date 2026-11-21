@@ -80,13 +80,14 @@ trait Transport {
 
 已落地（M2 第二片）：会话树（`session_tree` 含冷会话，行上的 `hot` 对照 `pty_list` 里的活会话），以及 **CWD 跟随**——Shell 每次提示符上报的 `OSC 7` 写进会话元数据 `cwd`，冷会话重新拉起时用它做启动目录；目录已不存在就让 spawn 失败、前端退回默认目录重试一次。落盘规则只有一条：`Workspace::set_cwd` 返回「真的变了」才写 `workspace.json`，否则每个回车都会重写一遍文件。
 
-已落地（M2 第三片）：**卷轴快照**。会话结束（进程退出）与应用退出时，把该会话回放缓冲里的内容写成 `scrollback/<id>.ansi`；输出静默 3 秒后也补写一次（连续刷屏时不写，崩溃退出最多丢最后几秒）。冷会话重新拉起时先读回这份快照、经 `core_domain::scrollback::compose` 接上一条分隔线后作为回放缓冲的第一块，于是屏幕不再是空的。组装时丢掉备用屏与隐藏光标开关、末尾复位 SGR 并放出光标，免得快照里 vim/less 的终端模式带到新会话。快照只用于显示，不进命令历史，也不参与所有权判定（分隔线里刻意不含任何 `133` / `7` 标记）。关闭会话按 I2 删除快照；覆盖写不保留 `.bak`（显示层没有救回上一版的必要）。应用退出时同时把所有会话标成冷再落盘，下次启动不会读到一堆 `hot`。
+已落地（M2 第三片）：**卷轴快照**。会话结束（进程退出）与应用退出时，把该会话回放缓冲里的内容写成 `scrollback/<id>.ansi`；输出静默 3 秒后也补写一次（连续刷屏时不写，崩溃退出最多丢最后几秒）。冷会话重新拉起时先读回这份快照、经 `core_domain::scrollback::compose` 接上一条分隔线后作为回放缓冲的第一块，于是屏幕不再是空的。组装时丢掉备用屏与隐藏光标开关、末尾复位 SGR 并放出光标，免得快照里 vim/less 的终端模式带到新会话。快照只用于显示，不进命令历史，也不参与所有权判定（分隔线里刻意不含任何 `133` / `7` 标记）。关闭会话按 I2 删除快照；覆盖写不保留 `.bak`（显示层没有救回上一版的必要）。热会话还可以手动**冻结**（右键 → 冻结会话，`pty_freeze`）：写快照、结束进程/端口、把 `hot` 置回 false，但保留工作区节点、命令历史与快照，点该行时按原参数重新拉起；与「删除」的区别是它只结束运行时，不销毁记录。应用退出时同时把所有会话标成冷再落盘，下次启动不会读到一堆 `hot`。
 
 会话标题可改（侧栏双击名字就地编辑，回车提交、Esc 放弃）：规则只有「去首尾空白、按字符截断到 40、全空白拒绝」三条，放在 `Workspace::rename_session`；冷会话重新拉起不覆盖用户改过的名字。
 
 已落地（M3 打磨）：**暂停接收输出**与**一键清窗口**都是显示层动作，都不碰命令历史与进程。
 
 - **暂停**由后端记账（`pty_set_paused` / `pty_paused`）：读线程照常解析、照常写回放缓冲，只是不再发 `pty:out`——刷屏时省掉的是 IPC 与前端渲染，不是数据。继续时前端先 `term.reset()` 再按 `pty_replay` 整屏重画，而不是把增量接在旧屏幕后面：Shell 心里只有它自己那块屏幕，增量对接会错行。暂停期间攒在合流缓冲里的块直接丢掉（内容在回放里，再发一遍等于画两次），所以暂停多久都不会把内存堆起来；回放缓冲自己按字节上限整块裁旧，暂停太久只保住最近一段。暂停是会话级状态、由后端持有，切走再切回来按 `pty_paused` 复原按钮，不靠前端记忆。
+- **整屏重画的顺序**（切会话 / 继续 / 重新附着共用 `resyncScreen`）：先按当前布局 `fit`，再写快照——写完再 fit 会在解析途中触发重排，底部提示符与滚动位置都会被推走；回放解析完把视口贴回底部并整屏 `refresh`——浏览器里滚动条高度的变化是异步派发的，不补这一步时视口可能停在历史的半屏上，画面看起来整体上移，而实际输入位置仍在缓冲区末尾。WebGL 只重画变脏的行，所以整屏刷一次也是把画布与模型对齐的必要步骤。
 - **清窗口** = `pty_clear`：清后端回放缓冲、删磁盘上的卷轴快照（重开应用也不会再把旧内容画回来）、前端 `term.clear()`（与 `clear` 指令一致，当前行提到首行、历史一起丢）。清空的只是**历史**：光标那一行（通常就是提示符）留在回放缓冲的最前面，所以切走再切回来、或「暂停 → 继续」整屏重画时，那一行还在——否则屏幕上只剩一个光标，看着像会话死了。它返回清空前的最后序号，前端把序号不大于它的块丢掉——清屏那一刻已经在 IPC 路上、或已排进帧队列的旧输出，不会冒到空屏上。**不发 `Ctrl+L`**：跑着 `adb logcat` 这类前台进程时，那等于往它的 stdin 塞控制字符。代价是 Shell 仍以为屏幕上有内容，全屏程序（vim / less）要它们自己的重画键。
 
 已按临时数据目录（`PINSHELL_DATA_DIR`）手工走通一遍 M2 验收链路：首次运行从 `OSC 7` 记下 CWD；关闭窗口写出快照并留下 `hot: false`；重启后读回 1 个冷会话、按记住的 CWD 重新拉起；再关一次后快照里正好多出一条分隔线，说明上次屏幕确实被接在了新会话前面。
@@ -128,11 +129,13 @@ trait Transport {
 
 面板宽度可拖动（140–560px，双击分隔条恢复默认）。拖动中只改 CSS 宽度，终端保持原尺寸、由 `#term-host` 裁掉多出来的部分——拖动中每跨一列就重排一次会让会话区不停闪；松手后才 fit 一次并把新尺寸下给 PTY。左栏（会话树）用同一套手势（`src/resize.ts`，150–360px，双击恢复默认），两栏各自量对方的实时宽度来决定自己的上限，所以拖宽一栏不会把终端挤到 180px 以下。两栏都能收起成 26px 的竖条：左栏收起后是一条竖排「会话」的展开按钮，文件面板收起后是一个 `◧`；收起状态与宽度一起存进 `localStorage`，重开还是原样，收起时拖拽手柄隐藏、宽度原值保留，展开时先按当前窗口重新夹一遍。其它布局变化（拖窗口、折叠面板、改另一栏的宽度）由 `#term-host` 上的 `ResizeObserver` 负责：它在布局后、绘制前触发，而 WebGL 画布是独立合成层，晚一帧就会把旧尺寸画到面板上。窗口变窄时两栏已保存的宽度都会被重新夹到合法区间。诊断 HUD 相对 `#main` 定位并单行截断，不覆盖面板与输入条；`#main` / `#term-host` 裁剪溢出（再加 `clip-path`），窗口或面板缩放时画布不会画到邻居上。
 
-右键菜单（M4 第三片）走**原生菜单 + 降级**两条路。列表行（含顶部 `..`）右键后调 `fs_context_menu(path)`，主进程起同目录的 `pinshell-shellmenu.exe` helper；helper 用系统 Shell 的 `IContextMenu`（`SHParseDisplayName` → `SHBindToParent` → `GetUIObjectOf` → `QueryContextMenu` → `TrackPopupMenuEx` → `InvokeCommand`）弹出真正的资源管理器菜单，所以 7-Zip、TortoiseGit 之类的扩展都在。菜单坐标取鼠标当前位置，不做 DPI 换算。
+右键菜单（M4 第三片）走**原生菜单 + 降级**两条路。列表行（含顶部 `..`）右键后调 `fs_context_menu(path)`，列表空白处右键调 `fs_context_menu(path, background=true)`：前者是条目菜单，后者是目录自己的背景菜单（`IShellFolder::CreateViewObject` 请求 `IContextMenu`，与资源管理器右键空白处同源，含新建 / 粘贴 / 属性）。主进程起同目录的 `pinshell-shellmenu.exe` helper；helper 用系统 Shell 的 `IContextMenu`（`SHParseDisplayName`，条目菜单再 `SHBindToParent` → `GetUIObjectOf`，背景菜单 `SHGetDesktopFolder` → `BindToObject` → `CreateViewObject`，然后 `QueryContextMenu` → `TrackPopupMenuEx` → `InvokeCommand`）弹出真正的资源管理器菜单，所以 7-Zip、TortoiseGit 之类的扩展都在。菜单坐标取鼠标当前位置，不做 DPI 换算。
 
 helper 必须是独立进程：第三方 shell 扩展以 DLL 注入宿主，崩了会带走宿主。主进程只等退出码与一行 stdout（`handled` / `cancelled`），上限 10 分钟；找不到 helper、启动失败、非零退出或超时都返回 `unavailable`，前端改用自建菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条），不弹错误框、不丢会话。自建菜单的项集合与位置夹取是纯函数（`rowMenu` / `clampMenuPosition`），由 vitest 覆盖；菜单打开期间自动刷新暂停，列表重建、窗口失焦、滚动或 `Esc` 都会关掉它，不在重建后指向一行已经不存在的条目。
 
-`fs_open` / `fs_reveal` 是两条路共用的动作出口，都交给系统关联（`explorer.exe`），应用内不维护扩展名表。helper 与主程序同目录（开发期 `target/debug`，运行时先看 `PINSHELL_SHELLMENU`）。安装版不声明 `bundle.externalBin`：tauri-cli 2.12 起会把应用 crate 的每个 `[[bin]]` 当作 sidecar 打进安装包，再声明 externalBin 就是同一个文件装两遍，WiX 以 ICE30 拒绝链接（本机实测，MSI 直接构建失败）。因此 helper 只是一个普通 `[[bin]]`，`app:build` 时随 crate 一起编译，MSI 与 NSIS 各装一份到安装目录、与主程序同级。helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出，用来验证 COM 链路而不弹菜单。开发期由 `npm run app:dev` 先跑 `cargo build --bin pinshell-shellmenu` 把它送到 `target/debug`，否则右键永远走降级菜单；`Cargo.toml` 里的 `default-run = "pinshell"` 则保证有两个可执行文件时 `cargo run` 仍然知道该起哪个。
+`fs_open` / `fs_reveal` 是两条路共用的动作出口，都交给系统关联（`explorer.exe`），应用内不维护扩展名表。helper 与主程序同目录（开发期 `target/debug`，运行时先看 `PINSHELL_SHELLMENU`）。安装版不声明 `bundle.externalBin`：tauri-cli 2.12 起会把应用 crate 的每个 `[[bin]]` 当作 sidecar 打进安装包，再声明 externalBin 就是同一个文件装两遍，WiX 以 ICE30 拒绝链接（本机实测，MSI 直接构建失败）。因此 helper 只是一个普通 `[[bin]]`，`app:build` 时随 crate 一起编译，MSI 与 NSIS 各装一份到安装目录、与主程序同级。helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出，用来验证 COM 链路而不弹菜单（`--background` 时验证的是背景菜单，`F:\PinShell` 上实测 10 项）。开发期由 `npm run app:dev` 先跑 `cargo build --bin pinshell-shellmenu` 把它送到 `target/debug`，否则右键永远走降级菜单；`Cargo.toml` 里的 `default-run = "pinshell"` 则保证有两个可执行文件时 `cargo run` 仍然知道该起哪个。
+
+列表空白处点一下会让列表自己拿到焦点，之后 `F5` 重读当前目录；焦点在终端时 `F5` 照常发给 Shell。路径栏是可点的面包屑：单击某一级进入该目录，`✎`（或双击路径栏空白处）切成输入框，回车跳转、`Esc` 或失焦还原。两者都不在列表重建时丢状态：面包屑由当前路径重画，输入中的文本框由用户提交后才被替换。
 
 ## 3. 状态机（会话）
 

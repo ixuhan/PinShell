@@ -3,6 +3,8 @@
 // 这里不做 DOM、不发 IPC：排序与过滤是后端的规则（`core-domain::fsview`），
 // 本模块只决定「面板要什么、怎么显示」。
 
+import { t } from "./i18n";
+
 export type FilePanelMode = "follow" | "fixed";
 
 /// 一个会话自己的文件面板设置：跟随/固定、自动刷新、是否显示隐藏项。
@@ -16,6 +18,9 @@ export interface FilePanelPrefs {
 }
 
 export interface FilePanelStore {
+  /// 整栏是否向右收起（只剩 26px 竖条）；窗口级布局，不属于任何会话
+  collapsed: boolean;
+  /// 文件子栏是否收起（只隐藏列表，标题栏留在原处）
   expanded: boolean;
   width: number;
   /// 新建会话沿用最近一次用过的设置
@@ -60,12 +65,15 @@ export function normalizePanelStore(raw: unknown): FilePanelStore {
       sessions[id] = normalizePanelPrefs(value, defaults);
     }
   }
+  // 整栏折叠（收成 26px 竖条）与文件子栏折叠（只隐藏列表）是两个独立状态：
+  // 旧版本没有 `collapsed` 字段，缺省按展开处理。
+  const collapsed = source.collapsed === true;
   const expanded = source.expanded !== false;
   const width =
     typeof source.width === "number" && Number.isFinite(source.width) && source.width > 0
       ? Math.round(source.width)
       : 0;
-  return { expanded, width, defaults, sessions };
+  return { collapsed, expanded, width, defaults, sessions };
 }
 
 export interface FsEntry {
@@ -85,6 +93,50 @@ export interface FsListing {
   hidden_count: number;
   truncated: boolean;
   entries: FsEntry[];
+}
+
+/// 排序字段与方向。字段是「按什么排」，方向是正序（升序）还是倒序（降序）。
+export type FileSortField = "name" | "created";
+export type FileSortDir = "asc" | "desc";
+
+export const SORT_FIELD_KEY = "pinshell.files.sort";
+export const SORT_DIR_KEY = "pinshell.files.sortDir";
+
+/// 旧版本只存了字段名，方向按字段的惯用值补：名称正序、创建时间最新优先。
+export function parseSortField(raw: string | null): FileSortField {
+  return raw === "created" ? "created" : "name";
+}
+
+export function parseSortDir(raw: string | null, field: FileSortField = "name"): FileSortDir {
+  if (raw === "asc" || raw === "desc") return raw;
+  return field === "created" ? "desc" : "asc";
+}
+
+/// 按字段与方向排一份条目。
+///
+/// - 名称：纯字典序（数字按大小比较），目录与文件混排，和旧版一致；
+/// - 创建时间：目录始终在前（找目录不用翻到底），组内按时间排，时间相同按名称兜底；
+/// - 时间缺失的条目排在该组末尾，避免「没有创建时间」的空值跑到最前面。
+export function sortEntries(
+  entries: FsEntry[],
+  field: FileSortField,
+  dir: FileSortDir
+): FsEntry[] {
+  const sign = dir === "asc" ? 1 : -1;
+  const byName = (a: FsEntry, b: FsEntry) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  return [...entries].sort((a, b) => {
+    if (field === "created") {
+      if (a.kind === "dir" && b.kind !== "dir") return -1;
+      if (a.kind !== "dir" && b.kind === "dir") return 1;
+      const aTime = a.created_ms;
+      const bTime = b.created_ms;
+      if (aTime === null && bTime !== null) return 1;
+      if (aTime !== null && bTime === null) return -1;
+      if (aTime !== null && bTime !== null && aTime !== bTime) return aTime < bTime ? -sign : sign;
+    }
+    return sign * byName(a, b);
+  });
 }
 
 /// 只有普通文件显示大小。目录与其它类型显示空串，避免一排 `0 B`。
@@ -174,6 +226,51 @@ export function parentPath(path: string): string | null {
   return parent;
 }
 
+/// 路径面包屑的一段。`name` 是显示文字，`path` 是点它之后要进入的完整路径。
+export interface PathSegment {
+  name: string;
+  path: string;
+}
+
+/// 把路径拆成面包屑。盘符根显示 `C:`，UNC 共享根显示 `\\server\share`；
+/// 每段的 `path` 都能直接交给 `fs_list`（先按 `normalizePath` 规整过）。
+export function pathSegments(path: string): PathSegment[] {
+  const normalized = normalizePath(path);
+  if (!normalized) return [];
+  const unc = normalized.startsWith("\\\\");
+  if (unc) {
+    const parts = normalized.slice(2).split("\\").filter(Boolean);
+    if (parts.length === 0) return [{ name: "\\\\", path: "\\\\" }];
+    if (parts.length === 1) return [{ name: `\\\\${parts[0]}`, path: `\\\\${parts[0]}` }];
+    const segments: PathSegment[] = [];
+    let acc = `\\\\${parts[0]}\\${parts[1]}`;
+    segments.push({ name: acc, path: acc });
+    for (const part of parts.slice(2)) {
+      acc = `${acc}\\${part}`;
+      segments.push({ name: part, path: acc });
+    }
+    return segments;
+  }
+  const rooted = normalized.startsWith("\\");
+  const parts = normalized.split("\\").filter(Boolean);
+  const segments: PathSegment[] = [];
+  let acc = "";
+  let start = 0;
+  if (!rooted && parts.length > 0 && isDrive(parts[0])) {
+    acc = `${parts[0]}\\`;
+    segments.push({ name: parts[0], path: acc });
+    start = 1;
+  } else if (rooted) {
+    acc = "\\";
+    segments.push({ name: "\\", path: acc });
+  }
+  for (const part of parts.slice(start)) {
+    acc = acc === "" ? part : acc.endsWith("\\") ? `${acc}${part}` : `${acc}\\${part}`;
+    segments.push({ name: part, path: acc });
+  }
+  return segments;
+}
+
 /// 该向 `fs_list` 请求哪个路径。
 ///
 /// - 跟随模式返回 `null`：让后端按会话记下的 CWD 取，前端不复制「CWD 是什么」的规则。
@@ -251,7 +348,7 @@ export function clampPanelWidth(
 
 /// 右键菜单的一行。原生菜单由系统 Shell 提供；这套项只在 helper 不可用
 /// （或环境里弹不出 shell 菜单）时使用，所以它必须覆盖面板最常用的几件事。
-export type MenuCommand = "open" | "reveal" | "copy" | "fill";
+export type MenuCommand = "open" | "reveal" | "copy" | "fill" | "refresh";
 
 export interface MenuItem {
   command: MenuCommand;
@@ -263,19 +360,34 @@ export type RowKind = "parent" | "dir" | "file" | "other";
 
 /// 降级菜单的项与顺序：打开 → 在资源管理器中显示 → 复制路径 →（文件）填入输入条。
 /// `..` 行没有「填入输入条」——它不是一个具体文件的路径，填进去没有意义。
+/// 文案随当前语言走：这个菜单每次右键都会重新构造，所以不必缓存。
 export function rowMenu(kind: RowKind): MenuItem[] {
   const items: MenuItem[] = [
-    { command: "open", label: kind === "file" || kind === "other" ? "用默认程序打开" : "打开" },
+    {
+      command: "open",
+      label: kind === "file" || kind === "other" ? t("files.openWith") : t("files.open")
+    },
     {
       command: "reveal",
-      label: kind === "parent" ? "在资源管理器中显示上级目录" : "在资源管理器中显示"
+      label: kind === "parent" ? t("files.revealParent") : t("files.reveal")
     },
-    { command: "copy", label: "复制路径" }
+    { command: "copy", label: t("files.copyPath") }
   ];
   if (kind === "file" || kind === "other") {
-    items.push({ command: "fill", label: "填入输入条" });
+    items.push({ command: "fill", label: t("files.fill") });
   }
   return items;
+}
+
+/// 文件列表空白处的降级菜单：原生 Shell 的背景菜单弹不出来时用它。
+/// 打开当前目录 → 在资源管理器中显示 → 复制路径 → 刷新。
+export function blankMenu(): MenuItem[] {
+  return [
+    { command: "open", label: t("files.open") },
+    { command: "reveal", label: t("files.reveal") },
+    { command: "copy", label: t("files.copyPath") },
+    { command: "refresh", label: t("files.refresh") }
+  ];
 }
 
 /// 菜单与视口边缘的最小间距。
