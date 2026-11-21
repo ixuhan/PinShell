@@ -30,6 +30,11 @@ pub struct OscParser {
     pending: Vec<u8>,
 }
 
+/// `pending` 的上限。永不终止的 `ESC]...`（或 `ESC[` + 无限参数字节）会让尾巴
+/// 无界增长：内存被吃光，且提示符判定从此失效。超过上限就整个放弃，从头再来。
+/// 64KB 远大于任何合法的 OSC 标记或 CSI 序列。
+const MAX_PENDING: usize = 64 * 1024;
+
 impl OscParser {
     pub fn new() -> Self {
         Self::default()
@@ -90,7 +95,16 @@ impl OscParser {
         }
 
         if let Some(k) = keep_from {
-            self.pending.extend_from_slice(&buf[k..]);
+            // keep_from 永远指向 buf 的末尾（设置后立即 break），所以尾巴里只有
+            // 没拼完的那条序列；丢弃它不会漏掉任何已完整解析的事件。
+            let tail = buf.len() - k;
+            if tail > MAX_PENDING {
+                // 永不终止的序列：整体放弃，等下一块从头开始。
+                // 用全新的 Vec 换掉，别让 pending 永久占着 64KB 的堆容量。
+                self.pending = Vec::new();
+            } else {
+                self.pending.extend_from_slice(&buf[k..]);
+            }
         }
         out
     }
@@ -358,6 +372,65 @@ mod tests {
         assert!(!p.pending().is_empty());
         assert!(p.feed(b"]133;").is_empty());
         assert_eq!(p.feed(b"A\x07"), vec![OscEvent::PromptStart]);
+        assert!(p.pending().is_empty());
+    }
+
+    /// 永不终止的 OSC + 后续大量正常输出：pending 必须有界，且之后能恢复正常判定。
+    #[test]
+    fn unterminated_osc_is_capped_and_parser_recovers() {
+        let mut p = OscParser::new();
+        // 一条没有终止符的 OSC，先被留住
+        assert!(p.feed(b"\x1b]133;A").is_empty());
+        // 之后灌大量普通文本（每块 8KB，共 72KB > 上限）：尾巴超限整体放弃
+        let chunk = [b'x'; 8192];
+        for _ in 0..9 {
+            assert!(p.feed(&chunk).is_empty(), "超限前不应误发任何事件");
+        }
+        assert!(p.pending().is_empty(), "超限后 pending 必须清空");
+        // 恢复正常 OSC 判定：下一条合法标记照常吐事件
+        assert_eq!(p.feed(b"\x1b]133;B\x07"), vec![OscEvent::PromptEnd]);
+        assert!(p.pending().is_empty());
+    }
+
+    /// 永不终止的 CSI（无限参数字节）同样受上限约束。
+    #[test]
+    fn unterminated_csi_is_capped_too() {
+        let mut p = OscParser::new();
+        assert!(p.feed(b"\x1b[").is_empty());
+        let chunk = [b'0'; 8192];
+        for _ in 0..9 {
+            assert!(p.feed(&chunk).is_empty(), "超限前不应误发任何事件");
+        }
+        assert!(p.pending().is_empty(), "超限后 pending 必须清空");
+        assert_eq!(
+            p.feed(b"\x1b[?1049h"),
+            vec![OscEvent::AltScreen { entered: true }]
+        );
+    }
+
+    /// 上限恰好切在 ESC 序列中间：放弃尾巴后不留半个序列，下一条标记照常判定。
+    #[test]
+    fn cap_reset_in_the_middle_of_an_escape_is_clean() {
+        let mut p = OscParser::new();
+        // 完整标记正常吐出，之后跟一条永不终止的 OSC 开头（4 字节留在 pending）
+        assert_eq!(
+            p.feed(b"\x1b]133;A\x07\x1b]2;"),
+            vec![OscEvent::PromptStart]
+        );
+        // 每块都以半个 ESC 序列（ESC ] ）收尾，保证超限瞬间尾巴停在转义序列中间
+        let mut fed = 4usize; // pending 里已有的尾巴
+        while fed <= super::MAX_PENDING {
+            let mut chunk = vec![b'y'; 8192 - 2];
+            chunk.extend_from_slice(b"\x1b]");
+            assert!(p.feed(&chunk).is_empty(), "超限前不应误发任何事件");
+            fed += chunk.len();
+        }
+        assert!(p.pending().is_empty(), "超限后半个序列必须整体放弃");
+        // 抛掉半个序列之后，下一条正常 OSC 照常判定，不受残留影响
+        assert_eq!(
+            p.feed(b"\x1b]2;hi\x07"),
+            vec![OscEvent::Title("hi".into())]
+        );
         assert!(p.pending().is_empty());
     }
 }
