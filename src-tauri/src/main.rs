@@ -13,7 +13,7 @@ use core_domain::serial::{
 use core_domain::utf8_stream::Utf8Stream;
 use core_domain::workspace::{SessionMeta, SessionSettings, Workspace};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
@@ -690,6 +690,28 @@ fn powershell_encoded(script: &str) -> String {
     base64_encode(&bytes)
 }
 
+/// spawn 失败路径的子进程保险丝：guard 存活期间任何提前返回都会 kill 掉
+/// 已 spawn 的 shell，避免孤儿进程。正常路径在 child 移交进 `PtyTransport`
+/// 之后 `take()` 解除武装；解除武装之后不得再有任何 `?` / 提前返回路径。
+struct ChildGuard(Option<Box<dyn Child + Send + Sync>>);
+
+impl ChildGuard {
+    /// 把 child 移交出去（构造 `PtyTransport` 用），并解除 kill 保险。
+    fn take(&mut self) -> Box<dyn Child + Send + Sync> {
+        self.0
+            .take()
+            .expect("ChildGuard 被解除武装两次：spawn_session 逻辑错误")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+        }
+    }
+}
+
 #[tauri::command]
 fn spawn_session(
     app: AppHandle,
@@ -746,6 +768,11 @@ fn spawn_session(
         .map_err(|e| format!("spawn {shell}: {e}"))?;
     drop(pair.slave);
 
+    // 保险丝从这一刻起生效：下面任何失败路径都会先 kill 掉刚拉起的 shell。
+    let mut guard = ChildGuard(Some(child));
+
+    // 所有可能失败的装配步骤都放在解除武装之前。take_writer 失败时
+    // master 会随 guard 一起 drop（ConPTY 关闭），shell 由 kill 兜底。
     let writer = pair
         .master
         .take_writer()
@@ -757,21 +784,27 @@ fn spawn_session(
         .and_then(|s| s.to_str())
         .unwrap_or(shell.as_str())
         .to_string();
-    let transport: Arc<dyn Transport> = Arc::new(transport::PtyTransport::new(
-        writer,
-        pair.master,
-        child,
-        cols,
-        rows,
-    ));
-    let session = new_session(transport);
+    // 会话设置与运行时日志先装配好（guard 仍武装）：RuntimeLog 失败时提前
+    // 返回，由 guard kill 掉 shell，session 尚未进入 state.sessions。
     let saved = state
         .workspace
         .lock()
         .session(&id)
         .map(|meta| meta.settings.clone())
         .unwrap_or_default();
-    *session.runtime_log.lock() = Some(session_log::RuntimeLog::new(saved.clone())?);
+    let runtime_log =
+        session_log::RuntimeLog::new(saved.clone()).map_err(|e| format!("runtime log: {e}"))?;
+
+    // 解除武装：从 guard.take() 起到函数结束不得再有任何 `?` / 提前返回路径。
+    let transport: Arc<dyn Transport> = Arc::new(transport::PtyTransport::new(
+        writer,
+        pair.master,
+        guard.take(),
+        cols,
+        rows,
+    ));
+    let session = new_session(transport);
+    *session.runtime_log.lock() = Some(runtime_log);
     *session.settings.lock() = saved;
 
     // 冷会话重开：把上次的屏幕接在新输出前面。必须在读线程启动前做，
@@ -1195,6 +1228,8 @@ fn spawn_serial_session(
         .session(&id)
         .map(|meta| meta.settings.clone())
         .unwrap_or_default();
+    // 端口靠 SerialTransport 的 Drop 关闭：这一行失败提前返回时，局部 Arc
+    // 一起 drop，端口句柄随之释放（与终端路径的 ChildGuard 互补）。
     *session.runtime_log.lock() = Some(session_log::RuntimeLog::new(saved.clone())?);
     *session.settings.lock() = saved;
     seed_scrollback(&state, &session, &id);
