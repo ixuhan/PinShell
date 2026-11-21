@@ -237,7 +237,6 @@ onLocaleChange(() => refreshChromeText());
 let sessionId = "";
 let requestedSessionId = "";
 let sessionSwitchToken = 0;
-let bytes = 0;
 /// 文件面板的句柄：监听器可能先于 setup 收到事件，所以允许为空
 let filePanel: ReturnType<typeof setupFilePanel> | null = null;
 /// 左栏句柄：标题栏的折叠按钮要用它切换整栏收起
@@ -473,7 +472,6 @@ async function attach(id: string) {
   if (!histOverlay.hidden) closeHistoryOverlay(false, false);
   ib.value = "";
   renderSendAvailability();
-  autoGrow();
   overlayDraft = "";
   histIdx = -1;
   histDraft = "";
@@ -1239,14 +1237,6 @@ interface Ownership {
   override: OverrideMode;
 }
 
-const STATE_TEXT: Record<TermState, string> = {
-  unknown: "",
-  prompt_guess: "",
-  prompt_ready: "",
-  running: "",
-  alt_screen: ""
-};
-
 let own: Ownership | null = null;
 
 // ---------- 命令历史：后端是唯一真源，前端只持有当前会话的只读热缓存 ----------
@@ -1472,7 +1462,6 @@ function closeHistoryOverlay(restoreDraft: boolean, focusInput = true) {
   historySel = -1;
   if (restoreDraft) {
     ib.value = overlayDraft;
-    autoGrow();
   }
   if (!focusInput) return;
   ib.focus();
@@ -1711,7 +1700,7 @@ function renderBarStatus() {
       labelText = `${serialStatus.config.port} · ${serialStatus.config.baud}`;
     }
   } else {
-    labelText = STATE_TEXT[own?.state ?? "unknown"];
+    labelText = "";
   }
   ownLabel.textContent = labelText;
   ownLabel.hidden = true;
@@ -1903,7 +1892,6 @@ ibHex.addEventListener("click", () => {
     : t("input.placeholder");
   if (hexMode) {
     ib.value = normalizeHexInput(ib.value);
-    autoGrow();
     ib.setSelectionRange(ib.value.length, ib.value.length);
   }
   ib.focus();
@@ -1984,7 +1972,6 @@ function sendLine(line: string) {
     const clean = normalizeHexInput(line).replaceAll(" ", "");
     if (clean.length % 2 !== 0) {
       ib.value = line;
-      autoGrow();
       ib.setSelectionRange(ib.value.length, ib.value.length);
       showNotice(t("input.hexOdd"), true);
       return;
@@ -2005,7 +1992,6 @@ function sendLine(line: string) {
       if (sessionId !== id) return;
       if (!ib.value) ib.value = line;
       renderSendAvailability();
-      autoGrow();
       ib.setSelectionRange(ib.value.length, ib.value.length);
       showNotice(String(err), true, 8000);
       if (serialKind) void syncSerial(id);
@@ -2064,15 +2050,10 @@ async function sendInput() {
 
   ib.value = "";
   renderSendAvailability();
-  autoGrow();
   histIdx = -1;
   histDraft = "";
   sendLine(line);
   updateGhost();
-}
-
-function autoGrow() {
-  // Input height is controlled by the draggable bar, not by content updates.
 }
 
 function renderSendAvailability() {
@@ -2109,7 +2090,6 @@ ib.addEventListener("keydown", (e) => {
   ) {
     e.preventDefault();
     ib.value += currentGhost;
-    autoGrow();
     currentGhost = "";
     ghostEl.textContent = "";
     return;
@@ -2133,7 +2113,6 @@ ib.addEventListener("keydown", (e) => {
     }
     ib.value = hist[histIdx] ?? "";
     renderSendAvailability();
-    autoGrow();
     ib.setSelectionRange(ib.value.length, ib.value.length);
     updateGhost();
   } else if (e.key === "ArrowDown") {
@@ -2148,14 +2127,12 @@ ib.addEventListener("keydown", (e) => {
       histDraft = "";
     }
     renderSendAvailability();
-    autoGrow();
     ib.setSelectionRange(ib.value.length, ib.value.length);
     updateGhost();
   } else if (e.key === "Escape") {
     e.preventDefault();
     ib.value = "";
     renderSendAvailability();
-    autoGrow();
     histIdx = -1;
     histDraft = "";
     updateGhost();
@@ -2169,7 +2146,6 @@ ib.addEventListener("keydown", (e) => {
 // 手动改过文本就不再算「正在翻历史」：↑↓ 游标归位，否则下一次 ↑ 会从旧位置继续跳条。
 ib.addEventListener("input", () => {
   renderSendAvailability();
-  autoGrow();
   if (serialKind && hexMode) {
     const start = ib.selectionStart ?? ib.value.length;
     const normalized = normalizeHexInput(ib.value);
@@ -2262,7 +2238,6 @@ const listenOut = listen<{ id: string; seq: number; data: string }>("pty:out", (
   if (payload.seq <= lastSeq) return;
   lastSeq = payload.seq;
   noteFirstOutput();
-  bytes += payload.data.length;
   queueOut(payload.data, payload.seq);
 });
 
