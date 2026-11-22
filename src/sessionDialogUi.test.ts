@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { portLabel, type SerialPort } from "./serialUi";
+import { portLabel, type SerialPort } from "./sessionDialogUi";
 
 function port(over: Partial<SerialPort>): SerialPort {
   return {

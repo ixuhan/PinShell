@@ -1,9 +1,10 @@
-// 全局设置：语言、主题、版本号与更新检查。
+// 全局设置：语言、主题、功能栏面板、版本号与更新检查。
 //
 // 只放**应用级**偏好——终端字号这类跟着会话走的东西在会话设置里。
-// 三块内容各自独立：
+// 各块内容各自独立：
 // - 语言：写 `i18n` 的 locale 并广播，各模块重画自己的文案；
 // - 主题：写 `<html data-theme>` 与 localStorage，同时换 xterm 配色；
+// - 功能栏：勾选可见面板、调整上下顺序，即时生效（存 localStorage，见 `rightBar.ts`）；
 // - 版本与更新：版本号来自 Tauri，检查更新按钮在未配置签名源时明确说明。
 
 import { invoke } from "@tauri-apps/api/core";
@@ -12,10 +13,14 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { applyStaticI18n, getLocale, onLocaleChange, setLocale, t, type Locale } from "./i18n";
 import { applyTheme, parseTheme, readTheme, saveTheme, type Theme } from "./theme";
 import { enableDialogDrag, resetDialogPosition } from "./modalDrag";
+import type { RightBarHandle } from "./rightBarUi";
+import type { RightPanel } from "./rightBar";
 
 export interface GlobalSettingsDeps {
   /// 主题变了：让终端换一套 canvas 配色
   themeChanged(theme: Theme): void;
+  /// 功能栏：勾选/排序都直接落到它身上（即时生效，没有「取消」）
+  rightBar: RightBarHandle;
 }
 
 export interface GlobalSettingsHandle {
@@ -30,9 +35,32 @@ export function setupGlobalSettings(deps: GlobalSettingsDeps): GlobalSettingsHan
   const doneBtn = document.getElementById("settings-done") as HTMLButtonElement;
   const languageSelect = document.getElementById("setting-language") as HTMLSelectElement;
   const themeSelect = document.getElementById("setting-theme") as HTMLSelectElement;
+  const panelList = document.getElementById("settings-rightbar") as HTMLUListElement;
   const versionEl = document.getElementById("settings-version") as HTMLSpanElement;
   const checkBtn = document.getElementById("settings-check-update") as HTMLButtonElement;
   const statusEl = document.getElementById("update-status") as HTMLSpanElement;
+
+  interface PanelRow {
+    id: RightPanel;
+    element: HTMLLIElement;
+    check: HTMLInputElement;
+    up: HTMLButtonElement;
+    down: HTMLButtonElement;
+  }
+  const panelRows: PanelRow[] = [...panelList.querySelectorAll<HTMLLIElement>("li[data-panel]")]
+    .map((element) => {
+      const check = element.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      const [up, down] = [...element.querySelectorAll<HTMLButtonElement>("button[data-move]")];
+      if (!check || !up || !down) return null;
+      return {
+        id: element.dataset.panel as RightPanel,
+        element,
+        check,
+        up,
+        down
+      };
+    })
+    .filter((row): row is PanelRow => row !== null);
 
   let version = "";
   let busy = false;
@@ -41,10 +69,41 @@ export function setupGlobalSettings(deps: GlobalSettingsDeps): GlobalSettingsHan
     versionEl.textContent = version ? t("globalSettings.version", { version }) : "";
   }
 
+  /// 勾选态、顺序与按钮可用性都跟着功能栏的真实状态走。
+  /// 列表里始终是三行（没勾选的也在），↑↓ 移动的是整份顺序。
+  function paintPanels() {
+    const state = deps.rightBar.state();
+    const byId = new Map(panelRows.map((row) => [row.id, row]));
+    state.order.forEach((id, index) => {
+      const row = byId.get(id);
+      if (!row) return;
+      panelList.append(row.element);
+      row.check.checked = !state.hidden.includes(id);
+      row.up.disabled = index === 0;
+      row.down.disabled = index === state.order.length - 1;
+    });
+  }
+
+  for (const row of panelRows) {
+    row.check.addEventListener("change", () => {
+      deps.rightBar.setVisible(row.id, row.check.checked);
+      paintPanels();
+    });
+    row.up.addEventListener("click", () => {
+      deps.rightBar.move(row.id, -1);
+      paintPanels();
+    });
+    row.down.addEventListener("click", () => {
+      deps.rightBar.move(row.id, 1);
+      paintPanels();
+    });
+  }
+
   function paintControls() {
     languageSelect.value = getLocale();
     themeSelect.value = readTheme();
     applyStaticI18n(overlay);
+    paintPanels();
     paintVersion();
   }
 

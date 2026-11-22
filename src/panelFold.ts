@@ -14,7 +14,7 @@ export function foldChevron(collapsed: boolean): string {
 }
 
 /// 标题栏的悬停提示：说清楚点下去会发生什么。
-/// `label` 传已本地化的面板名（调用方用 `t("sidebar.sessions")` 这类键取）。
+/// `label` 传已本地化的面板名（调用方用 `t("rightbar.title")` 这类键取）。
 export function foldTitle(label: string, collapsed: boolean): string {
   return collapsed ? t("panel.expand", { label }) : t("panel.collapse", { label });
 }

@@ -10,6 +10,7 @@ import {
   autoRefreshDelay,
   blankMenu,
   clampPanelWidth,
+  DEFAULT_FILE_PANEL_HEIGHT,
   formatSize,
   formatTime,
   joinPath,
@@ -35,8 +36,10 @@ import {
   type MenuCommand,
   type RowKind
 } from "./filePanel";
-// 拖动调宽的手势与 body 上的类名左右两栏共用，别各自再写一份
-import { DRAGGING_CLASS, dragWidth } from "./resize";
+// 拖动调宽/调高的手势与 body 上的类名三个面板共用，别各自再写一份
+import { DRAGGING_CLASS, dragHeight, dragWidth } from "./resize";
+import { clampPanelHeight, RIGHT_BAR_EVENT } from "./rightBar";
+import { panelColumnBudget } from "./rightBarUi";
 
 export interface FilePanelDeps {
   /// 当前焦点会话的 id；没有会话时返回空串
@@ -88,11 +91,11 @@ export function setupFilePanel(deps: FilePanelDeps) {
   /// 文件子栏是否收起（只隐藏列表，标题栏留在原处）
   let expanded = stored.expanded;
   let width = stored.width;
+  /// 文件子栏的高度（窗口级布局）。轮到它吃剩余高度时忽略这个值。
+  let height = stored.height;
 
-  // 文件子栏的标题栏折叠：与串口、快捷指令共用 panelFold，样式与交互一致
-  const filesBody = document.getElementById("files-body");
-  /// 文件子栏收起时让快捷指令吃掉剩余高度，把「文件」标题栏顶到右栏底部（见样式里的 files-folded）。
-  const applyFoldClass = (collapsed: boolean) => filesBody?.classList.toggle("files-folded", collapsed);
+  // 文件子栏的标题栏折叠：与串口、快捷指令共用 panelFold，样式与交互一致。
+  // 「谁吃剩余高度」由 rightBarUi 按顺序统一裁定，这里不再有 files-folded 特例。
   const fold = setupFoldPanel({
     root: document.getElementById("files-panel") as HTMLElement,
     toggle: document.getElementById("files-toggle") as HTMLElement,
@@ -101,7 +104,6 @@ export function setupFilePanel(deps: FilePanelDeps) {
     collapsed: !expanded,
     onChange: (next) => {
       expanded = !next;
-      applyFoldClass(next);
       save();
       deps.layoutChanged();
       scheduleAuto();
@@ -227,7 +229,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     try {
       localStorage.setItem(
         STORE_KEY,
-        JSON.stringify({ collapsed, expanded, width, defaults, sessions })
+        JSON.stringify({ collapsed, expanded, width, height, defaults, sessions })
       );
     } catch {
       // 存不下就只影响下次打开的默认值，不打断使用
@@ -277,7 +279,6 @@ export function setupFilePanel(deps: FilePanelDeps) {
   /// 文件子栏折叠状态上 DOM。只在初始化时调用：之后由 `fold` 的 onChange 接管。
   function applyExpanded() {
     fold.set(!expanded, true);
-    applyFoldClass(!expanded);
   }
 
   /// 整栏折叠：宽度收成 26px 竖条，只留一个竖排的展开按钮。
@@ -285,8 +286,8 @@ export function setupFilePanel(deps: FilePanelDeps) {
   function applyCollapsed(silent = false) {
     root.classList.toggle("collapsed", collapsed);
     expandBtn.hidden = !collapsed;
-    expandBtn.title = t("files.expand");
-    expandBtn.setAttribute("aria-label", t("files.expand"));
+    expandBtn.title = t("rightbar.expand");
+    expandBtn.setAttribute("aria-label", t("rightbar.expand"));
     persist();
     // 收起时没有列表可刷，展开时立刻补一次
     scheduleAuto();
@@ -617,6 +618,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       auto &&
       expanded &&
       !collapsed &&
+      !root.hidden &&
       deps.sessionId() !== "" &&
       document.visibilityState === "visible" &&
       !isPopupMenuOpen() &&
@@ -651,6 +653,8 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   /// 拉一次目录。返回 false 表示没拉成（没会话、被更新的请求取代、读盘失败）。
   async function reload(sessionOverride?: string): Promise<boolean> {
+    // 面板被取消勾选时不读盘；重新勾选时由 `pinshell:rightbar` 补一次
+    if (root.hidden) return false;
     const id = sessionOverride ?? deps.sessionId();
     // 切了会话就先换上它自己的设置，再按那套设置决定列哪个目录
     bindSession(id);
@@ -765,6 +769,46 @@ export function setupFilePanel(deps: FilePanelDeps) {
     void reload();
   });
 
+  // ---------- 子栏高度 ----------
+  // 三个面板共用一套规则：各自记住高度，最后一个展开的面板由 rightBarUi 挂 `rb-fill` 撑满；
+  // 撑满时手柄被 CSS 收掉，这里也拦一道，防止点到已经隐藏的手柄。
+  const heightHandle = document.getElementById("files-height") as HTMLDivElement;
+  /// 夹取高度：既不超过可用高度的 70%，也不把别的定高面板挤到栏底之外。
+  /// 可用高度为 0（整栏收起）时 `panelColumnBudget` 会退回窗口高度。
+  const clampHeight = (desired: number) => {
+    const budget = panelColumnBudget(root);
+    return clampPanelHeight(Math.min(desired, budget.room), budget.available);
+  };
+  function applyHeight() {
+    height = clampHeight(height);
+    root.style.setProperty("--files-height", `${height}px`);
+  }
+
+  heightHandle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !expanded || root.classList.contains("rb-fill")) return;
+    event.preventDefault();
+    dragHeight(event, heightHandle, {
+      edge: "bottom",
+      startHeight: root.getBoundingClientRect().height,
+      clamp: clampHeight,
+      onHeight: (next) => {
+        height = next;
+        applyHeight();
+      },
+      onEnd: (_next, moved) => {
+        if (!moved) return;
+        save();
+        deps.layoutChanged();
+      }
+    });
+  });
+  heightHandle.addEventListener("dblclick", () => {
+    height = clampHeight(DEFAULT_FILE_PANEL_HEIGHT);
+    applyHeight();
+    save();
+    deps.layoutChanged();
+  });
+
   // 左边缘拖动调宽：拖动中只改 CSS 宽度，终端保持原尺寸、由 #term-host 裁掉多出来的部分，
   // 松手后才重排一次终端并把新尺寸下给 PTY（拖动中每跨一列就重排会让会话区不停闪）。
   // 双击恢复按窗口比例的默认宽度。手势本体在 `resize.ts`，与左栏共用。
@@ -802,6 +846,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     root.style.setProperty("--files-width", `${width}px`);
   }
   syncChrome();
+  applyHeight();
   // 整栏折叠先上 DOM：子栏折叠状态与之无关，两者分别恢复
   applyCollapsed(true);
   applyExpanded();
@@ -810,6 +855,12 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   // 窗口变窄时把已保存的宽度重新夹一遍，否则固定的 px 会把终端挤到看不见
   window.addEventListener("resize", () => {
+    const nextHeight = clampHeight(height);
+    if (nextHeight !== height) {
+      height = nextHeight;
+      applyHeight();
+      save();
+    }
     if (!width || collapsed) return;
     const next = clampWidth(width);
     if (next === width) return;
@@ -817,6 +868,13 @@ export function setupFilePanel(deps: FilePanelDeps) {
     root.style.setProperty("--files-width", `${next}px`);
     save();
     deps.layoutChanged();
+  });
+
+  // 功能栏的结构变了（面板被勾掉/显出来、上下顺序变了）：隐藏期间停掉定时器，
+  // 重新出现时补一次列表——否则回来的是一份上次留下的旧目录内容。
+  document.addEventListener(RIGHT_BAR_EVENT, () => {
+    scheduleAuto();
+    if (!root.hidden && expanded && !collapsed && !lastListing) void reload();
   });
 
   // 窗口被遮住/最小化时没必要继续读盘；回到前台先补一次（这期间文件可能变了）

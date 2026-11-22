@@ -1,7 +1,7 @@
 // 自绘标题栏：原生标题栏已在 tauri.conf.json 里关掉（decorations: false），
 // 这条顶栏就是窗口唯一的装饰，所以拖动、双击最大化、三个窗口按钮都得自己接。
 //
-// 左侧工具区还放了「收起左栏 / 收起右栏 / 全局设置」三个按钮——它们属于窗口级布局，
+// 右侧工具区放「收起项目栏 / 收起功能栏 / 全局设置」三个按钮——它们属于窗口级布局，
 // 放在标题栏比藏在各自侧栏的角落里更好找。样式在 styles.css 的 #titlebar 一节。
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -51,6 +51,8 @@ export function setupTitlebar(deps: TitlebarDeps): void {
 
   /// 折叠按钮的按下态与提示跟着真实状态走。
   /// `aria-pressed` 同时是图标的依据：侧栏展开时图标那一块涂黑，收起时留空。
+  /// 功能栏三个面板全被关掉时按钮是 `disabled`（功能栏整条不存在），
+  /// 提示要说明去哪儿打开，而不是继续说「收起右侧栏」。
   function syncBarButtons(): void {
     for (const [button, bar, side] of [
       [leftBtn!, deps.left, "left"],
@@ -58,9 +60,11 @@ export function setupTitlebar(deps: TitlebarDeps): void {
     ] as const) {
       const collapsed = bar.collapsed;
       button.setAttribute("aria-pressed", String(collapsed));
-      const key = collapsed
-        ? side === "left" ? "titlebar.expandLeft" : "titlebar.expandRight"
-        : side === "left" ? "titlebar.collapseLeft" : "titlebar.collapseRight";
+      const key = button.disabled
+        ? "titlebar.noRightPanels"
+        : collapsed
+          ? side === "left" ? "titlebar.expandLeft" : "titlebar.expandRight"
+          : side === "left" ? "titlebar.collapseLeft" : "titlebar.collapseRight";
       const label = t(key);
       button.title = label;
       button.setAttribute("aria-label", label);
@@ -105,7 +109,9 @@ export function setupTitlebar(deps: TitlebarDeps): void {
 
   // 两侧栏自己也可能因为别的原因改变折叠（竖条上的展开按钮），
   // 所以除了初始化，每次窗口尺寸变化时也顺手对齐一次按钮状态。
+  // 功能栏的可见面板变了（全被关掉/重新打开）时也要重画一次。
   syncBarButtons();
+  document.addEventListener("pinshell:rightbar", syncBarButtons);
   void syncMaximizeButton();
   void win
     .onResized(() => {

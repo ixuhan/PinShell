@@ -11,11 +11,11 @@ use core_domain::serial::{
     SendMode, SerialConfig, StopBits,
 };
 use core_domain::utf8_stream::Utf8Stream;
-use core_domain::workspace::{SessionMeta, SessionSettings, Workspace};
+use core_domain::workspace::{Layout, SessionMeta, SessionSettings, Side, Workspace};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -110,6 +110,9 @@ struct AppState {
     workspace_writable: bool,
     /// 历史库句柄。`setup` 里拿到 `AppHandle` 后才建（写库线程要发事件）。
     history: OnceLock<Arc<history::History>>,
+    /// 本次运行里被用户「关格」的会话：进入项目时跳过它们，重启即清空。
+    /// 不写进 workspace.json——它不是持久状态，只是「这次别自动拉起」。
+    suspended: Mutex<HashSet<String>>,
 }
 
 impl AppState {
@@ -121,6 +124,7 @@ impl AppState {
             data_dir,
             workspace_writable,
             history: OnceLock::new(),
+            suspended: Mutex::new(HashSet::new()),
         }
     }
 
@@ -208,6 +212,63 @@ struct TreeSession {
     /// 串口会话才有：冷会话重新拉起时按这份配置重连，界面也用它显示 8N1 摘要。
     serial: Option<SerialConfigPayload>,
     settings: SessionSettingsPayload,
+    /// 归属项目。项目是唯一容器（ADR 0008），所以这里一定是某个项目 id。
+    owner: String,
+}
+
+/// 项目与其分格树。一次随 `workspace_snapshot` 返回，避免「布局引用了还没到的会话」。
+#[derive(Serialize)]
+struct ProjectPayload {
+    id: String,
+    name: String,
+    root: Option<String>,
+    frozen: bool,
+    /// 空壳项目为 `None`
+    layout: Option<LayoutPayload>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LayoutPayload {
+    Leaf {
+        session: String,
+    },
+    Split {
+        axis: &'static str,
+        ratio: f32,
+        first: Box<LayoutPayload>,
+        second: Box<LayoutPayload>,
+    },
+}
+
+fn layout_payload(layout: &Layout) -> LayoutPayload {
+    match layout {
+        Layout::Leaf { session } => LayoutPayload::Leaf {
+            session: session.clone(),
+        },
+        Layout::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => LayoutPayload::Split {
+            axis: match axis {
+                core_domain::workspace::Axis::Horizontal => "horizontal",
+                core_domain::workspace::Axis::Vertical => "vertical",
+            },
+            ratio: *ratio,
+            first: Box::new(layout_payload(first)),
+            second: Box::new(layout_payload(second)),
+        },
+    }
+}
+
+#[derive(Serialize)]
+struct WorkspaceSnapshotPayload {
+    sessions: Vec<TreeSession>,
+    projects: Vec<ProjectPayload>,
+    /// 本次运行里被用户关掉的格：进入项目时跳过，重启清空
+    suspended: Vec<String>,
 }
 
 #[derive(Clone, Serialize, serde::Deserialize)]
@@ -535,6 +596,79 @@ fn persist_workspace(state: &AppState) {
     }
 }
 
+/// 彻底结束一个会话的运行时并销毁它的历史与卷轴快照。
+/// 「替换当前格」的旧会话与「删除项目」的每个会话都走这里；
+/// 运行时不存在也算成功（旧进程可能早就自己退出了），销毁动作本身幂等。
+fn cleanup_session(state: &AppState, id: &str) {
+    if let Some(session) = state.sessions.lock().remove(id) {
+        // 旧读线程不许再收尾：会话已经从工作区里摘掉了
+        session.reader_gen.fetch_add(1, Ordering::SeqCst);
+        let _ = session.transport.close();
+        if session.transport.kind() == TransportKind::Serial {
+            join_reader(&session);
+        }
+        session.outbox.running.store(false, Ordering::Relaxed);
+    }
+    if let Some(history) = state.history() {
+        history.delete_session(id);
+    }
+    if let Some(dir) = state.data_dir.as_deref() {
+        if let Err(err) = persistence::remove_scrollback(dir, id) {
+            eprintln!("[data] remove scrollback {id}: {err}");
+        }
+    }
+    state.suspended.lock().remove(id);
+}
+
+/// 冻结项目里出现一条活会话（手动唤醒/新建/替换）之后：解除冻结，并把其余
+/// **尚未运行**的终端格记进本次运行的 `suspended`。这样用户只点醒 A 格，
+/// 切走再回来时 B/C/D 不会被连带拉起来。
+fn unfreeze_with_suspended(state: &AppState, project: &str, except: &str, was_frozen: bool) {
+    if !was_frozen {
+        return;
+    }
+    let ids = {
+        let mut workspace = state.workspace.lock();
+        let _ = workspace.set_project_frozen(project, false);
+        let live = state.sessions.lock();
+        suspendable_terminal_leaves(&workspace, project, except, |id| live.contains_key(id))
+    };
+    state.suspended.lock().extend(ids);
+}
+
+/// 纯规则：项目布局里哪些终端格本次运行应该保持冷态。
+///
+/// 三个条件缺一不可：属于该项目的布局、是终端通道、当前没有运行时；
+/// 刚唤醒的那一格（`except`）本身当然要跑，不能把自己挂起。
+/// 抽成纯函数是为了让「串口不挂起、已运行的不重挂」能被单测直接覆盖。
+fn suspendable_terminal_leaves(
+    workspace: &Workspace,
+    project: &str,
+    except: &str,
+    is_live: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let Some(layout) = workspace
+        .project(project)
+        .and_then(|item| item.layout.as_ref())
+    else {
+        return Vec::new();
+    };
+    layout
+        .leaves()
+        .iter()
+        .filter_map(|id| {
+            if *id == except || is_live(id) {
+                return None;
+            }
+            let terminal = workspace
+                .session(id)
+                .map(|meta| meta.transport == TransportKind::Terminal)
+                .unwrap_or(false);
+            terminal.then(|| (*id).to_string())
+        })
+        .collect()
+}
+
 /// 当前判定。唯一的规则来源是 `core_domain::ownership::decide`。
 fn ownership_of(id: &str, kind: TransportKind, input: &InputState) -> OwnershipPayload {
     let state = input.tracker.view();
@@ -748,6 +882,108 @@ impl Drop for TickGuard {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Placement {
+    Fill,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Replace,
+}
+
+fn parse_placement(value: Option<&str>) -> Result<Option<Placement>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match raw {
+        "fill" => Ok(Some(Placement::Fill)),
+        "left" => Ok(Some(Placement::Left)),
+        "right" => Ok(Some(Placement::Right)),
+        "top" => Ok(Some(Placement::Top)),
+        "bottom" | "down" => Ok(Some(Placement::Bottom)),
+        "replace" => Ok(Some(Placement::Replace)),
+        other => Err(format!("unknown placement {other}")),
+    }
+}
+
+fn placement_side(placement: Placement) -> Side {
+    match placement {
+        Placement::Left => Side::Left,
+        Placement::Right => Side::Right,
+        Placement::Top => Side::Top,
+        Placement::Bottom => Side::Bottom,
+        _ => Side::Right,
+    }
+}
+
+/// 拖拽命中的边缘方向。与 placement 的字符串一致，前端直接把 `hitZone` 的 side 传上来。
+fn parse_side(value: &str) -> Result<Side, String> {
+    match value {
+        "left" => Ok(Side::Left),
+        "right" => Ok(Side::Right),
+        "top" => Ok(Side::Top),
+        "bottom" => Ok(Side::Bottom),
+        other => Err(format!("unknown side {other}")),
+    }
+}
+
+/// 开进程之前先把落点算清楚：项目存在、target 在布局里、深度够。
+/// 串口开端口会翻 DTR/RTS 复位板子，失败回滚不可接受，所以预检必须在 spawn 之前。
+fn precheck_project_placement(
+    workspace: &Workspace,
+    project: &str,
+    session_id: Option<&str>,
+    target: Option<&str>,
+    placement: Placement,
+) -> Result<Option<String>, String> {
+    let Some(project_ref) = workspace.project(project) else {
+        return Err(format!("no project {project}"));
+    };
+    // 冷会话重新拉起：它已经在布局里，不需要落点，也不该被当成新建
+    if let Some(id) = session_id {
+        if let Some(meta) = workspace.session(id) {
+            if meta.owner != project {
+                return Err(format!("session {id} does not belong to project {project}"));
+            }
+            return Ok(project_ref.root.clone());
+        }
+    }
+    match placement {
+        Placement::Fill => {
+            if project_ref.layout.is_some() {
+                return Err("project already has panes; a target is required".into());
+            }
+        }
+        Placement::Replace => {
+            let Some(target) = target else {
+                return Err("replace requires a target".into());
+            };
+            let Some(layout) = project_ref.layout.as_ref() else {
+                return Err("project is empty".into());
+            };
+            if !layout.contains(target) {
+                return Err(format!("target {target} is not in the project layout"));
+            }
+        }
+        Placement::Left | Placement::Right | Placement::Top | Placement::Bottom => {
+            let Some(target) = target else {
+                return Err("splitting requires a target".into());
+            };
+            let Some(layout) = project_ref.layout.as_ref() else {
+                return Err("project is empty".into());
+            };
+            let Some(depth) = layout.depth_of(target) else {
+                return Err(format!("target {target} is not in the project layout"));
+            };
+            if depth + 1 > core_domain::workspace::MAX_SPLIT_DEPTH {
+                return Err("split would exceed the maximum depth".into());
+            }
+        }
+    }
+    Ok(project_ref.root.clone())
+}
+
 #[tauri::command]
 fn spawn_session(
     app: AppHandle,
@@ -757,7 +993,28 @@ fn spawn_session(
     shell: Option<String>,
     cwd: Option<String>,
     session_id: Option<String>,
+    project: String,
+    target: Option<String>,
+    placement: Option<String>,
+    ratio: Option<f32>,
+    title: Option<String>,
 ) -> Result<String, String> {
+    let project = project.trim();
+    if project.is_empty() {
+        return Err("project is required".into());
+    }
+    let placement = parse_placement(placement.as_deref())?;
+    // 预检先于任何副作用：项目不存在、target 不在布局、深度超限都在开 shell 之前拒绝
+    let project_root = {
+        let workspace = state.workspace.lock();
+        precheck_project_placement(
+            &workspace,
+            project,
+            session_id.as_deref(),
+            target.as_deref(),
+            placement.unwrap_or(Placement::Fill),
+        )?
+    };
     // 同一个 id 只能是冷会话被重新拉起；已在运行的不能重复拉起，否则旧进程会失联
     if let Some(id) = session_id.as_deref() {
         if state.sessions.lock().contains_key(id) {
@@ -777,9 +1034,12 @@ fn spawn_session(
 
     let shell = resolve_shell(shell);
     let cwd = cwd.filter(|d| !d.trim().is_empty());
+    // 项目会话的启动目录：请求里没给就用项目根目录兜底；
+    // 会话自己通过 OSC 7 上报过 CWD 之后，下次重开会带上那个目录，以它为准。
+    let effective_cwd = cwd.clone().or(project_root).filter(|d| !d.trim().is_empty());
     let mut cmd = CommandBuilder::new(&shell);
     cmd.env("TERM", "xterm-256color");
-    if let Some(dir) = &cwd {
+    if let Some(dir) = &effective_cwd {
         cmd.cwd(dir.as_str());
     }
 
@@ -822,7 +1082,7 @@ fn spawn_session(
         .map_err(|e| format!("take writer: {e}"))?;
 
     let id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let title = Path::new(&shell)
+    let default_title = Path::new(&shell)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(shell.as_str())
@@ -850,35 +1110,97 @@ fn spawn_session(
     *session.runtime_log.lock() = Some(runtime_log);
     *session.settings.lock() = saved;
 
+    // 工作区只在这里改一次：归属、布局、落点要么一起成功，要么一起不发生。
+    // 失败时新进程直接 close（终端 = 杀进程），state.sessions 里还没有它，不会留孤儿。
+    let was_frozen: bool;
+    let mut replaced_old: Option<String> = None;
+    {
+        let mut workspace = state.workspace.lock();
+        let existing = workspace.session(&id).is_some();
+        was_frozen = workspace
+            .project(project)
+            .map(|project| project.frozen)
+            .unwrap_or(false);
+        let result: Result<(), core_domain::workspace::WorkspaceError> = if existing {
+            // 冷会话重开：节点、归属、布局都不动，只把运行时信息补回来
+            match workspace.session_mut(&id) {
+                Some(meta) => {
+                    meta.transport = TransportKind::Terminal;
+                    if effective_cwd.is_some() {
+                        meta.cwd = effective_cwd.clone();
+                    }
+                    meta.shell = Some(shell.clone());
+                    meta.serial = None;
+                    meta.hot = true;
+                    Ok(())
+                }
+                None => Err(core_domain::workspace::WorkspaceError::UnknownSession(id.clone())),
+            }
+        } else {
+            let mut meta =
+                SessionMeta::terminal(id.clone(), default_title.clone(), shell.clone(), project);
+            meta.cwd = effective_cwd.clone();
+            meta.hot = true;
+            let placement = placement.unwrap_or(Placement::Fill);
+            let ratio = ratio.unwrap_or(0.5);
+            let outcome = match placement {
+                Placement::Replace => {
+                    let old = target.clone().unwrap_or_default();
+                    let outcome = workspace.replace_pane(project, &old, meta);
+                    if outcome.is_ok() {
+                        replaced_old = Some(old);
+                    }
+                    outcome
+                }
+                Placement::Fill => workspace.place_new_session_in_project(
+                    project,
+                    meta,
+                    None,
+                    Side::Right,
+                    ratio,
+                ),
+                Placement::Left
+                | Placement::Right
+                | Placement::Top
+                | Placement::Bottom => workspace.place_new_session_in_project(
+                    project,
+                    meta,
+                    target.as_deref(),
+                    placement_side(placement),
+                    ratio,
+                ),
+            };
+            // 弹窗里填的名字优先；规则（trim / 截断 / 拒绝空白）只在 core-domain
+            if outcome.is_ok() {
+                if let Some(name) = title.as_deref().map(str::trim).filter(|name| !name.is_empty())
+                {
+                    let _ = workspace.rename_session(&id, name);
+                }
+            }
+            outcome
+        };
+        if let Err(err) = result {
+            drop(workspace);
+            let _ = session.transport.close();
+            return Err(format!("{err:?}"));
+        }
+    }
+    // 替换成功后旧会话才销毁：任何一步失败都整件事不发生。
+    // cleanup 对「旧进程已自然退出」也成立，不会重复写快照（这里不写快照）。
+    if let Some(old) = replaced_old {
+        cleanup_session(&state, &old);
+    }
+
+    // 冻结项目里出现了活会话：解除冻结，其余没运行的终端格本次保持冷态
+    unfreeze_with_suspended(&state, project, &id, was_frozen);
+
     // 冷会话重开：把上次的屏幕接在新输出前面。必须在读线程启动前做，
     // 否则新输出会先占序号、快照反而画在后面。
     seed_scrollback(&state, &session, &id);
 
     state.sessions.lock().insert(id.clone(), session.clone());
-
-    // 会话树：同一个 id 可能是冷会话被重新拉起，更新而不是新增
-    {
-        let mut workspace = state.workspace.lock();
-        match workspace.session_mut(&id) {
-            Some(meta) => {
-                // 名字不覆盖：用户改过的标题比 Shell 文件名重要
-                meta.transport = TransportKind::Terminal;
-                // 目录没指定（冷会话在默认目录重开）就保留原来记住的那个
-                if cwd.is_some() {
-                    meta.cwd = cwd.clone();
-                }
-                meta.shell = Some(shell.clone());
-                meta.serial = None;
-                meta.hot = true;
-            }
-            None => {
-                let mut meta = SessionMeta::terminal(id.clone(), title.clone(), shell.clone());
-                meta.cwd = cwd.clone();
-                meta.hot = true;
-                let _ = workspace.add_session(meta);
-            }
-        }
-    }
+    // 显式拉起就是「用户想让它跑」：从本次运行的关格名单里移除
+    state.suspended.lock().remove(&id);
     persist_workspace(&state);
 
     start_pumps(&app, &session, &id);
@@ -1302,6 +1624,62 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// spawn / 串口连接的可序列化错误。占用冲突要带上占用方，文案由前端拼；
+/// Rust 只给数据，不写中文句子。
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SpawnError {
+    PortBusy {
+        port: String,
+        project: String,
+        session: String,
+    },
+    Message {
+        message: String,
+    },
+}
+
+impl SpawnError {
+    fn message(text: impl Into<String>) -> Self {
+        SpawnError::Message {
+            message: text.into(),
+        }
+    }
+}
+
+impl From<String> for SpawnError {
+    fn from(message: String) -> Self {
+        SpawnError::Message { message }
+    }
+}
+
+/// 端口占用方的完整信息：会话标题 + 它所属项目的名字（会话一定属于某个项目）。
+fn port_conflict_info(state: &AppState, port: &str, except: &str) -> Option<(String, String, String)> {
+    let other = port_conflict(state, port, except)?;
+    let workspace = state.workspace.lock();
+    let (title, project) = match workspace.session(&other) {
+        Some(meta) => (
+            meta.title.clone(),
+            workspace
+                .project(&meta.owner)
+                .map(|project| project.name.clone())
+                .unwrap_or_default(),
+        ),
+        None => (short_id(&other), String::new()),
+    };
+    Some((other, project, title))
+}
+
+/// 串口占用冲突 → 结构化错误。`except` 是「正在连接的那个会话自己」。
+fn busy_error(state: &AppState, port: &str, except: &str) -> Option<SpawnError> {
+    let (_, project, session) = port_conflict_info(state, port, except)?;
+    Some(SpawnError::PortBusy {
+        port: port.trim().to_string(),
+        project,
+        session,
+    })
+}
+
 /// 打开一个串口会话。`session_id` 存在时表示冷会话重新拉起：端口配置以工作区为准，
 /// 传进来的 `config` 只在新建会话时使用（前端仍会带上，方便两边显示一致）。
 #[tauri::command]
@@ -1310,14 +1688,24 @@ fn spawn_serial_session(
     state: State<'_, AppState>,
     config: SerialConfigPayload,
     session_id: Option<String>,
-) -> Result<String, String> {
+    project: String,
+    target: Option<String>,
+    placement: Option<String>,
+    ratio: Option<f32>,
+    title: Option<String>,
+) -> Result<String, SpawnError> {
+    let project = project.trim();
+    if project.is_empty() {
+        return Err(SpawnError::message("project is required"));
+    }
+    let placement = parse_placement(placement.as_deref()).map_err(SpawnError::message)?;
     if let Some(id) = session_id.as_deref() {
         if state.sessions.lock().contains_key(id) {
-            return Err(format!("session {id} is already live"));
+            return Err(SpawnError::message(format!("session {id} is already live")));
         }
     }
 
-    let id = session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let id = session_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     // 冷会话重新拉起按工作区里记住的配置（端口可能被用户改过），新建才用请求里的
     let saved = state
         .workspace
@@ -1326,14 +1714,24 @@ fn spawn_serial_session(
         .and_then(|meta| meta.serial.clone());
     let config = match saved {
         Some(saved) => saved,
-        None => config.into_config()?,
+        None => config.into_config().map_err(SpawnError::from)?,
     };
-    if let Some(other) = port_conflict(&state, &config.port, &id) {
-        return Err(format!(
-            "{} 已被另一个会话占用（{}）：同一串口不允许两个热会话",
-            config.port.trim(),
-            short_id(&other)
-        ));
+    // 占用检测扫全量活跃串口运行时（可能是另一个项目的会话），
+    // 必须在开端口之前：开一次端口就会翻 DTR/RTS 把板子复位。
+    if let Some(busy) = busy_error(&state, &config.port, "") {
+        return Err(busy);
+    }
+    // 落点预检也在开端口之前
+    {
+        let workspace = state.workspace.lock();
+        precheck_project_placement(
+            &workspace,
+            project,
+            session_id.as_deref(),
+            target.as_deref(),
+            placement.unwrap_or(Placement::Fill),
+        )
+        .map_err(SpawnError::message)?;
     }
 
     let transport: Arc<dyn Transport> = if transport::fake_serial_enabled()
@@ -1343,13 +1741,12 @@ fn spawn_serial_session(
         let (transport, _peer) = transport::fake::MemoryTransport::loopback(config.clone());
         Arc::new(transport)
     } else {
-        Arc::new(SerialTransport::open(
-            config.clone(),
-            &id,
-            state.data_dir.as_deref(),
-        )?)
+        Arc::new(
+            SerialTransport::open(config.clone(), &id, state.data_dir.as_deref())
+                .map_err(SpawnError::from)?,
+        )
     };
-    let title = config.default_title();
+    let default_title = config.default_title();
     let session = new_session(transport);
     let saved = state
         .workspace
@@ -1359,28 +1756,90 @@ fn spawn_serial_session(
         .unwrap_or_default();
     // 端口靠 SerialTransport 的 Drop 关闭：这一行失败提前返回时，局部 Arc
     // 一起 drop，端口句柄随之释放（与终端路径的 ChildGuard 互补）。
-    *session.runtime_log.lock() = Some(session_log::RuntimeLog::new(saved.clone())?);
+    *session.runtime_log.lock() = Some(
+        session_log::RuntimeLog::new(saved.clone()).map_err(SpawnError::from)?,
+    );
     *session.settings.lock() = saved;
-    seed_scrollback(&state, &session, &id);
-    state.sessions.lock().insert(id.clone(), session.clone());
 
+    // 工作区只改一次；失败时关掉刚开的端口，进程/端口不会留在工作区外面
+    let was_frozen: bool;
+    let mut replaced_old: Option<String> = None;
     {
         let mut workspace = state.workspace.lock();
-        match workspace.session_mut(&id) {
-            Some(meta) => {
-                meta.transport = TransportKind::Serial;
-                meta.shell = None;
-                meta.serial = Some(config.clone());
-                meta.cwd = None;
-                meta.hot = true;
+        let existing = workspace.session(&id).is_some();
+        was_frozen = workspace
+            .project(project)
+            .map(|project| project.frozen)
+            .unwrap_or(false);
+        let result: Result<(), core_domain::workspace::WorkspaceError> = if existing {
+            match workspace.session_mut(&id) {
+                Some(meta) => {
+                    meta.transport = TransportKind::Serial;
+                    meta.shell = None;
+                    meta.serial = Some(config.clone());
+                    meta.cwd = None;
+                    meta.hot = true;
+                    Ok(())
+                }
+                None => Err(core_domain::workspace::WorkspaceError::UnknownSession(id.clone())),
             }
-            None => {
-                let mut meta = SessionMeta::serial(id.clone(), title, config.clone());
-                meta.hot = true;
-                let _ = workspace.add_session(meta);
+        } else {
+            let mut meta =
+                SessionMeta::serial(id.clone(), default_title.clone(), config.clone(), project);
+            meta.hot = true;
+            let placement = placement.unwrap_or(Placement::Fill);
+            let ratio = ratio.unwrap_or(0.5);
+            let outcome = match placement {
+                Placement::Replace => {
+                    let old = target.clone().unwrap_or_default();
+                    let outcome = workspace.replace_pane(project, &old, meta);
+                    if outcome.is_ok() {
+                        replaced_old = Some(old);
+                    }
+                    outcome
+                }
+                Placement::Fill => workspace.place_new_session_in_project(
+                    project,
+                    meta,
+                    None,
+                    Side::Right,
+                    ratio,
+                ),
+                Placement::Left
+                | Placement::Right
+                | Placement::Top
+                | Placement::Bottom => workspace.place_new_session_in_project(
+                    project,
+                    meta,
+                    target.as_deref(),
+                    placement_side(placement),
+                    ratio,
+                ),
+            };
+            if outcome.is_ok() {
+                if let Some(name) = title.as_deref().map(str::trim).filter(|name| !name.is_empty())
+                {
+                    let _ = workspace.rename_session(&id, name);
+                }
             }
+            outcome
+        };
+        if let Err(err) = result {
+            drop(workspace);
+            let _ = session.transport.close();
+            return Err(SpawnError::message(format!("{err:?}")));
         }
     }
+    if let Some(old) = replaced_old {
+        cleanup_session(&state, &old);
+    }
+
+    // 冻结项目里出现了活串口格：同样解除冻结并让其余终端格本次保持冷态
+    unfreeze_with_suspended(&state, project, &id, was_frozen);
+
+    seed_scrollback(&state, &session, &id);
+    state.sessions.lock().insert(id.clone(), session.clone());
+    state.suspended.lock().remove(&id);
     persist_workspace(&state);
 
     start_pumps(&app, &session, &id);
@@ -1531,17 +1990,30 @@ fn serial_disconnect(app: AppHandle, state: State<'_, AppState>, id: String) -> 
 }
 
 #[tauri::command]
-fn serial_connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+fn serial_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), SpawnError> {
     let session = state
         .sessions
         .lock()
         .get(&id)
         .cloned()
-        .ok_or_else(|| format!("no session {id}"))?;
+        .ok_or_else(|| SpawnError::message(format!("no session {id}")))?;
     if session.transport.kind() != TransportKind::Serial {
-        return Err("不是串口会话".into());
+        return Err(SpawnError::message("不是串口会话"));
     }
-    connect_serial(&app, &state, &id, &session)
+    // 冷串口格点「连接」、断开的会话点「连接」都走这里：先做全量占用检测，
+    // 冲突时返回和 spawn 一样的结构化错误，前端文案统一。
+    let config = session
+        .transport
+        .serial_config()
+        .ok_or_else(|| SpawnError::message("串口配置缺失"))?;
+    if let Some(busy) = busy_error(&state, &config.port, &id) {
+        return Err(busy);
+    }
+    connect_serial(&app, &state, &id, &session).map_err(SpawnError::message)
 }
 
 /// 把会话当前的可见内容落成卷轴快照。只在数据目录可用、且回放缓冲里确实有内容时才写。
@@ -1816,23 +2288,257 @@ struct RuntimeStatePayload {
     serial: Option<SerialStatusPayload>,
 }
 
-/// 完整会话树（含冷会话），顺序即创建顺序。侧栏用它渲染。
+/// 工作区快照：会话（含冷会话与归属）与项目一次返回。
+/// 拆成两条 IPC 会在两次返回之间出现「layout 引用了还没到的会话 id」，
+/// 所以前端始终整份替换，不逐条补。
 #[tauri::command]
-fn session_tree(state: State<'_, AppState>) -> Vec<TreeSession> {
+fn workspace_snapshot(state: State<'_, AppState>) -> WorkspaceSnapshotPayload {
     let workspace = state.workspace.lock();
-    workspace
-        .sessions
+    WorkspaceSnapshotPayload {
+        sessions: workspace
+            .sessions
+            .iter()
+            .map(|session| TreeSession {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                transport: session.transport.as_str(),
+                shell: session.shell.clone(),
+                cwd: session.cwd.clone(),
+                serial: session.serial.as_ref().map(SerialConfigPayload::from),
+                settings: SessionSettingsPayload::from(&session.settings),
+                owner: session.owner.clone(),
+            })
+            .collect(),
+        projects: workspace
+            .projects
+            .iter()
+            .map(|project| ProjectPayload {
+                id: project.id.clone(),
+                name: project.name.clone(),
+                root: project.root.clone(),
+                frozen: project.frozen,
+                layout: project.layout.as_ref().map(layout_payload),
+            })
+            .collect(),
+        suspended: state.suspended.lock().iter().cloned().collect(),
+    }
+}
+
+/// 新建项目。id 与会话 id 同源，都由 Rust 生成，前端不造。
+#[tauri::command]
+fn project_create(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    let id = Uuid::new_v4().to_string();
+    state
+        .workspace
+        .lock()
+        .new_project(id.clone(), &name)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(id)
+}
+
+#[tauri::command]
+fn project_rename(state: State<'_, AppState>, id: String, name: String) -> Result<(), String> {
+    state
+        .workspace
+        .lock()
+        .rename_project(&id, &name)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(())
+}
+
+#[tauri::command]
+fn project_set_root(
+    state: State<'_, AppState>,
+    id: String,
+    root: Option<String>,
+) -> Result<(), String> {
+    let root = root.filter(|value| !value.trim().is_empty());
+    state
+        .workspace
+        .lock()
+        .set_project_root(&id, root.as_deref())
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(())
+}
+
+/// 删除项目：返回被清理的会话 id，前端据此销毁视图与本地状态。
+/// 运行时不存在也算成功——项目里的会话可能早就是冷的。
+#[tauri::command]
+fn project_delete(state: State<'_, AppState>, id: String) -> Result<Vec<String>, String> {
+    let removed = state
+        .workspace
+        .lock()
+        .delete_project(&id)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    for session in &removed {
+        cleanup_session(&state, session);
+    }
+    Ok(removed)
+}
+
+/// 分隔条松手后落盘比例。path 是从根开始的 0/1 序列，只描述位置，不携带会话 id。
+#[tauri::command]
+fn project_set_split_ratio(
+    state: State<'_, AppState>,
+    id: String,
+    path: Vec<bool>,
+    ratio: f32,
+) -> Result<(), String> {
+    state
+        .workspace
+        .lock()
+        .set_split_ratio(&id, &path, ratio)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(())
+}
+
+/// 拖到某格边缘：把源格搬到目标格的指定一侧。`false` 表示与现状等价、没改树。
+/// 深度检查在 core-domain 里按「先摘源、再插入」做，前端只负责给方向和比例。
+#[tauri::command]
+fn project_move_pane(
+    state: State<'_, AppState>,
+    id: String,
+    session: String,
+    target: String,
+    side: String,
+    ratio: f32,
+) -> Result<bool, String> {
+    let side = parse_side(&side)?;
+    let changed = state
+        .workspace
+        .lock()
+        .move_pane_in_project(&id, &session, &target, side, ratio)
+        .map_err(|err| format!("{err:?}"))?;
+    if changed {
+        persist_workspace(&state);
+    }
+    Ok(changed)
+}
+
+/// 拖到某格中心：交换两个会话的位置，不经过「移除再插入」的销毁路径。
+#[tauri::command]
+fn project_swap_panes(
+    state: State<'_, AppState>,
+    id: String,
+    a: String,
+    b: String,
+) -> Result<(), String> {
+    state
+        .workspace
+        .lock()
+        .swap_in_project(&id, &a, &b)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(())
+}
+
+/// 项目里的终端格 id：串口默认冷，不该被「全部启动 / 冻结」当作要拉起的对象。
+fn terminal_leaves(workspace: &Workspace, project: &str) -> Vec<String> {
+    let Some(layout) = workspace
+        .project(project)
+        .and_then(|item| item.layout.as_ref())
+    else {
+        return Vec::new();
+    };
+    layout
+        .leaves()
         .iter()
-        .map(|session| TreeSession {
-            id: session.id.clone(),
-            title: session.title.clone(),
-            transport: session.transport.as_str(),
-            shell: session.shell.clone(),
-            cwd: session.cwd.clone(),
-            serial: session.serial.as_ref().map(SerialConfigPayload::from),
-            settings: SessionSettingsPayload::from(&session.settings),
+        .filter(|id| {
+            workspace
+                .session(id)
+                .map(|meta| meta.transport == TransportKind::Terminal)
+                .unwrap_or(false)
         })
+        .map(|id| (*id).to_string())
         .collect()
+}
+
+/// 冻结项目：逐格照抄 `pty_freeze` 的顺序——先作废旧读线程收尾、再落快照、
+/// 再关进程/端口并 join 读线程——全部结束后才把 `frozen` 置 true。
+/// 布局、会话节点、历史与快照都保留，下次打开按原样恢复。
+#[tauri::command]
+fn project_freeze(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let leaves = {
+        let workspace = state.workspace.lock();
+        if workspace.project(&id).is_none() {
+            return Err(format!("no project {id}"));
+        }
+        workspace
+            .project(&id)
+            .and_then(|project| project.layout.as_ref())
+            .map(|layout| layout.leaves().iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    // 空壳项目没有可冻结的运行时：保持 frozen = false，别写一个「冻结的空壳」。
+    if leaves.is_empty() {
+        return Ok(());
+    }
+    for leaf in &leaves {
+        if let Some(session) = state.sessions.lock().remove(leaf) {
+            // 冻结不该被当成「进程自然退出」再清理一遍：先让旧读线程的收尾作废
+            session.reader_gen.fetch_add(1, Ordering::SeqCst);
+            save_session_scrollback(&state, &session, leaf);
+            let _ = session.transport.close();
+            if session.transport.kind() == TransportKind::Serial {
+                join_reader(&session);
+            }
+            session.outbox.running.store(false, Ordering::Relaxed);
+        }
+    }
+    // 冷格也一起标冷：布局里所有格子都属于这次冻结，不留下 hot 的残留
+    {
+        let mut workspace = state.workspace.lock();
+        for leaf in &leaves {
+            let _ = workspace.set_hot(leaf, false);
+        }
+    }
+    state
+        .workspace
+        .lock()
+        .set_project_frozen(&id, true)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(())
+}
+
+/// 「全部启动」：只拉起终端格，串口一律保持冷。
+/// 先清本次运行的 suspended 再解冻，最后返回要拉起的终端 id；
+/// 前端逐个 spawn 即可（此时 frozen 已是 false，spawn 不会再把其余格挂起）。
+#[tauri::command]
+fn project_start_all(state: State<'_, AppState>, id: String) -> Result<Vec<String>, String> {
+    let (leaves, terminals) = {
+        let workspace = state.workspace.lock();
+        if workspace.project(&id).is_none() {
+            return Err(format!("no project {id}"));
+        }
+        let leaves = workspace
+            .project(&id)
+            .and_then(|project| project.layout.as_ref())
+            .map(|layout| layout.leaves().iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        (leaves, terminal_leaves(&workspace, &id))
+    };
+    // 已经热着的格不要再 spawn：重复拉起会把活进程杀掉重起，屏幕也会被重置
+    let terminals: Vec<String> = terminals
+        .into_iter()
+        .filter(|session| !state.sessions.lock().contains_key(session))
+        .collect();
+    state
+        .suspended
+        .lock()
+        .retain(|session| !leaves.contains(session));
+    state
+        .workspace
+        .lock()
+        .set_project_frozen(&id, false)
+        .map_err(|err| format!("{err:?}"))?;
+    persist_workspace(&state);
+    Ok(terminals)
 }
 
 #[derive(Serialize)]
@@ -2228,6 +2934,9 @@ fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> R
 
 #[tauri::command]
 fn pty_freeze(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // 关格 = 保留节点与历史，但本次运行里不再自动拉起它。
+    // 会话一定属于某个项目（ADR 0008），所以一律进 suspended 名单。
+    state.suspended.lock().insert(id.clone());
     // 已经是冷会话：没有运行时可结束，保持原样
     let Some(session) = state.sessions.lock().remove(&id) else {
         return Ok(());
@@ -2255,9 +2964,16 @@ fn pty_freeze(state: State<'_, AppState>, id: String) -> Result<(), String> {
 fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
     // 关闭会话 = 节点删除（I2）。先摘节点再结束通道：读线程醒来时看到节点已不在，
     // 就不会把刚删掉的卷轴快照又写回来。
-    {
+    //
+    // 会话一定属于某个项目（ADR 0008），走 `remove_pane`：摘叶 + 删元数据，项目节点留着。
+    // 之后销毁历史与快照；找不到运行时不算失败。
+    let owner = {
+        let workspace = state.workspace.lock();
+        workspace.session(&id).map(|meta| meta.owner.clone())
+    };
+    if let Some(project) = owner.as_deref() {
         let mut workspace = state.workspace.lock();
-        let _ = workspace.close_session(&id);
+        let _ = workspace.remove_pane(project, &id);
     }
     persist_workspace(&state);
 
@@ -2279,6 +2995,8 @@ fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
             eprintln!("[data] remove scrollback {id}: {err}");
         }
     }
+    // 节点都删了，suspended 里的记录也不能留：否则这个 id 将来被复用时会被误跳过
+    state.suspended.lock().remove(&id);
     Ok(())
 }
 
@@ -2306,13 +3024,15 @@ fn main() {
         Err(err) => eprintln!("[data] {err}"),
     }
     let mut workspace_writable = true;
+    let mut loaded_ok = false;
     let workspace = match data_dir.as_deref() {
         Ok(dir) => {
             match persistence::load_workspace(dir) {
                 persistence::WorkspaceLoad::Loaded(ws) => {
+                    loaded_ok = true;
                     println!(
-                        "[data] workspace: {} window(s), {} session(s)",
-                        ws.windows.len(),
+                        "[data] workspace: {} project(s), {} session(s)",
+                        ws.projects.len(),
                         ws.sessions.len()
                     );
                     ws
@@ -2343,6 +3063,19 @@ fn main() {
             Workspace::new()
         }
     };
+
+    // 升级时被丢弃的无主会话会留下无人引用的卷轴快照；只在主文件正常读入时清理，
+    // 读不出来的情况（Recovered / Unreadable）一律不动磁盘。
+    if loaded_ok {
+        if let Ok(dir) = &data_dir {
+            let keep: HashSet<String> = workspace.sessions.iter().map(|s| s.id.clone()).collect();
+            match persistence::prune_scrollback(dir, &keep) {
+                Ok(0) => {}
+                Ok(removed) => println!("[data] removed {removed} orphan scrollback(s)"),
+                Err(err) => eprintln!("[data] prune scrollback: {err}"),
+            }
+        }
+    }
 
     let updater_pubkey = std::env::var("PINSHELL_UPDATER_PUBKEY")
         .ok()
@@ -2431,7 +3164,16 @@ fn main() {
             pty_replay,
             pty_list,
             session_runtime_states,
-            session_tree,
+            workspace_snapshot,
+            project_create,
+            project_rename,
+            project_set_root,
+            project_delete,
+            project_set_split_ratio,
+            project_move_pane,
+            project_swap_panes,
+            project_freeze,
+            project_start_all,
             fs_list,
             fs_open,
             fs_reveal,
@@ -2512,5 +3254,206 @@ mod tests {
     fn encoded_command_is_utf16le_base64() {
         assert_eq!(powershell_encoded("A"), "QQA=");
         assert_eq!(powershell_encoded("AB"), "QQBCAA==");
+    }
+
+    // ---------- 项目落点与冻结解除 ----------
+
+    use super::{precheck_project_placement, suspendable_terminal_leaves, terminal_leaves, Placement, SpawnError};
+    use core_domain::serial::SerialConfig;
+    use core_domain::workspace::{SessionMeta, Side, Workspace};
+
+    fn owned_terminal(id: &str, project: &str) -> SessionMeta {
+        SessionMeta::terminal(id, id, "pwsh.exe", project)
+    }
+
+    fn project_workspace() -> (Workspace, String) {
+        let mut workspace = Workspace::new();
+        workspace.new_project("p1", "P").unwrap();
+        (workspace, "p1".to_string())
+    }
+
+    #[test]
+    fn placement_precheck_agrees_with_the_depth_limit() {
+        let (mut workspace, project) = project_workspace();
+        workspace
+            .place_new_session_in_project(
+                &project,
+                owned_terminal("a", &project),
+                None,
+                Side::Right,
+                0.5,
+            )
+            .unwrap();
+        for (target, id) in [("a", "b"), ("b", "c"), ("c", "d")] {
+            workspace
+                .place_new_session_in_project(
+                    &project,
+                    owned_terminal(id, &project),
+                    Some(target),
+                    Side::Right,
+                    0.5,
+                )
+                .unwrap();
+        }
+        // d 已在第 3 层：预检必须在 spawn 之前拒绝
+        assert!(
+            precheck_project_placement(&workspace, &project, None, Some("d"), Placement::Right)
+                .is_err()
+        );
+        // b 在第 2 层：切完正好 3 层，必须放行
+        assert!(
+            precheck_project_placement(&workspace, &project, None, Some("b"), Placement::Right)
+                .is_ok()
+        );
+        // 已有布局时 fill 不允许；空壳才允许
+        assert!(
+            precheck_project_placement(&workspace, &project, None, None, Placement::Fill).is_err()
+        );
+        let (empty, empty_project) = project_workspace();
+        assert!(
+            precheck_project_placement(&empty, &empty_project, None, None, Placement::Fill)
+                .is_ok()
+        );
+        // target 不在布局里
+        assert!(precheck_project_placement(
+            &workspace,
+            &project,
+            None,
+            Some("ghost"),
+            Placement::Right
+        )
+        .is_err());
+        // 冷会话重开：id 存在但属于别的项目时要拒绝
+        let mut other = empty;
+        other.new_project("p2", "P2").unwrap();
+        other
+            .place_new_session_in_project(
+                "p2",
+                owned_terminal("x", "p2"),
+                None,
+                Side::Right,
+                0.5,
+            )
+            .unwrap();
+        assert!(precheck_project_placement(
+            &other,
+            &empty_project,
+            Some("x"),
+            None,
+            Placement::Fill
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn only_cold_terminal_leaves_are_suspended() {
+        let (mut workspace, project) = project_workspace();
+        workspace
+            .place_new_session_in_project(
+                &project,
+                owned_terminal("a", &project),
+                None,
+                Side::Right,
+                0.5,
+            )
+            .unwrap();
+        for (target, id) in [("a", "b"), ("b", "c"), ("c", "d")] {
+            workspace
+                .place_new_session_in_project(
+                    &project,
+                    owned_terminal(id, &project),
+                    Some(target),
+                    Side::Right,
+                    0.5,
+                )
+                .unwrap();
+        }
+        // b 改成冷串口格：串口不会被自动拉起，也不该进 suspended
+        workspace.session_mut("b").unwrap().transport =
+            core_domain::ownership::TransportKind::Serial;
+        workspace.session_mut("b").unwrap().serial = Some(SerialConfig::new("COM3"));
+        workspace.session_mut("b").unwrap().shell = None;
+
+        // a 正在运行、d 是刚唤醒的那一格、b 是串口：只剩 c 该本次保持冷态
+        let ids = suspendable_terminal_leaves(&workspace, &project, "d", |id| id == "a");
+        assert_eq!(ids, vec!["c".to_string()]);
+
+        // 项目不存在时返回空列，不 panic
+        assert!(suspendable_terminal_leaves(&workspace, "ghost", "d", |_| false).is_empty());
+    }
+
+    #[test]
+    fn start_all_returns_only_terminal_leaves() {
+        let (mut workspace, project) = project_workspace();
+        workspace
+            .place_new_session_in_project(
+                &project,
+                owned_terminal("a", &project),
+                None,
+                Side::Right,
+                0.5,
+            )
+            .unwrap();
+        let serial = SessionMeta::serial("b", "b", SerialConfig::new("COM3"), &project);
+        workspace
+            .place_new_session_in_project(&project, serial, Some("a"), Side::Right, 0.5)
+            .unwrap();
+        workspace
+            .place_new_session_in_project(
+                &project,
+                owned_terminal("c", &project),
+                Some("b"),
+                Side::Right,
+                0.5,
+            )
+            .unwrap();
+
+        // 串口默认冷，不在「全部启动」的返回列表里
+        assert_eq!(terminal_leaves(&workspace, &project), vec!["a", "c"]);
+        assert!(terminal_leaves(&workspace, "ghost").is_empty());
+    }
+
+    #[test]
+    fn drag_sides_and_placements_round_trip() {
+        use super::{parse_side, placement_side};
+        use core_domain::workspace::Side;
+
+        assert_eq!(parse_side("left").unwrap(), Side::Left);
+        assert_eq!(parse_side("right").unwrap(), Side::Right);
+        assert_eq!(parse_side("top").unwrap(), Side::Top);
+        assert_eq!(parse_side("bottom").unwrap(), Side::Bottom);
+        assert!(parse_side("center").is_err());
+
+        assert_eq!(placement_side(Placement::Left), Side::Left);
+        assert_eq!(placement_side(Placement::Right), Side::Right);
+        assert_eq!(placement_side(Placement::Top), Side::Top);
+        assert_eq!(placement_side(Placement::Bottom), Side::Bottom);
+        // 前端菜单仍用 down 表示「向下切」
+        assert_eq!(
+            super::parse_placement(Some("down")).unwrap(),
+            Some(Placement::Bottom)
+        );
+        assert_eq!(
+            super::parse_placement(Some("top")).unwrap(),
+            Some(Placement::Top)
+        );
+    }
+
+    #[test]
+    fn port_busy_error_serializes_with_the_documented_shape() {
+        let value = serde_json::to_value(SpawnError::PortBusy {
+            port: "COM3".into(),
+            project: "P".into(),
+            session: "板子".into(),
+        })
+        .unwrap();
+        assert_eq!(value["kind"], "port_busy");
+        assert_eq!(value["port"], "COM3");
+        assert_eq!(value["project"], "P");
+        assert_eq!(value["session"], "板子");
+
+        let message = serde_json::to_value(SpawnError::message("boom")).unwrap();
+        assert_eq!(message["kind"], "message");
+        assert_eq!(message["message"], "boom");
     }
 }

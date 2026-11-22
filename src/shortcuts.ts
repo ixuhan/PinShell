@@ -1,4 +1,5 @@
 import { t } from "./i18n";
+import { clampPanelHeight, MAX_PANEL_RATIO, MIN_PANEL_HEIGHT } from "./rightBar";
 
 export type ShortcutMode = "execute" | "fill";
 
@@ -16,17 +17,14 @@ export interface SessionShortcutPrefs {
 }
 
 export const DEFAULT_SHORTCUT_HEIGHT = 220;
-export const MIN_SHORTCUT_HEIGHT = 120;
-/// 快捷指令最多占右栏内容区的七成：与左栏「串口」拖高的上限一致，留给另一栏的空间可以压得很低。
-export const MAX_SHORTCUT_RATIO = 0.7;
+/// 与其它功能面板共用同一套高度边界（见 `rightBar.ts`）。
+export const MIN_SHORTCUT_HEIGHT = MIN_PANEL_HEIGHT;
+export const MAX_SHORTCUT_RATIO = MAX_PANEL_RATIO;
 
-/// 夹取快捷指令区高度。规则与左栏的串口拖高对齐：
-/// 下限 120px，上限为可用高度的 70%；不再额外给文件栏留固定 160px，
-/// 否则快捷指令最多只能到一半，另一栏永远压不下去。
+/// 夹取快捷指令区高度：下限 120px，上限为可用高度的 70%。
+/// 规则已经挪到 `clampPanelHeight`，三个面板共用一份。
 export function clampShortcutHeight(value: number, available: number): number {
-  const max = Math.max(MIN_SHORTCUT_HEIGHT, Math.floor(available * MAX_SHORTCUT_RATIO));
-  const min = Math.min(MIN_SHORTCUT_HEIGHT, max);
-  return Math.max(min, Math.min(Math.round(value), max));
+  return clampPanelHeight(value, available);
 }
 
 export function normalizeShortcut(value: unknown): Shortcut | null {

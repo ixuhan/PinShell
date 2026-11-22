@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { attachBaudPicker, type SerialConfig } from "./serialUi";
+import { attachBaudPicker, type SerialConfig } from "./sessionDialogUi";
 import { enableDialogDrag, resetDialogPosition } from "./modalDrag";
 import { applyStaticI18n, onLocaleChange, t } from "./i18n";
 import { clampFontSize, DEFAULT_FONT_SIZE, MAX_FONT_SIZE, MIN_FONT_SIZE } from "./displaySettings";

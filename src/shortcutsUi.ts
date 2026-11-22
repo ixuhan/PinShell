@@ -5,6 +5,7 @@ import { ROW_ICON } from "./icons";
 import { applyStaticI18n, onLocaleChange, t } from "./i18n";
 import { setupFoldPanel } from "./panelFold";
 import { dragHeight } from "./resize";
+import { panelColumnBudget } from "./rightBarUi";
 import { clampShortcutHeight, DEFAULT_SHORTCUT_HEIGHT, moveShortcut, parseShortcutExport, type SessionShortcutPrefs, type Shortcut, type ShortcutMode } from "./shortcuts";
 import { invertIds, pruneIds, selectAllIds, toggleId } from "./selection";
 
@@ -101,15 +102,13 @@ export function setupShortcutsUi(deps: ShortcutsUiDeps) {
   };
   const saveStore = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ defaults: { collapsed: defaultsCollapsed }, sessions })); } catch { /* Keep working in memory when storage is unavailable. */ } };
   const saveCurrent = () => { if (!boundId) return; sessions[boundId] = { ...current, items: [...current.items] }; defaultsCollapsed = current.collapsed; saveStore(); };
-  // 快捷指令区可用的纵向空间就是右栏内容区的高度。
-  // 上限（可用高度的 70%）与左栏串口拖高对齐，下限 120px；规则只在 `clampShortcutHeight` 里，
-  // 这里不再自己减一遍固定元素高度：那样既依赖各子栏当前是否折叠，又容易和 flex 分配互相牵制。
-  const availableHeight = () => {
-    const container = panel.parentElement;
-    if (!container) return window.innerHeight;
-    return Math.max(0, container.getBoundingClientRect().height);
+  // 快捷指令区可用的纵向空间就是右栏内容区的高度，减去另外两个定高面板占掉的部分；
+  // 上限（可用高度的 70%）与下限（120px）只在 `clampShortcutHeight` 里。
+  const clampHeight = (value: number) => {
+    const budget = panelColumnBudget(panel);
+    return clampShortcutHeight(Math.min(value, budget.room), budget.available);
   };
-  const applyHeight = () => { current.height = clampShortcutHeight(current.height, availableHeight()); panel.style.setProperty("--shortcuts-height", `${current.height}px`); };
+  const applyHeight = () => { current.height = clampHeight(current.height); panel.style.setProperty("--shortcuts-height", `${current.height}px`); };
   // 子栏折叠统一走 panelFold：标题栏单击折叠，箭头与 aria 由它维护。
   // 折叠状态是会话级的，所以变化时要写回当前会话。
   const fold = setupFoldPanel({
@@ -205,7 +204,7 @@ export function setupShortcutsUi(deps: ShortcutsUiDeps) {
     selectMode = false;
     disarmDelete();
     const saved = id ? sessions[id] : undefined;
-    current = saved ? { ...saved, height: clampShortcutHeight(saved.height, availableHeight()), items: [...saved.items] } : { height: DEFAULT_SHORTCUT_HEIGHT, collapsed: defaultsCollapsed, items: [] };
+    current = saved ? { ...saved, height: clampHeight(saved.height), items: [...saved.items] } : { height: DEFAULT_SHORTCUT_HEIGHT, collapsed: defaultsCollapsed, items: [] };
     applyHeight(); applyCollapsed(); render();
   }
 
@@ -249,9 +248,9 @@ export function setupShortcutsUi(deps: ShortcutsUiDeps) {
   handle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || current.collapsed) return;
     event.preventDefault();
-    dragHeight(event, handle, { startHeight: panel.getBoundingClientRect().height, edge: "bottom", clamp: (value) => clampShortcutHeight(value, availableHeight()), onHeight: (height) => { current.height = height; applyHeight(); }, onEnd: (_height, moved) => { if (moved) { saveCurrent(); deps.layoutChanged(); } } });
+    dragHeight(event, handle, { startHeight: panel.getBoundingClientRect().height, edge: "bottom", clamp: clampHeight, onHeight: (height) => { current.height = height; applyHeight(); }, onEnd: (_height, moved) => { if (moved) { saveCurrent(); deps.layoutChanged(); } } });
   });
-  handle.addEventListener("dblclick", () => { current.height = clampShortcutHeight(DEFAULT_SHORTCUT_HEIGHT, availableHeight()); applyHeight(); saveCurrent(); deps.layoutChanged(); });
+  handle.addEventListener("dblclick", () => { current.height = clampHeight(DEFAULT_SHORTCUT_HEIGHT); applyHeight(); saveCurrent(); deps.layoutChanged(); });
   form.addEventListener("submit", (event) => {
     event.preventDefault(); const name = nameInput.value.trim();
     if (!name) { error.textContent = t("shortcuts.nameRequired"); nameInput.focus(); return; }

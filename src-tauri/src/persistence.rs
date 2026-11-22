@@ -14,8 +14,7 @@ use core_domain::ownership::TransportKind;
 use core_domain::serial::{
     DataBits, FlowControl, LineEnding, Parity, SendMode, SerialConfig, StopBits,
 };
-use core_domain::workspace::{Axis, Layout, Rect, SessionMeta, SessionSettings, Window, Workspace};
-use serde::de::DeserializeOwned;
+use core_domain::workspace::{Axis, Layout, Project, SessionMeta, SessionSettings, Workspace};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
@@ -25,9 +24,11 @@ pub const WORKSPACE_FILE: &str = "workspace.json";
 
 /// `workspace.json` 的结构版本。读到更高版本时拒绝，免得把旧程序不认识的数据写回去。
 ///
-/// v2（M5）：会话多了一个可选的 `serial` 段。v1 文件照常读，缺的就按「没有串口配置」处理；
-/// 写出去一律是 v2。
-pub const WORKSPACE_VERSION: u32 = 2;
+/// v2（M5）：会话多了一个可选的 `serial` 段。
+/// v3（项目功能）：顶层多 `projects[]`，`windows[]` 删除。
+/// v4（ADR 0008）：项目是会话的唯一容器，`owner` 必填；加载 v1–v3 时丢弃无主会话。
+/// 写入一律是 v4。
+pub const WORKSPACE_VERSION: u32 = 4;
 
 /// 解析出的数据目录。
 pub fn data_dir() -> Result<PathBuf, String> {
@@ -76,39 +77,6 @@ fn ensure_writable(dir: &Path) -> io::Result<()> {
     }
     let _ = fs::remove_file(&probe);
     Ok(())
-}
-
-/// 读文件的结果。`Backup` 表示主文件坏了、从 `.bak` 救回来的。
-#[derive(Debug, PartialEq)]
-pub enum Load<T> {
-    Primary(T),
-    Backup(T),
-    Missing,
-    Unreadable(String),
-}
-
-pub fn read_with_backup<T: DeserializeOwned>(path: &Path) -> Load<T> {
-    let mut errors = Vec::new();
-    for (candidate, primary) in [(path.to_path_buf(), true), (sibling(path, ".bak"), false)] {
-        let bytes = match fs::read(&candidate) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == ErrorKind::NotFound => continue,
-            Err(err) => {
-                errors.push(format!("{}: {err}", candidate.display()));
-                continue;
-            }
-        };
-        match serde_json::from_slice(&bytes) {
-            Ok(value) if primary => return Load::Primary(value),
-            Ok(value) => return Load::Backup(value),
-            Err(err) => errors.push(format!("{}: {err}", candidate.display())),
-        }
-    }
-    if errors.is_empty() {
-        Load::Missing
-    } else {
-        Load::Unreadable(errors.join("; "))
-    }
 }
 
 /// 原子写：失败时保留原主文件，tmp 一定清理掉。
@@ -256,23 +224,56 @@ pub fn remove_scrollback(dir: &Path, id: &str) -> io::Result<()> {
     }
 }
 
+/// 清掉不属于当前工作区的卷轴快照：加载时丢弃的无主会话会留下孤儿文件。
+///
+/// 只处理合法 id 对应的 `<id>.ansi`；非安全 id 的 `h-<hash>.ansi` 无法反查，保守跳过。
+/// 目录不存在（还没有任何快照）不算错误。
+pub fn prune_scrollback(dir: &Path, keep: &std::collections::HashSet<String>) -> io::Result<usize> {
+    let folder = dir.join(SCROLLBACK_DIR);
+    let entries = match fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let kept: std::collections::HashSet<String> =
+        keep.iter().map(|id| session_file_name(id)).collect();
+    let suffix = format!(".{SCROLLBACK_EXT}");
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(&suffix) || name.starts_with("h-") || kept.contains(&name) {
+            continue;
+        }
+        if fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 // ---------- 工作区 JSON：DTO 与 core-domain 模型互转（core-domain 保持零依赖） ----------
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WorkspaceFile {
     version: u32,
-    windows: Vec<WindowFile>,
+    /// v3 起才有。**必须带 default**：v2 文件没有这个字段，缺默认值会让整份反序列化失败，
+    /// 老用户的工作区直接落进 `Unreadable`。
+    #[serde(default)]
+    projects: Vec<ProjectFile>,
     sessions: Vec<SessionFile>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct WindowFile {
-    id: u64,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    layout: LayoutFile,
+struct ProjectFile {
+    id: String,
+    name: String,
+    #[serde(default)]
+    root: Option<String>,
+    /// 空壳项目写 `null`；缺字段也按空壳读回
+    #[serde(default)]
+    layout: Option<LayoutFile>,
+    #[serde(default)]
+    frozen: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -312,6 +313,10 @@ struct SessionFile {
     settings: SettingsFile,
     #[serde(default)]
     hot: bool,
+    /// v4 起必填。DTO 保留 `Option` 只是为了读得动 v1–v3 的 `null` / 缺字段：
+    /// 加载阶段直接丢弃这些会话——独立会话已不存在（ADR 0008）。
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -581,16 +586,15 @@ pub fn save_workspace(dir: &Path, workspace: &Workspace) -> io::Result<()> {
 fn workspace_to_file(workspace: &Workspace) -> WorkspaceFile {
     WorkspaceFile {
         version: WORKSPACE_VERSION,
-        windows: workspace
-            .windows
+        projects: workspace
+            .projects
             .iter()
-            .map(|window| WindowFile {
-                id: window.id,
-                x: window.rect.x,
-                y: window.rect.y,
-                width: window.rect.width,
-                height: window.rect.height,
-                layout: layout_to_file(&window.layout),
+            .map(|project| ProjectFile {
+                id: project.id.clone(),
+                name: project.name.clone(),
+                root: project.root.clone(),
+                layout: project.layout.as_ref().map(layout_to_file),
+                frozen: project.frozen,
             })
             .collect(),
         sessions: workspace
@@ -605,6 +609,7 @@ fn workspace_to_file(workspace: &Workspace) -> WorkspaceFile {
                 serial: session.serial.as_ref().map(SerialFile::from),
                 settings: SettingsFile::from(&session.settings),
                 hot: session.hot,
+                owner: Some(session.owner.clone()),
             })
             .collect(),
     }
@@ -641,19 +646,24 @@ fn workspace_from_file(file: WorkspaceFile) -> Result<Workspace, String> {
         ));
     }
     let workspace = Workspace {
-        windows: file
-            .windows
+        projects: file
+            .projects
             .iter()
-            .map(|window| Window {
-                id: window.id,
-                rect: Rect::new(window.x, window.y, window.width, window.height),
-                layout: layout_from_file(&window.layout),
+            .map(|project| Project {
+                id: project.id.clone(),
+                name: project.name.clone(),
+                root: project.root.clone(),
+                layout: project.layout.as_ref().map(layout_from_file),
+                frozen: project.frozen,
             })
             .collect(),
         sessions: file
             .sessions
             .iter()
-            .map(|session| {
+            // v1–v3 里 `owner` 缺失 / null 的是独立会话：项目是唯一容器（ADR 0008），
+            // 这些记录在加载阶段直接丢弃，不做「未分组」之类的收容。
+            .filter_map(|session| {
+                let owner = session.owner.clone().filter(|owner| !owner.trim().is_empty())?;
                 let serial = session.serial.as_ref().map(SerialFile::to_config);
                 // 旧版本的串口默认标题是「COM3 · 115200」。只有这个出厂名才收成纯端口：
                 // 用户改过的名字（哪怕碰巧长得像）保持原样。
@@ -663,7 +673,7 @@ fn workspace_from_file(file: WorkspaceFile) -> Result<Workspace, String> {
                     }
                     _ => session.title.clone(),
                 };
-                SessionMeta {
+                Some(SessionMeta {
                     id: session.id.clone(),
                     title,
                     transport: session.transport.into(),
@@ -672,7 +682,8 @@ fn workspace_from_file(file: WorkspaceFile) -> Result<Workspace, String> {
                     serial,
                     settings: session.settings.to_settings(),
                     hot: false,
-                }
+                    owner,
+                })
             })
             .collect(),
     };
@@ -705,6 +716,7 @@ fn layout_from_file(layout: &LayoutFile) -> Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_domain::workspace::Side;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -717,14 +729,29 @@ mod tests {
         dir
     }
 
+    fn owned_terminal(id: &str, project: &str) -> SessionMeta {
+        SessionMeta::terminal(id, id, "pwsh.exe", project)
+    }
+
     fn sample_workspace() -> Workspace {
         let mut ws = Workspace::new();
-        ws.add_session(SessionMeta::terminal("s1", "pwsh", "pwsh.exe"))
-            .unwrap();
-        ws.add_session(SessionMeta::terminal("s2", "bash", "bash.exe"))
-            .unwrap();
-        ws.open("s1", Rect::new(10.0, 20.0, 1200.0, 800.0)).unwrap();
-        ws.split("s1", "s2", Axis::Horizontal, 0.4).unwrap();
+        ws.new_project("p1", "PinShell").unwrap();
+        ws.place_new_session_in_project(
+            "p1",
+            owned_terminal("s1", "p1"),
+            None,
+            Side::Right,
+            0.5,
+        )
+        .unwrap();
+        ws.place_new_session_in_project(
+            "p1",
+            owned_terminal("s2", "p1"),
+            Some("s1"),
+            Side::Right,
+            0.4,
+        )
+        .unwrap();
         ws
     }
 
@@ -734,7 +761,7 @@ mod tests {
         let ws = sample_workspace();
         save_workspace(&dir, &ws).unwrap();
         let path = dir.join(WORKSPACE_FILE);
-        fs::write(&path, br#"{"version":2,"windows":[{"id":1,"x":0,"y":0,"width":800,"height":600,"layout":{"kind":"leaf","session":"ghost"}}],"sessions":[]}"#).unwrap();
+        fs::write(&path, br#"{"version":3,"projects":[{"id":"p1","name":"P","layout":{"kind":"leaf","session":"ghost"}}],"sessions":[]}"#).unwrap();
         let backup = sibling(&path, ".bak");
         fs::write(
             &backup,
@@ -754,10 +781,10 @@ mod tests {
         let dir = temp_dir("future-version");
         let path = dir.join(WORKSPACE_FILE);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(&path, br#"{"version":99,"windows":[],"sessions":[]}"#).unwrap();
+        fs::write(&path, br#"{"version":99,"projects":[],"sessions":[]}"#).unwrap();
         fs::write(
             sibling(&path, ".bak"),
-            br#"{"version":2,"windows":[],"sessions":[]}"#,
+            br#"{"version":3,"projects":[],"sessions":[]}"#,
         )
         .unwrap();
 
@@ -824,8 +851,14 @@ mod tests {
         config.dtr = false;
         config.line_ending = LineEnding::Lf;
         config.send_mode = SendMode::Direct;
-        ws.add_session(SessionMeta::serial("ser", "COM7", config.clone()))
-            .unwrap();
+        ws.place_new_session_in_project(
+            "p1",
+            SessionMeta::serial("ser", "COM7", config.clone(), "p1"),
+            Some("s2"),
+            Side::Right,
+            0.5,
+        )
+        .unwrap();
         save_workspace(&dir, &ws).unwrap();
 
         match load_workspace(&dir) {
@@ -846,9 +879,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(WORKSPACE_FILE),
-            r#"{"version":2,"windows":[],"sessions":[
-                {"id":"a","title":"COM7 · 115200","transport":"serial","serial":{"port":"COM7","baud":115200,"data_bits":8,"parity":"none","stop_bits":"one","flow":"none","dtr":true,"rts":true,"line_ending":"crlf","send_mode":"line"}},
-                {"id":"b","title":"我的板子","transport":"serial","serial":{"port":"COM8","baud":9600,"data_bits":8,"parity":"none","stop_bits":"one","flow":"none","dtr":true,"rts":true,"line_ending":"crlf","send_mode":"line"}}
+            r#"{"version":4,
+                "projects":[{"id":"p1","name":"P","layout":{"kind":"split","axis":"horizontal","ratio":0.5,
+                    "first":{"kind":"leaf","session":"a"},"second":{"kind":"leaf","session":"b"}}}],
+                "sessions":[
+                {"id":"a","owner":"p1","title":"COM7 · 115200","transport":"serial","serial":{"port":"COM7","baud":115200,"data_bits":8,"parity":"none","stop_bits":"one","flow":"none","dtr":true,"rts":true,"line_ending":"crlf","send_mode":"line"}},
+                {"id":"b","owner":"p1","title":"我的板子","transport":"serial","serial":{"port":"COM8","baud":9600,"data_bits":8,"parity":"none","stop_bits":"one","flow":"none","dtr":true,"rts":true,"line_ending":"crlf","send_mode":"line"}}
             ]}"#,
         )
         .unwrap();
@@ -867,7 +903,7 @@ mod tests {
     fn older_sessions_get_default_log_settings() {
         let dir = temp_dir("settings-default");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(WORKSPACE_FILE), br#"{"version":2,"windows":[],"sessions":[{"id":"s","title":"sh","transport":"terminal","shell":"pwsh.exe"}]}"#).unwrap();
+        fs::write(dir.join(WORKSPACE_FILE), br#"{"version":3,"projects":[{"id":"p1","name":"P","layout":{"kind":"leaf","session":"s"}}],"sessions":[{"id":"s","owner":"p1","title":"sh","transport":"terminal","shell":"pwsh.exe"}]}"#).unwrap();
         match load_workspace(&dir) {
             WorkspaceLoad::Loaded(workspace) => {
                 let settings = &workspace.session("s").unwrap().settings;
@@ -891,10 +927,15 @@ mod tests {
         // 越界值读回时夹到合法区间：0 → MIN，99 → MAX；合法值原样保留
         fs::write(
             dir.join(WORKSPACE_FILE),
-            br#"{"version":2,"windows":[],"sessions":[
-                {"id":"lo","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":0}},
-                {"id":"hi","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":99}},
-                {"id":"ok","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":18}}
+            br#"{"version":4,
+                "projects":[{"id":"p1","name":"P","layout":{"kind":"split","axis":"horizontal","ratio":0.5,
+                    "first":{"kind":"leaf","session":"lo"},
+                    "second":{"kind":"split","axis":"vertical","ratio":0.5,
+                        "first":{"kind":"leaf","session":"hi"},"second":{"kind":"leaf","session":"ok"}}}}],
+                "sessions":[
+                {"id":"lo","owner":"p1","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":0}},
+                {"id":"hi","owner":"p1","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":99}},
+                {"id":"ok","owner":"p1","title":"sh","transport":"terminal","shell":"pwsh.exe","settings":{"font_size":18}}
             ]}"#,
         )
         .unwrap();
@@ -911,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn version_one_workspace_still_loads_without_serial_fields() {
+    fn version_one_workspace_loads_with_ownerless_sessions_dropped() {
         let dir = temp_dir("v1");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -927,11 +968,86 @@ mod tests {
         .unwrap();
         match load_workspace(&dir) {
             WorkspaceLoad::Loaded(back) => {
-                let meta = back.session("s1").unwrap();
-                assert_eq!(meta.serial, None);
-                assert!(!meta.hot, "读回一律按冷会话");
+                // v1 没有项目、会话没有 owner：项目是唯一容器（ADR 0008），这些记录被丢弃
+                assert!(back.projects.is_empty());
+                assert!(back.sessions.is_empty());
             }
             other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_real_v2_file_without_projects_still_loads() {
+        // 老用户升级后的真实形状：有 windows、没有 projects。缺 serde default 时
+        // 这里会整份反序列化失败，工作区直接变成 Unreadable。现在能读，内容被清空。
+        let dir = temp_dir("v2-real");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            br#"{
+              "version": 2,
+              "windows": [{"id": 1, "x": 10, "y": 20, "width": 1200, "height": 800,
+                           "layout": {"kind": "split", "axis": "horizontal", "ratio": 0.5,
+                                      "first": {"kind": "leaf", "session": "s1"},
+                                      "second": {"kind": "leaf", "session": "s2"}}}],
+              "sessions": [
+                {"id": "s1", "title": "pwsh", "transport": "terminal", "shell": "pwsh.exe"},
+                {"id": "s2", "title": "bash", "transport": "terminal", "shell": "bash.exe"}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(back) => {
+                assert!(back.projects.is_empty(), "旧窗口布局不再复活成项目");
+                assert!(back.sessions.is_empty(), "无主会话在加载时丢弃");
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v3_null_owner_sessions_are_dropped_instead_of_failing_the_load() {
+        let dir = temp_dir("v3-null-owner");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            br#"{"version":3,
+                "projects":[{"id":"p1","name":"P","layout":{"kind":"leaf","session":"kept"}}],
+                "sessions":[
+                  {"id":"kept","owner":"p1","title":"sh","transport":"terminal","shell":"pwsh.exe"},
+                  {"id":"gone","owner":null,"title":"sh","transport":"terminal","shell":"pwsh.exe"},
+                  {"id":"gone2","title":"sh","transport":"terminal","shell":"pwsh.exe"}
+                ]}"#,
+        )
+        .unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(back) => {
+                assert_eq!(back.sessions.len(), 1);
+                assert_eq!(back.session("kept").unwrap().owner, "p1");
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owner_pointing_at_a_missing_project_is_rejected() {
+        let dir = temp_dir("owner-dangling");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            br#"{"version":3,"projects":[],"sessions":[
+                {"id":"s1","title":"sh","transport":"terminal","shell":"pwsh.exe","owner":"ghost"}
+            ]}"#,
+        )
+        .unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Unreadable(err) => assert!(err.contains("ghost")),
+            other => panic!("expected Unreadable, got {:?}", describe(&other)),
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -942,7 +1058,7 @@ mod tests {
         let mut ws = sample_workspace();
         save_workspace(&dir, &ws).unwrap();
 
-        ws.close_session("s2").unwrap();
+        ws.remove_pane("p1", "s2").unwrap();
         save_workspace(&dir, &ws).unwrap();
 
         let bak = fs::read_to_string(dir.join("workspace.json.bak")).unwrap();
@@ -999,9 +1115,9 @@ mod tests {
         fs::write(
             dir.join(WORKSPACE_FILE),
             br#"{
-              "version": 1,
-              "windows": [{"id": 1, "x": 0, "y": 0, "width": 800, "height": 600,
-                           "layout": {"kind": "leaf", "session": "ghost"}}],
+              "version": 4,
+              "projects": [{"id": "p1", "name": "P",
+                            "layout": {"kind": "leaf", "session": "ghost"}}],
               "sessions": []
             }"#,
         )
@@ -1009,6 +1125,47 @@ mod tests {
         match load_workspace(&dir) {
             WorkspaceLoad::Unreadable(err) => assert!(err.contains("ghost")),
             other => panic!("expected Unreadable, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_frozen_and_empty_shell_round_trip() {
+        let dir = temp_dir("project-frozen-shell");
+        let mut ws = sample_workspace();
+        ws.new_project("p2", "空壳").unwrap();
+        ws.set_project_frozen("p1", true).unwrap();
+        save_workspace(&dir, &ws).unwrap();
+
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(back) => {
+                assert_eq!(back, ws);
+                assert!(back.project("p1").unwrap().frozen);
+                assert_eq!(back.project("p2").unwrap().layout, None);
+                assert!(!back.project("p2").unwrap().frozen);
+            }
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_version_and_unknown_fields_are_tolerated() {
+        // 版本比较是 `>`，等于当前版本必须能读；结构体没有 deny_unknown_fields，
+        // 未来加字段时旧程序读到新文件也不该整份失败。
+        let dir = temp_dir("version-and-unknown");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(WORKSPACE_FILE),
+            br#"{"version":4,"future_field":true,
+                "projects":[{"id":"p1","name":"P","layout":{"kind":"leaf","session":"s"}}],
+                "sessions":[{"id":"s","owner":"p1","title":"sh","transport":"terminal",
+                             "shell":"pwsh.exe","another_future":42}]}"#,
+        )
+        .unwrap();
+        match load_workspace(&dir) {
+            WorkspaceLoad::Loaded(back) => assert_eq!(back.sessions.len(), 1),
+            other => panic!("expected Loaded, got {:?}", describe(&other)),
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1079,6 +1236,20 @@ mod tests {
         assert_eq!(load_scrollback(&dir, "s1"), None);
         // 再删一次不算错：关闭会话可能被重复触发
         remove_scrollback(&dir, "s1").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_scrollback_files_are_pruned() {
+        let dir = temp_dir("prune-scrollback");
+        save_scrollback(&dir, "keep", "x").unwrap();
+        save_scrollback(&dir, "gone", "y").unwrap();
+        let keep: std::collections::HashSet<String> = ["keep".to_string()].into_iter().collect();
+        assert_eq!(prune_scrollback(&dir, &keep).unwrap(), 1);
+        assert!(load_scrollback(&dir, "keep").is_some());
+        assert!(load_scrollback(&dir, "gone").is_none());
+        // 目录还不存在（没有任何快照）不算错误
+        assert_eq!(prune_scrollback(&dir.join("nope"), &keep).unwrap(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 

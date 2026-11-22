@@ -4,7 +4,7 @@
 // 之后「上次扫完再等一个周期」；失败按 2^n 退避；面板折叠或窗口隐藏时不扫。
 // 串口的枚举很便宜，但每秒一次也会打扰别的调用方，规则不值得另写一份。
 
-import type { SerialPort } from "./serialUi";
+import type { SerialPort } from "./sessionDialogUi";
 
 /// 自动扫描周期。
 export const POLL_MS = 1000;

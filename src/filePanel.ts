@@ -23,6 +23,8 @@ export interface FilePanelStore {
   /// 文件子栏是否收起（只隐藏列表，标题栏留在原处）
   expanded: boolean;
   width: number;
+  /// 文件子栏的高度（窗口级布局）；轮到它吃剩余高度时不生效
+  height: number;
   /// 新建会话沿用最近一次用过的设置
   defaults: FilePanelPrefs;
   /// 按会话 id 存的设置
@@ -35,6 +37,10 @@ export const DEFAULT_PANEL_PREFS: FilePanelPrefs = {
   showHidden: false,
   path: null
 };
+
+/// 文件子栏的默认高度。轮到它吃剩余高度时这个值不生效（CSS 由 `rb-fill` 接管），
+/// 被排到中间/顶部时才用它作为起始高度。
+export const DEFAULT_FILE_PANEL_HEIGHT = 260;
 
 /// 校验一份设置：字段缺失或类型不对就退回 `fallback`。`path` 只在固定模式下保留。
 export function normalizePanelPrefs(
@@ -73,7 +79,11 @@ export function normalizePanelStore(raw: unknown): FilePanelStore {
     typeof source.width === "number" && Number.isFinite(source.width) && source.width > 0
       ? Math.round(source.width)
       : 0;
-  return { collapsed, expanded, width, defaults, sessions };
+  const height =
+    typeof source.height === "number" && Number.isFinite(source.height) && source.height > 0
+      ? Math.round(source.height)
+      : DEFAULT_FILE_PANEL_HEIGHT;
+  return { collapsed, expanded, width, height, defaults, sessions };
 }
 
 export interface FsEntry {

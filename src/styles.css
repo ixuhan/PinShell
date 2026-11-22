@@ -750,6 +750,17 @@ body {
   color: var(--text-strong);
 }
 
+/* 项目栏的标题栏不是折叠开关（整栏不收起）：去掉手形与悬停高亮 */
+.pane-static-head,
+.pane-static-head:hover {
+  cursor: default;
+  background: transparent;
+}
+
+.pane-static-head:hover .panel-title {
+  color: var(--text-muted);
+}
+
 /* 标题栏整条都能点：按钮只占文字宽度，空白处由 panelFold 的容器监听补上 */
 .panel-toggle {
   flex: 0 1 auto;
@@ -970,14 +981,16 @@ body {
 }
 
 /* 会话行的「⋯」平时收起来，指到这一行（或它就是当前行）才出现。
-   不收起的话每行尾巴上都有一个灰点，纵向排成一列，比内容本身还抢眼。 */
+   不收起的话每行尾巴上都有一个灰点，纵向排成一列，比内容本身还抢眼。
+   项目行的「⋯」常驻（和 ＋ 一样），因为它是项目设置的主入口。 */
 .sess-menu-button {
   opacity: 0;
 }
 
 .sess-row:hover .sess-menu-button,
 .sess-row.active .sess-menu-button,
-.sess-menu-button:focus-visible {
+.sess-menu-button:focus-visible,
+.proj-row .sess-menu-button {
   opacity: 1;
 }
 
@@ -986,7 +999,7 @@ body {
   display: none;
 }
 
-/* 左栏：会话树。热/冷只由状态点表达，不做两套列表 */
+/* 项目栏：只放项目与会话两种行（ADR 0008）。热/冷只由状态点表达，不做两套列表 */
 #sidebar {
   position: relative;
   flex: none;
@@ -1000,20 +1013,10 @@ body {
   user-select: none;
 }
 
-/* 会话子栏吃掉剩余高度，串口子栏贴底 */
+/* 项目栏吃掉整栏高度：头部固定、底部设置固定，中间列表滚动 */
 #sess-panel {
   flex: 1 1 auto;
   min-height: 0;
-}
-
-/* 收起后不再占位：只留标题栏，下面的串口子栏自然跟着上移。
-   两个都收起时两块一起贴顶，和右栏的表现一致。 */
-#sess-panel.collapsed {
-  flex: none;
-}
-
-#sess-panel.collapsed #sess-body {
-  display: none;
 }
 
 /* 右边缘的拖拽手柄：跨在边框上，抓取范围 11px（栏内 6px、栏外 5px） */
@@ -1045,21 +1048,77 @@ body.layout-dragging #sess-resizer::after {
   background: var(--accent-border);
 }
 
-/* 会话子栏的标题栏：与其它子栏同高，只多留一点上边距，和栏顶的空白对齐 */
+/* 项目栏的标题栏：固定高度，标题不可点（折叠入口在标题栏按钮上） */
 #sess-head {
   padding: 4px 6px 4px 4px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
-/* 收起后只剩一条 26px 的竖条：内容与拖拽手柄全部让位，只留展开按钮 */
+#sess-head .panel-title {
+  padding-left: 6px;
+}
+
+/* 三个头部按钮与底部设置入口都不抢焦点 */
+#sess-head .panel-tools button,
+#settings-open-sidebar {
+  -webkit-app-region: no-drag;
+}
+
+/* 底部固定的全局设置入口：与标题栏齿轮同一个弹窗（ADR 0008） */
+#sidebar-foot {
+  flex: none;
+  padding: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+#settings-open-sidebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+#settings-open-sidebar:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+#settings-open-sidebar .icon-gear {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+/* 项目栏不整栏收起时与其它子栏同构；收起后只剩一条 26px 的竖条 */
 #sidebar.collapsed {
   width: 26px;
 }
 
 #sidebar.collapsed #sess-panel,
-#sidebar.collapsed #ports-panel,
 #sidebar.collapsed #sess-resizer {
   display: none;
+}
+
+/* 收起后的竖条：上半是展开按钮，下半是设置入口（只显示齿轮） */
+#sidebar.collapsed #sidebar-foot {
+  border-top: 0;
+  padding: 4px 0;
+}
+
+#sidebar.collapsed #settings-open-sidebar span {
+  display: none;
+}
+
+#sidebar.collapsed #settings-open-sidebar {
+  justify-content: center;
+  padding: 5px 0;
 }
 
 #sess-expand {
@@ -1200,11 +1259,10 @@ body.layout-dragging #sess-resizer::after {
   background: var(--danger-bg);
 }
 
-/* 勾选框占在状态点前面：尺寸压小，别把单行列表撑高。
+/* 勾选框占在快捷指令行前面：尺寸压小，别把单行列表撑高。
    原生复选框只会被 `accent-color` 染一个勾，方框和描边仍是系统画的——浅色主题里
    是一块偏灰的白底，暗色主题里是一块亮白，和旁边那些圆角面板放在一起很跳。
    这里整个重画：方框用主题描边、选中填主色、对勾用两条边旋 45° 画出来。 */
-.sess-check,
 .shortcut-check {
   flex: none;
   position: relative;
@@ -1219,19 +1277,16 @@ body.layout-dragging #sess-resizer::after {
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
-.sess-check:hover,
 .shortcut-check:hover {
   border-color: var(--border-hover);
 }
 
-.sess-check:checked,
 .shortcut-check:checked {
   background: var(--accent-solid);
   border-color: var(--accent-strong);
 }
 
 /* 对勾：一块 4×7 的直角边，绕中心转 45° 就是 √。用 --on-accent 保证九套主题下都压得住底色。 */
-.sess-check:checked::after,
 .shortcut-check:checked::after {
   content: "";
   position: absolute;
@@ -1244,7 +1299,6 @@ body.layout-dragging #sess-resizer::after {
   transform: rotate(45deg);
 }
 
-.sess-check:focus-visible,
 .shortcut-check:focus-visible {
   outline: 1px solid var(--focus-ring);
   outline-offset: 1px;
@@ -1252,23 +1306,16 @@ body.layout-dragging #sess-resizer::after {
 
 /* 快捷指令一行是带 1px 边框的卡片，padding-left 却是 0：批量模式下勾选框是
    第一个子节点，会直接贴着行的左边框，两条 1px 描边叠成一条粗线，看着像压在框上。
-   补 5px 左外边距（加上行本身那 1px 边框 = 距行外沿 6px），和会话列表的
-   6px 内边距落在同一视觉起点上，两栏的勾选框才对齐。只作用于 shortcut-check，
-   会话行本来就有留白，不用动。 */
+   补 5px 左外边距（加上行本身那 1px 边框 = 距行外沿 6px），与项目栏列表的
+   6px 内边距落在同一视觉起点上。 */
 .shortcut-check {
   margin-left: 5px;
 }
 
-.sess-row.selected,
 .shortcut-row.selected {
   /* 用主色淡底区分「勾选中」和当前会话的 active 高亮：两者同屏时不能长得一样 */
   background: var(--accent-bg);
   box-shadow: inset 0 0 0 1px var(--accent-border);
-}
-
-/* 批量模式下单条操作让位：会话的「⋯」菜单收起来，行只剩勾选 */
-#sess-panel.selecting .sess-menu-button {
-  display: none;
 }
 
 .sess-dot {
@@ -1337,66 +1384,49 @@ body.layout-dragging #sess-resizer::after {
   color: var(--danger);
 }
 
-#ports-panel {
-  position: relative;
+/* ---------- 功能栏里的面板（ADR 0007） ----------
+   三个面板完全同权：各自记住高度、可折叠、可隐藏、可排序。
+   最后一个「可见且展开」的面板吃剩余高度（`rb-fill` 由 rightBarUi 挂上），
+   它的高度拖动手柄同时隐藏：高度由 flex 决定，拖它没有意义。 */
+
+#files-body > .panel {
   flex: none;
-  min-width: 0;
-  height: var(--ports-height, 180px);
-  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
-/* 会话子栏展开时它由 #sess-panel 的 flex: 1 自然挤到底部；
-   会话收起后 #sess-panel 不再占位，串口跟着上移到标题栏下面。 */
+#files-body > .panel[hidden] {
+  display: none;
+}
 
-/* 会话收起、串口展开：让串口填满剩下的整栏高度。
-   否则固定 180px 的面板会孤零零停在栏顶，下面一大片空白，
-   端口列表看起来像悬在半空。这时高度由 flex 决定，分割线没有意义。 */
-#sidebar.sess-folded #ports-panel:not(.collapsed) {
+#files-body > .panel.rb-fill {
   flex: 1 1 auto;
   height: auto;
-  min-height: 0;
 }
 
-#sidebar.sess-folded #ports-panel:not(.collapsed) #ports-resizer {
-  display: none;
-}
-
-/* 折叠时高度交给标题栏：不能再留着 180px 的空白 */
-#ports-panel.collapsed {
+/* 折叠：高度交给标题栏，内容与拖拽手柄一起让位 */
+#files-body > .panel.collapsed {
+  flex: none;
   height: auto;
 }
 
-#ports-panel.collapsed #ports-body {
+#files-body > .panel.collapsed > .panel-body {
   display: none;
 }
 
-#ports-panel.collapsed #ports-resizer {
-  display: none;
-}
-
-/* 拖拽手柄贴在串口顶边、向上伸出 5px 便于抓取。
-   但它不能盖到上方会话子栏的标题栏上：会话收起时两块紧邻，
-   手柄向上伸出会把「点会话标题栏展开」的点击截走。
-   所以只在会话子栏展开（上方有内容区）时才允许向上伸出。 */
-#ports-resizer {
+/* 高度拖动手柄：贴在自己底边、向下伸出 5px。拖动改的是这个面板的高度，
+   其余高度由最后一个展开的面板吸收，所以三个面板共用一套手势。 */
+.panel-height {
   position: absolute;
-  top: -5px;
   left: 0;
   right: 0;
+  bottom: -5px;
   height: 10px;
   z-index: 6;
   cursor: row-resize;
   touch-action: none;
 }
 
-/* 会话子栏收起时：手柄完全收进串口面板内，不再压住上面的标题栏。
-   类名由 sidebarUi 挂到 #sidebar 上（不用 :has()，避免依赖较新的选择器支持）。 */
-#sidebar.sess-folded #ports-resizer {
-  top: 0;
-  height: 6px;
-}
-
-#ports-resizer::after {
+.panel-height::after {
   content: "";
   position: absolute;
   top: 4px;
@@ -1406,9 +1436,19 @@ body.layout-dragging #sess-resizer::after {
   background: transparent;
 }
 
-#ports-resizer:hover::after,
-body.layout-dragging #ports-resizer::after {
+.panel-height:hover::after,
+body.layout-dragging .panel-height::after {
   background: var(--accent-border);
+}
+
+/* 吃剩余高度的面板没有固定高度，手柄一起收掉 */
+#files-body > .panel.rb-fill > .panel-head .panel-height,
+#files-body > .panel.collapsed > .panel-head .panel-height {
+  display: none;
+}
+
+#ports-panel {
+  height: var(--ports-height, 180px);
 }
 
 #ports-head {
@@ -1448,25 +1488,8 @@ body.layout-dragging #ports-resizer::after {
   50% { opacity: 0.35; box-shadow: 0 0 1px var(--accent); }
 }
 
-/* 端口行的「＋」与标题栏按钮保持同一套观感；标题栏按钮由 .panel-tools 统一定义 */
-.port-add {
-  flex: none;
-  height: 24px;
-  min-width: 24px;
-  padding: 0 4px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  cursor: pointer;
-}
-
-.port-add:hover {
-  background: var(--bg-raised);
-  color: var(--text-strong);
-}
-
+/* 端口行是只读展示：没有 ＋、没有右键、点了不做事。
+   `.active` 标出当前焦点串口会话占用的端口（I4 的界面表现）。 */
 #ports-auto.on {
   background: var(--accent-bg);
   border-color: var(--accent-border);
@@ -1494,14 +1517,9 @@ body.layout-dragging #ports-resizer::after {
   border-radius: 6px;
   color: var(--text-muted);
   font: inherit;
-  cursor: pointer;
 }
 
-.port-row:hover {
-  background: var(--bg-raised);
-}
-
-.port-row.sel {
+.port-row.active {
   background: var(--bg-active);
   color: var(--text-strong);
 }
@@ -1551,6 +1569,50 @@ body.layout-dragging #ports-resizer::after {
   overflow: hidden;
   clip-path: inset(0);
   box-sizing: border-box;
+  /* 单叶与多分格都靠 flex：叶子 .term-pane 撑满时与旧结构（xterm 直接挂在
+     #term-host 下）在视觉上一致，不会多出一圈留白或高度差。 */
+  display: flex;
+}
+
+/* 一个分格。按布局递归生成。 */
+.term-pane {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 终端宿主。xterm 的 open() 只调用一次，之后布局变化只搬这个节点。 */
+.term-view {
+  position: absolute;
+  inset: 0;
+}
+
+/* 切割容器：比例写在子节点的 flex-grow 上，拖动分隔条只改这里，不重建 DOM。 */
+.term-split {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.term-split.horizontal {
+  flex-direction: row;
+}
+
+.term-split.vertical {
+  flex-direction: column;
+}
+
+/* 冷格占位：阶段 2 才真正用上，先把样式定下来，dev 钩子造布局时也能看出缺了哪一格。 */
+.term-pane-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  background: var(--bg-app);
+  font-size: 12px;
 }
 
 /* 留白写在 .xterm 自己身上，不能留在 #term-host：FitAddon 量的是宿主的
@@ -1978,8 +2040,8 @@ body.layout-dragging {
   color: var(--text-strong);
 }
 
-/* ---------- 新建串口会话 ---------- */
-#serial-overlay {
+/* ---------- 新建会话（终端 / 串口共用） ---------- */
+#session-overlay {
   position: fixed;
   inset: 0;
   display: flex;
@@ -1989,11 +2051,11 @@ body.layout-dragging {
   z-index: 40;
 }
 
-#serial-overlay[hidden] {
+#session-overlay[hidden] {
   display: none;
 }
 
-#serial-form {
+#session-form {
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 40px);
   overflow: auto;
@@ -2006,7 +2068,7 @@ body.layout-dragging {
   color: var(--text-muted);
 }
 
-#serial-head {
+#session-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2016,7 +2078,7 @@ body.layout-dragging {
   touch-action: none;
 }
 
-#serial-head button {
+#session-head button {
   padding: 0 6px;
   background: transparent;
   border: 0;
@@ -2025,8 +2087,128 @@ body.layout-dragging {
   cursor: pointer;
 }
 
-#serial-head button:hover {
+#session-head button:hover {
   color: var(--text-strong);
+}
+
+#session-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+#session-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+#session-grid label.wide {
+  grid-column: 1 / -1;
+}
+
+#session-grid input,
+#session-grid select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+#session-grid input:focus,
+#session-grid select:focus {
+  border-color: var(--border-hover);
+}
+
+/* 传输方式：两个单选并排，标签不占一整行 */
+#session-transport-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 6px 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+#session-transport-field legend {
+  padding: 0 4px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+#session-transport-field label {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+#session-terminal {
+  display: grid;
+  gap: 8px;
+}
+
+#session-terminal label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+#session-terminal input,
+#session-terminal select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+#session-terminal input:focus,
+#session-terminal select:focus {
+  border-color: var(--border-hover);
+}
+
+#session-grid > #session-transport-field,
+#session-grid > .dialog-hint {
+  grid-column: 1 / -1;
+}
+
+#serial-grid {
+  margin-top: 10px;
+}
+
+#session-terminal[hidden],
+#serial-grid[hidden],
+#serial-flags[hidden],
+#session-placement-field[hidden],
+#session-placement-hint[hidden] {
+  display: none;
+}
+
+.dialog-hint {
+  color: var(--warn);
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 
 #serial-grid {
@@ -2155,7 +2337,7 @@ body.layout-dragging {
   color: var(--text-faint);
 }
 
-#serial-error {
+#session-error {
   min-height: 1.7em;
   margin-top: 8px;
   font-size: 11px;
@@ -2163,7 +2345,7 @@ body.layout-dragging {
   white-space: pre-wrap;
 }
 
-#serial-foot {
+#session-foot {
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -2171,7 +2353,7 @@ body.layout-dragging {
   margin-top: 4px;
 }
 
-#serial-foot button {
+#session-foot button {
   padding: 4px 14px;
   background: transparent;
   border: 1px solid var(--border);
@@ -2181,13 +2363,13 @@ body.layout-dragging {
   cursor: pointer;
 }
 
-#serial-foot button[type="submit"] {
+#session-foot button[type="submit"] {
   background: var(--bg-chip);
   border-color: var(--border-hover);
   color: var(--text-strong);
 }
 
-#serial-foot button:disabled {
+#session-foot button:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -2449,50 +2631,9 @@ body.layout-dragging {
 
 /* ---------- 会话快捷指令 ---------- */
 #shortcuts-panel {
-  position: relative;
-  flex: none;
   height: var(--shortcuts-height, 220px);
-  min-height: 0;
-  border-bottom: 1px solid var(--border);
   background: var(--bg-sunken);
 }
-
-/* 折叠后高度交给标题栏，工具按钮保留 */
-#shortcuts-panel.collapsed {
-  height: auto;
-}
-
-#shortcuts-panel.collapsed #shortcuts-body {
-  display: none;
-}
-
-#shortcuts-panel.collapsed #shortcuts-resizer {
-  display: none;
-}
-
-#shortcuts-resizer {
-  position: absolute;
-  z-index: 5;
-  left: 0;
-  right: 0;
-  bottom: -5px;
-  height: 10px;
-  cursor: row-resize;
-  touch-action: none;
-}
-
-#shortcuts-resizer::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: transparent;
-}
-
-#shortcuts-resizer:hover::after,
-body.layout-dragging #shortcuts-resizer::after { background: var(--accent-border); }
 
 #shortcuts-head {
   padding: 4px 6px 4px 4px;
@@ -2589,6 +2730,11 @@ body.layout-dragging {
   width: 26px;
 }
 
+/* 三个面板全部取消勾选：整条功能栏消失，宽度、手柄、收起竖条都不留 */
+#files.no-panels {
+  display: none;
+}
+
 #files.collapsed #files-body,
 #files.collapsed #files-resizer {
   display: none;
@@ -2622,32 +2768,14 @@ body.layout-dragging {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 三个面板的高度都由各自的模块夹过；这一层兜住任何意外溢出，别让它画到窗口边缘外 */
+  overflow: hidden;
 }
 
-/* 文件子栏吃掉右栏剩余高度；快捷指令子栏在上面按固定高度 */
+/* 三个面板的高度都由各自的模块写进 CSS 变量；谁吃剩余高度由 `rb-fill` 决定，
+   不再有「文件栏永远撑满」这个特例。 */
 #files-panel {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-#files-panel.collapsed {
-  flex: none;
-}
-
-#files-panel.collapsed #files-main {
-  display: none;
-}
-
-/* 文件子栏收起时，让快捷指令子栏吃掉右栏剩余高度，把收起的「文件」标题栏顶到底部——
-   与左栏「会话展开、串口收起」的表现一致，而不是紧贴在快捷指令下面悬在半空。 */
-#files-body.files-folded #shortcuts-panel:not(.collapsed) {
-  flex: 1 1 auto;
-  height: auto;
-}
-
-/* 这个状态下快捷指令的高度由 flex 决定，拖高度的手柄没有意义，收掉避免误解 */
-#files-body.files-folded #shortcuts-resizer {
-  display: none;
+  height: var(--files-height, 260px);
 }
 
 #files-head {
@@ -2991,9 +3119,465 @@ body.layout-dragging {
 .settings-update { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .settings-update span { flex: 1 1 180px; min-width: 0; color: var(--text-muted); overflow-wrap: anywhere; }
 .settings-update button:disabled { opacity: .5; cursor: default; }
+
+/* 功能栏设置：一行一个面板，勾选控制可见性，↑↓ 调整上下顺序（ADR 0007） */
+.settings-hint { margin: -2px 0 8px; color: var(--text-dim); font-size: 11px; line-height: 1.5; }
+.settings-rightbar {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.settings-rightbar li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 24px 24px;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-sunken);
+}
+.settings-rightbar input[type="checkbox"] {
+  accent-color: var(--accent-strong);
+}
+.settings-rightbar label {
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-rightbar button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.settings-rightbar button:hover:not(:disabled) {
+  color: var(--text-strong);
+  border-color: var(--border-hover);
+}
+.settings-rightbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 #settings-dialog > footer { justify-content: flex-end; border-top: 0; border-bottom: 0; color: var(--text-dim); font-size: 11px; }
 
 @media (max-width: 560px) {
   #settings-overlay { padding: 10px; }
   .settings-section > label { grid-template-columns: minmax(90px, .8fr) minmax(0, 1.2fr); gap: 8px; }
+}
+
+/* ---------- 项目：项目行、分格标题条 ---------- */
+
+/* 项目行右侧的「＋新建会话」：常驻可见，是新建会话的唯一入口 */
+.proj-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.proj-add:hover {
+  background: var(--bg-chip);
+  color: var(--text-strong);
+}
+
+.proj-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.proj-row:hover {
+  background: var(--bg-hover);
+}
+
+.proj-row.active {
+  background: var(--bg-active);
+  color: var(--text-strong);
+}
+
+.proj-chevron {
+  flex: none;
+  width: 18px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.proj-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.proj-count {
+  flex: none;
+  min-width: 16px;
+  text-align: right;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.proj-frozen {
+  flex: none;
+  color: var(--accent-section);
+  font-size: 11px;
+}
+
+.proj-empty,
+.proj-child-empty {
+  padding: 8px 10px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.sess-row.child {
+  padding-left: 18px;
+}
+
+/* 项目格子：标题条 + 主体。只有标题条可拖动，终端区域留给 xterm 选区。 */
+.project-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 4px 0 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: grab;
+  user-select: none;
+}
+
+.pane-head:active {
+  cursor: grabbing;
+}
+
+/* 焦点格：方向键搬到冷格时也能看清焦点落在哪 */
+.project-pane.focused {
+  outline: 1px solid var(--accent-border);
+  outline-offset: -1px;
+}
+
+.project-pane.focused .pane-head {
+  color: var(--text-strong);
+  border-bottom-color: var(--accent-border);
+}
+
+.pane-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.pane-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+.pane-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane-body:empty::after {
+  content: "";
+}
+
+/* 分隔条：horizontal = 左右并排，分隔条是竖的 */
+.pane-divider {
+  flex: none;
+  background: var(--border-subtle);
+  touch-action: none;
+}
+
+.pane-divider.horizontal {
+  width: 5px;
+  cursor: col-resize;
+}
+
+.pane-divider.vertical {
+  height: 5px;
+  cursor: row-resize;
+}
+
+.pane-divider:hover {
+  background: var(--accent-border);
+}
+
+/* 冷格占位：灰显 + 一个明确的「重新拉起 / 连接」 */
+.pane-cold {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--bg-app);
+  color: var(--text-muted);
+  text-align: center;
+  padding: 12px;
+}
+
+.pane-cold-title {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.pane-cold-detail {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.pane-wake {
+  margin-top: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-link);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.pane-wake:hover {
+  background: var(--bg-hover);
+}
+
+/* 拖拽：整页进入拖拽态；目标格用半透明色块提示「会落在哪一侧」。 */
+body.pane-drag-active {
+  cursor: grabbing;
+  user-select: none;
+}
+
+body.pane-drag-active .pane-head {
+  cursor: grabbing;
+}
+
+.term-pane.drop-center {
+  outline: 2px solid var(--accent-border);
+  outline-offset: -2px;
+}
+
+/* 空项目：主区本身也是 profile 的落点 */
+#term-host.drop-center {
+  outline: 2px solid var(--accent-border);
+  outline-offset: -2px;
+}
+
+.term-pane.drop-left::after,
+.term-pane.drop-right::after,
+.term-pane.drop-top::after,
+.term-pane.drop-bottom::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  background: var(--accent-border);
+  opacity: .22;
+}
+
+.term-pane.drop-left::after {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+}
+
+.term-pane.drop-right::after {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+}
+
+.term-pane.drop-top::after {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 30%;
+}
+
+.term-pane.drop-bottom::after {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 30%;
+}
+
+.main-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.main-empty-title {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.main-empty-hint {
+  color: var(--text-faint);
+}
+
+.main-empty-action {
+  margin-top: 12px;
+  padding: 5px 16px;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  background: var(--bg-chip);
+  color: var(--text-strong);
+  font: inherit;
+  cursor: pointer;
+}
+
+.main-empty-action:hover {
+  border-color: var(--accent-strong);
+  color: var(--accent);
+}
+
+/* 项目设置浮层 */
+.project-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .42);
+}
+
+.project-overlay[hidden] {
+  display: none;
+}
+
+.project-dialog {
+  width: min(420px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
+}
+
+.project-dialog h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--text-strong);
+}
+
+.project-dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.project-dialog input {
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-app);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.project-stats {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.project-stats[hidden],
+.project-error:empty {
+  display: none;
+}
+
+.project-error {
+  color: var(--danger);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.project-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.project-actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.project-actions button.primary {
+  border-color: var(--accent-border);
+  color: var(--text-strong);
 }

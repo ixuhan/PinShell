@@ -1,6 +1,4 @@
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -28,8 +26,7 @@ import { setupShortcutsUi } from "./shortcutsUi";
 import { DRAGGING_CLASS } from "./resize";
 import { setupInputbarResize } from "./inputbarResize";
 import { setupSidebar } from "./sidebarUi";
-import { invertIds, pruneIds, selectAllIds, toggleId } from "./selection";
-import { setupSerialDialog, type SerialConfig } from "./serialUi";
+import { setupSessionDialog, type NewSessionRequest, type PlacementChoice, type TerminalProfile, type SerialConfig } from "./sessionDialogUi";
 import { mergeRuntimeStates, type RuntimeState } from "./runtimeState";
 import {
   DEFAULT_FONT_SIZE,
@@ -42,9 +39,16 @@ import { applyStaticI18n, initLocale, onLocaleChange, t } from "./i18n";
 import { closePopupMenu, showPopupMenu, type PopupItem, type PopupMenuHandle } from "./popupMenu";
 import { applyTheme, readTheme, xtermTheme } from "./theme";
 import { setupGlobalSettings } from "./globalSettingsUi";
-import { setupSerialPortsPanel } from "./serialPortsPanelUi";
+import { setupRightBar } from "./rightBarUi";
+import { setupSerialPortsPanel, type SerialPortsPanelHandle } from "./serialPortsPanelUi";
 import { setupSessionSettingsUi, type SessionSettings } from "./sessionSettingsUi";
 import { setupTitlebar } from "./titlebar";
+import { TerminalPool, type TerminalView } from "./terminalViews";
+import { clampRatio, neighborOf, paneList, type Direction, type PaneLayout } from "./layoutTree";
+import { isProjectOpenCurrent } from "./projectGuard";
+import { setupProjectDialog } from "./projectDialogUi";
+import { beginPaneDrag, type PaneDropInfo } from "./paneDragUi";
+import { decideDrop } from "./paneDrag";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -60,14 +64,10 @@ const ibHistory = document.getElementById("ib-history") as HTMLButtonElement;
 const ibOverride = document.getElementById("ib-override") as HTMLButtonElement;
 const ghostEl = document.getElementById("ib-ghost") as HTMLSpanElement;
 const sessList = document.getElementById("sess-list") as HTMLDivElement;
-const sessNew = document.getElementById("sess-new") as HTMLButtonElement;
-const sessSelect = document.getElementById("sess-select") as HTMLButtonElement;
-const sessBulk = document.getElementById("sess-bulk") as HTMLDivElement;
-const sessSelectAll = document.getElementById("sess-select-all") as HTMLButtonElement;
-const sessSelectInvert = document.getElementById("sess-select-invert") as HTMLButtonElement;
-const sessDeleteSelected = document.getElementById("sess-delete-selected") as HTMLButtonElement;
-const sessSelectDone = document.getElementById("sess-select-done") as HTMLButtonElement;
-const sessPanel = document.getElementById("sess-panel") as HTMLElement;
+const projNew = document.getElementById("proj-new") as HTMLButtonElement;
+const projCollapseAll = document.getElementById("proj-collapse-all") as HTMLButtonElement;
+const projExpandAll = document.getElementById("proj-expand-all") as HTMLButtonElement;
+const settingsOpenSidebar = document.getElementById("settings-open-sidebar") as HTMLButtonElement;
 const histOverlay = document.getElementById("hist-overlay") as HTMLDivElement;
 const histQuery = document.getElementById("hist-query") as HTMLInputElement;
 const histList = document.getElementById("hist-list") as HTMLDivElement;
@@ -160,63 +160,83 @@ document.addEventListener("contextmenu", (event) => {
 /// 能多看 5 倍历史。要更深就改这个数（上限变大只会多占内存，不会拖慢稳态吞吐）。
 const SCROLLBACK_LINES = 5000;
 
-const term = new Terminal({
+/// 视图池：每个会话一套 Terminal，焦点只是其中一个视图。
+/// 单例 `term` 在这里退役——分格、切焦点、冷格占位都靠池里的 id 取视图，
+/// 任何带 id 的函数都不许退回「读全局焦点终端」。
+const pool = new TerminalPool({
   fontFamily: TERMINAL_FONT_FAMILY,
   fontSize: DEFAULT_FONT_SIZE,
   lineHeight: 1.4,
   cursorBlink: TERMINAL_CURSOR_BLINK,
   scrollback: SCROLLBACK_LINES,
-  theme: xtermTheme(readTheme()),
-  allowProposedApi: true
+  theme: () => xtermTheme(readTheme()),
+  webglEnabled: TERMINAL_WEBGL,
+  onData: (id, data) => onViewData(id, data),
+  onBell: () => trace("BEL fired in xterm")
 });
 
-const fit = new FitAddon();
-term.loadAddon(fit);
-term.open(document.getElementById("term-host") as HTMLElement);
-fit.fit();
+/// 焦点终端的唯一出口。**从阶段 1 起就是可空**：空壳项目、冷格占位、
+/// 焦点会话还没挂上视图时都没有终端，调用方必须先判空。
+function focusTerm(): Terminal | null {
+  return focusSessionId ? pool.view(focusSessionId)?.term ?? null : null;
+}
 
-let webgl = false;
-let webglAddon: WebglAddon | null = null;
-function applyWebgl(enabled: boolean) {
-  if (enabled && !webglAddon) {
-    try {
-      webglAddon = new WebglAddon();
-      term.loadAddon(webglAddon);
-      webglAddon.onContextLoss(() => {
-        webglAddon?.dispose();
-        webglAddon = null;
-        webgl = false;
-      });
-      webgl = true;
-    } catch {
-      webglAddon?.dispose();
-      webglAddon = null;
-      webgl = false;
-    }
-  } else if (!enabled && webglAddon) {
-    webglAddon.dispose();
-    webglAddon = null;
-    webgl = false;
+/// 当前焦点视图。与 `focusTerm()` 同一口径，但分格容器与尺寸逻辑还要 `hostEl`/`fit`。
+function focusView(): TerminalView | null {
+  return focusSessionId ? pool.view(focusSessionId) : null;
+}
+
+/// 事件落在哪个格子上。分格之后右键复制、拖拽命中都要按节点找视图，不能看焦点。
+function viewAt(target: EventTarget | null): TerminalView | null {
+  if (!(target instanceof Node)) return null;
+  for (const view of pool.all()) {
+    if (view.hostEl.contains(target)) return view;
+  }
+  return null;
+}
+
+/// 让一个视图按当前格子尺寸重算行列，尺寸真变了才下发 PTY。
+/// 隐藏格不调它：`display:none` 下量到 0，会把错误的 cols/rows 发给 Shell。
+function fitView(view: TerminalView): void {
+  if (!view.visible || !view.hostEl.isConnected) return;
+  const before = `${view.term.cols}x${view.term.rows}`;
+  view.fit.fit();
+  const after = `${view.term.cols}x${view.term.rows}`;
+  if (before !== after) {
+    pendingResize.set(view.id, { cols: view.term.cols, rows: view.term.rows });
   }
 }
-applyWebgl(TERMINAL_WEBGL);
 
-/// 当前会话的字号。切会话时按该会话的设置换一次；会话设置里改完立即生效。
+/// 按会话设置设字号。分格模式下每个视图用自己会话的字号，不能只设焦点那一格。
+function applySessionFont(id: string) {
+  if (!pool.view(id)) return;
+  const size = clampFontSize(
+    tree.find((session) => session.id === id)?.settings.font_size ?? DEFAULT_FONT_SIZE
+  );
+  pool.setFontSize(id, size);
+}
+
+/// 当前会话的字号。会话设置里改完立即生效（预览值可能还没落盘）。
 function applyFontSize(size: number) {
+  const view = focusView();
+  if (!view) return;
   const next = clampFontSize(size);
-  if (term.options.fontSize === next) return;
-  term.options.fontSize = next;
+  if (view.fontSize === next) return;
+  pool.setFontSize(view.id, next);
   invalidateGhostMetrics();
-  fit.fit();
+  fitView(view);
   syncSize();
 }
 
 /// 主题变了：CSS 变量由 `applyTheme` 换，终端这边换 canvas 配色。
-/// 只改 `theme` 不会重绘已有内容，所以补一次整屏 refresh。
+/// 只改 `theme` 不会重绘已有内容，所以对每个可见视图各补一次整屏 refresh。
 function applyTermTheme() {
-  term.options.theme = xtermTheme(readTheme());
+  pool.applyTheme();
   invalidateGhostMetrics();
-  term.refresh(0, term.rows - 1);
+  for (const view of pool.all()) {
+    if (!view.visible) continue;
+    view.term.refresh(0, view.term.rows - 1);
+  }
 }
 
 /// 语言切换后重画本文件生成的动态文案。
@@ -229,25 +249,67 @@ function refreshChromeText() {
   renderBarStatus();
 }
 
+// 功能栏（右栏）先装配：它决定三个面板的可见性与顺序，全局设置要直接读写它。
+// 此时各面板还没恢复自己的折叠状态，`rb-fill` 会在它们的类名变化后被重算一次。
+const rightBar = setupRightBar({ layoutChanged: () => syncSize() });
+
 const globalSettings = setupGlobalSettings({
-  themeChanged: () => applyTermTheme()
+  themeChanged: () => applyTermTheme(),
+  rightBar
 });
 
 document.getElementById("settings-open")!.addEventListener("click", () => globalSettings.open());
+settingsOpenSidebar.addEventListener("click", () => globalSettings.open());
 
 onLocaleChange(() => refreshChromeText());
 
-let sessionId = "";
-let requestedSessionId = "";
-let sessionSwitchToken = 0;
-/// 文件面板的句柄：监听器可能先于 setup 收到事件，所以允许为空
+let focusSessionId = "";
+
+/// 按会话保存的轻量输入条状态。切焦点时先存后取；阶段 2 隐藏项目销毁视图后，
+/// 这些状态仍然留着，切回来重建视图时直接恢复（暂停/串口另有各自的事件源校正）。
+interface SessionUiState {
+  hex: boolean;
+  own: Ownership | null;
+  notice: string;
+  noticeIsError: boolean;
+}
+const sessionUi = new Map<string, SessionUiState>();
+
+function uiOf(id: string): SessionUiState {
+  let state = sessionUi.get(id);
+  if (!state) {
+    state = { hex: false, own: null, notice: "", noticeIsError: false };
+    sessionUi.set(id, state);
+  }
+  return state;
+}
+
+function saveFocusUi(id: string | null) {
+  if (!id) return;
+  const state = uiOf(id);
+  state.hex = hexMode;
+  state.own = own;
+  state.notice = notice;
+  state.noticeIsError = noticeIsError;
+}
+
+function loadFocusUi(id: string) {
+  const state = uiOf(id);
+  hexMode = state.hex;
+  own = state.own;
+  notice = state.notice;
+  noticeIsError = state.noticeIsError;
+}
+/// 功能栏的句柄：监听器可能先于 setup 收到事件，所以允许为空
 let filePanel: ReturnType<typeof setupFilePanel> | null = null;
-/// 左栏句柄：标题栏的折叠按钮要用它切换整栏收起
-let setupSidebarHandle: ReturnType<typeof setupSidebar> | null = null;
 let sessionSettingsUi: ReturnType<typeof setupSessionSettingsUi> | null = null;
 let shortcutsUi: ReturnType<typeof setupShortcutsUi> | null = null;
-/// 新建串口会话的对话框：按钮在装配前就可能被点到（理论上不会），所以允许为空
-let serialDialog: ReturnType<typeof setupSerialDialog> | null = null;
+/// 新建会话的弹窗：按钮在装配前就可能被点到（理论上不会），所以允许为空
+let sessionDialog: ReturnType<typeof setupSessionDialog> | null = null;
+/// 新建项目 / 项目设置的弹窗
+let projectDialog: ReturnType<typeof setupProjectDialog> | null = null;
+/// 串口列表面板：只用来推「当前焦点会话占着哪个口」的高亮
+let serialPortsPanel: SerialPortsPanelHandle | null = null;
 let benchTerm: Terminal | null = null;
 let benchScheduled = false;
 
@@ -291,10 +353,33 @@ interface ReplayPayload {
 
 // 附着协议：先拿回放快照，再把「附着期间到达的实时块」按 seq 去重补上。
 // seq 由后端会话内递增，前端只比大小，不做任何业务判断。
-let attachToken = 0;
-let attaching = false;
-let pending: { seq: number; data: string }[] = [];
-let lastSeq = 0;
+//
+// 这些状态以前是单例，现在必须按会话拆开：两格同时刷输出时，共用一个 lastSeq
+// 会让快的格子把慢的格子需要的块判成「已画过」直接丢掉。
+interface ViewOutput {
+  attaching: boolean;
+  pending: { seq: number; data: string }[];
+  lastSeq: number;
+  queue: OutChunk[];
+  /// 小于等于它的块属于「清屏前」：清屏后即使已经在路上、已经排队，也不再画。
+  floor: number;
+  timer?: number;
+}
+const viewOutput = new Map<string, ViewOutput>();
+
+function outputOf(id: string): ViewOutput {
+  let state = viewOutput.get(id);
+  if (!state) {
+    state = { attaching: false, pending: [], lastSeq: 0, queue: [], floor: 0 };
+    viewOutput.set(id, state);
+  }
+  return state;
+}
+
+/// 合并后的尺寸下发：一次 ResizeObserver 回调可能改到多个格子，
+/// 60ms 内只发一轮 `pty_resize`，避免拖动面板时每个格子各刷一次提示符。
+const pendingResize = new Map<string, { cols: number; rows: number }>();
+let resizeTimer: number | undefined;
 /// 每个会话「已经画到过的最大 seq」。终端查询只有画过才会被应答，
 /// 所以这个数就是「答到哪儿了」：附着时交给后端，画过的查询删掉、没画过的交回来。
 /// 页面重载会丢掉内存里的值，所以按会话存一份在 sessionStorage 里：重载后照样能分清
@@ -332,17 +417,13 @@ function noteAnswered(id: string, seq: number) {
 // 重载前把「答到哪儿」留给下一个自己
 window.addEventListener("pagehide", persistAnswered);
 
-function fitTerm() {
-  fit.fit();
-}
-
 /// xterm 6.0 + `@xterm/addon-webgl` 0.19 的一处缝隙：`term.reset()` 会清字形模型和顶点缓冲，
 /// 却不清 WebGL 渲染器里缓存的底色矩形；而 `updateBackgrounds()` 只在「模型里有单元格变了」
 /// 时才重算。于是切到一个空屏（回放为空、或清过屏的会话还没吐提示符）时，上一会话的选中底色
 /// 会原样留在画布上：屏幕空了，那几条蓝块还在，直到新会话吐出第一个字符把模型改回来。
 /// 这里按当前模型重算一次底色矩形就算修好：空模型只剩一条整屏底色，多余的老矩形随之丢掉。
 /// DOM 渲染器没有这层缓存（取不到 `_rectangleRenderer`），那时就什么都不做。
-function resyncBackgrounds() {
+function resyncBackgrounds(term: Terminal) {
   const renderer = (term as any)._core?._renderService?._renderer?.value;
   const rectangles = renderer?._rectangleRenderer?.value;
   const model = renderer?._model;
@@ -350,21 +431,31 @@ function resyncBackgrounds() {
   rectangles.updateBackgrounds(model);
 }
 
-/// 只把屏幕按回放重画一遍：不动输入草稿、不动历史缓存、不动覆盖层。
-/// 「暂停 → 继续」与切会话都用它；区别只在调用方是否先收拾上一个会话的状态。
-/// 返回 false 表示没画成（拉快照失败，或期间已经切到别的会话）。
+/// 只把某一个视图的屏幕按回放重画一遍：不动输入草稿、不动历史缓存、不动覆盖层。
+/// 「暂停 → 继续」、切会话、重建隐藏项目都用它。
+/// 返回 false 表示没画成（没有视图、拉快照失败，或期间该视图又被重建过）。
 ///
 /// **快照为空时不动屏幕**：清屏后回放本来就是空的，`reset` 会把 `clear` 特意留在
-/// 首行的提示符一起抹掉，留一块全黑的屏幕。切会话的调用方（`attach`）自己负责先把
-/// 上一个会话的画面清掉。
+/// 首行的提示符一起抹掉，留一块全黑的屏幕。
 async function resyncScreen(id: string): Promise<boolean> {
-  const token = ++attachToken;
-  attaching = true;
-  pending = [];
-  dropOutQueue();
+  const view = pool.view(id);
+  if (!view) return false;
+  // 每视图一个代次：快速 A→B→A 时，先发起的那次回放回来会发现自己过期了，直接丢弃。
+  const token = ++view.replayGen;
+  const out = outputOf(id);
+  // 一次回放是否还有资格改状态/写终端：代次、视图对象、这份输出状态三者都必须是
+  // 当初那一份。少任何一条，都可能把过期回放写进已销毁的 Terminal，或清掉新调用的
+  // `attaching` 让实时块绕过 pending。
+  const current = () =>
+    token === view.replayGen &&
+    pool.view(id) === view &&
+    viewOutput.get(id) === out;
+  out.attaching = true;
+  out.pending = [];
+  dropOutQueue(id);
   // 快照是新的权威屏幕，但「答到哪儿」仍然算数：小于等于它的块早画过（或被清屏丢掉了），
-  // 不能让它们再从在途事件里画一遍。清屏后重画（暂停继续、切走再回来）也靠这条线兜住。
-  outFloor = answered.get(id) ?? 0;
+  // 不能让它们再从在途事件里画一遍。
+  out.floor = answered.get(id) ?? 0;
 
   let snap: ReplayPayload;
   try {
@@ -379,95 +470,133 @@ async function resyncScreen(id: string): Promise<boolean> {
       );
     }
   } catch (err) {
-    attaching = false;
+    // 过期的那次失败不能清 attaching：新的 resync 可能正在等快照，
+    // 清了会让实时块绕过 pending 直接画上屏，随后又被新回放抹掉，永久丢一段。
+    if (current()) out.attaching = false;
     log(`挂回失败: ${String(err)}`);
     return false;
   }
-  if (token !== attachToken || sessionId !== id) {
-    attaching = false; // 附着途中又切走了
-    return false;
-  }
+  // 附着途中视图被重建、销毁或输出状态被替换：什么都不碰，attaching 归新的那次调用管
+  if (!current()) return false;
 
-  // 先把终端尺寸对准当前布局，再整屏回放。反过来的话（先写快照、再 fit）会触发一次重排，
-  // 底部提示符和滚动位置都会被推走：切回来看到的是被顶上去的一屏，实际输入却在缓冲区末尾。
-  fitTerm();
-  lastSeq = snap.seq;
+  // 先把终端尺寸对准当前格子，再整屏回放。反过来的话（先写快照、再 fit）会触发一次重排，
+  // 底部提示符和滚动位置都会被推走。
+  fitView(view);
+  out.lastSeq = snap.seq;
+  const term = view.term;
   if (snap.data) {
     // 快照会整屏重画：先复位，免得新内容叠在旧画面上（半屏重影）
     term.reset();
-    // 复位后视口可能还停在上一会话的滚动位置：先贴回底部并清掉「用户正在翻历史」的标记，
-    // 否则整段回放会从顶部开始铺，屏幕上看到的是历史的上半屏，而实际输入位置在缓冲区末尾。
+    // 复位后视口可能还停在上一会话的滚动位置：先贴回底部并清掉「用户正在翻历史」的标记
     term.scrollToBottom();
     term.write(snap.data, () => {
+      // 视图可能已经被销毁、又用同一个 id 建了新的（gen 都从 1 开始）：
+      // 只认当初那个视图对象与那份输出状态，别往已释放的 terminal 里写。
+      if (!current()) return;
       // 回放解析完再贴一次：解析期间或随后的 fit/reflow 都可能把视口带离底部。
-      if (token !== attachToken || sessionId !== id) return;
       term.scrollToBottom();
-      // WebGL 只重画「变脏」的行。整屏回放 + 重排之后强制刷一遍可见区，
-      // 免得画布还留着上一帧的行，看起来像整块内容被顶了上去（模型其实没错）。
+      // WebGL 只重画「变脏」的行。整屏回放 + 重排之后强制刷一遍可见区。
       term.refresh(0, term.rows - 1);
       // 底色矩形的缓存也要等解析完再按新模型重算：早一步算的是空屏/半屏。
-      resyncBackgrounds();
-      // 滚动条高度的变化（reset 后变矮、回放后又变高）是异步派发的，可能晚于这次解析；
-      // 再等一拍贴一次，避免它把视口又带回上面。
+      resyncBackgrounds(term);
+      // 滚动条高度的变化是异步派发的，可能晚于这次解析；再等一拍贴一次。
       window.setTimeout(() => {
-        if (token === attachToken && sessionId === id) term.scrollToBottom();
+        if (current()) term.scrollToBottom();
       }, 80);
     });
     // 这一份画过就等于答过：之后再附着，这部分查询交给后端删掉
     noteAnswered(id, snap.seq);
   } else {
-    // 空快照：attach 已经 reset 过，这里把视口贴回尾部（否则新输出会画在看不见的位置）
+    // 空快照：调用方已经 reset 过，这里把视口贴回尾部
     term.scrollToBottom();
   }
   if (snap.dropped_bytes > 0) {
     console.warn(`[replay] 超出上限丢掉了 ${snap.dropped_bytes} 字节`);
   }
 
-  attaching = false;
-  const queued = pending;
-  pending = [];
+  if (!current()) return false;
+  out.attaching = false;
+  const queued = out.pending;
+  out.pending = [];
   for (const chunk of queued) {
-    if (chunk.seq > lastSeq) {
-      lastSeq = chunk.seq;
+    if (chunk.seq > out.lastSeq) {
+      out.lastSeq = chunk.seq;
       noteFirstOutput();
-      queueOut(chunk.data, chunk.seq);
+      queueOut(id, chunk.data, chunk.seq);
     }
   }
 
-  fitTerm();
+  fitView(view);
   // 尺寸变化可能触发重排，最后再贴一次底，保证切回来/继续后停在最新一行
   term.scrollToBottom();
   // 空快照不会让模型发生变化，底色缓存得手动重算一次，否则旧矩形会一直画着
-  resyncBackgrounds();
-  // 尺寸变了就让 PTY 跟着变：每发一次 shell 就会收到一次 SIGWINCH、重画一次提示符，
-  // 满屏时那一次重画会在末尾留下空白行，所以这行 trace 是排查「切回来整屏上移」的抓手。
+  resyncBackgrounds(term);
+  // 尺寸变了就让 PTY 跟着变：每发一次 shell 就会收到一次 SIGWINCH、重画一次提示符。
+  // 这里立即下发当前尺寸，并取消 60ms 的批量发送：那一发是同一尺寸的重复请求，
+  // 会让首帧列宽抖一下。
   if (DEBUG) trace(`resize ${id.slice(0, 4)} ${term.cols}x${term.rows}`);
+  pendingResize.delete(id);
   void invoke("pty_resize", { id, cols: term.cols, rows: term.rows });
   return true;
 }
 
-async function attach(id: string) {
-  sessionId = id;
-  requestedSessionId = id;
+/// 销毁视图本身：卸载 WebGL、释放 Terminal、清掉这个会话的输出队列。
+/// **保留 `sessionUi`**：HEX 这类轻量状态要活过视图销毁与冻结。
+///
+/// 销毁前先解除显示暂停：离开会话/离开项目时运行时还活着，暂停标记留在后端会让
+/// 切回来的会话既没有实时输出、又得手动点继续。串口的「暂停」是物理断开，不能自动重连。
+function destroyView(id: string, options: { runtimeAlive?: boolean } = {}) {
+  const isSerial = tree.find((session) => session.id === id)?.transport === "serial";
+  const pausedNow = id === focusSessionId ? paused : pausedBySession.get(id) ?? false;
+  if (pausedNow) {
+    pausedBySession.set(id, false);
+    if (focusSessionId === id) paused = false;
+    if (options.runtimeAlive === true && !isSerial) {
+      void invoke("pty_set_paused", { id, paused: false }).catch(() => {});
+    }
+  }
+  pool.dispose(id);
+  viewOutput.delete(id);
+}
+
+/// 会话被移除时连它的输入条状态一起忘掉。
+/// 冻结**不能**走这条：节点还留着，HEX 之类的设置要活过视图销毁。
+function forgetSession(id: string) {
+  destroyView(id, { runtimeAlive: false });
+  sessionUi.delete(id);
+  pausedBySession.delete(id);
+  serialStatusBySession.delete(id);
+}
+
+/// 切焦点的界面状态：输入条形态、HEX、提示、历史缓存、文件面板。
+/// **不碰主区布局**：点侧栏会话只换焦点，不能把 2×2 清成单格。
+function setFocus(id: string) {
+  // 切走前把当前格子的输入条状态存进按会话的表；切回来时再取回
+  saveFocusUi(focusSessionId);
+  focusSessionId = id;
   filePanel?.selectSession(id);
   shortcutsUi?.selectSession(id);
-  lastSeq = 0;
-  pending = [];
-  attaching = false;
+
+  const meta = tree.find((session) => session.id === id);
   // 通道类型决定界面上哪些入口存在（串口没有补全、命令检索与备用屏）。
-  // 能力位由后端给（`pty_list` 的 `caps`），这里只按会话类型切换提示文案。
-  serialKind = tree.find((session) => session.id === id)?.transport === "serial";
-  // 字号跟着会话走：每个会话可以各自放大或缩小
-  applyFontSize(tree.find((session) => session.id === id)?.settings.font_size ?? DEFAULT_FONT_SIZE);
-  serialStatus = null;
-  hexMode = hexBySession.get(id) ?? false;
-  notice = "";
+  serialKind = meta?.transport === "serial";
+  // 字号跟着会话走：每个视图用自己会话的设置，不能只设焦点那一格
+  applySessionFont(id);
+  invalidateGhostMetrics();
+  loadFocusUi(id);
+  serialStatus = serialStatusBySession.get(id) ?? null;
   window.clearTimeout(noticeTimer);
+  if (notice) {
+    // 恢复的提示也要有寿命，不能一直挂在输入条上
+    noticeTimer = window.setTimeout(() => {
+      notice = "";
+      renderBarStatus();
+    }, 6000);
+  }
   ibHex.hidden = !serialKind;
   ibLog.hidden = !serialKind;
   // 「直通 / 接管」按钮对所有会话可见：cmd 这类没有提示符标记的会话永远停在「未知 ·
-  // 直通」，输入条被禁用，用户唯一的自救入口就是这个按钮（点一下锁接管）。之前只在
-  // 串口会话显示，cmd 会话看起来就是「输入框灰了、没地方点」。
+  // 直通」，输入条被禁用，用户唯一的自救入口就是这个按钮（点一下锁接管）。
   document.getElementById("ib-actions")!.hidden = false;
   ibHex.classList.toggle("on", hexMode);
   ibHex.disabled = false;
@@ -490,28 +619,46 @@ async function attach(id: string) {
   onHistoryChanged();
   ghostEl.textContent = "";
   currentGhost = "";
+}
 
-  // 上一个会话的画面也必须先清掉：新会话的回放可能是空的（冷会话刚拉起、或清过屏），
+/// 焦点会话的运行时收尾：归属、整屏回放、暂停/串口状态、历史与文件面板。
+/// 主区挂载由调用方负责（`mountProject` 挂整棵布局）。
+/// `replay = false` 用于「多格里只搬焦点」：布局刚由 mountProject 重建过，
+/// 再整屏重放一次只会白闪一帧。
+async function finishFocus(id: string, replay = true) {
+  // 冷格（串口默认就是冷的）没有运行时：不查归属/暂停/串口状态，
+  // 否则每个接口都回一条「no session」，还会把错误提示挂到输入条上。
+  if (!live.has(id)) {
+    own = null;
+    ib.disabled = true;
+    renderBarStatus();
+    renderSendAvailability();
+    return;
+  }
+  const view = pool.view(id);
+  // 这个视图可能是上次用过的：先把旧画面清掉。新会话的回放可能是空的，
   // `resyncScreen` 只在有内容可画时才复位，空快照就什么也不动。
-  term.reset();
-  // `reset` 只清字形，不清底色矩形缓存：空屏时没人再触发重算，上一会话的选中底色会留着
-  resyncBackgrounds();
+  if (view) {
+    if (replay) view.term.reset();
+    // `reset` 只清字形，不清底色矩形缓存：空屏时没人再触发重算，旧底色会留着
+    if (replay) resyncBackgrounds(view.term);
+  }
+  applySessionFont(id);
 
   // 输入条的形态决定终端有多高：直通模式下它收成 0 高，终端就多出几行。
-  // 这一步必须排在 fit + 回放**之前**——以前是回放完才 applyOwnership，于是 resyncScreen
-  // 按上一个会话的形态 fit（比如 31 行），回放完成后输入条才收起、高度变回 36 行，
-  // 期间给 PTY 连发了两次不同尺寸的 resize。shell 每收一次 SIGWINCH 就重画一次提示符，
-  // 满屏时就多出几行空白：切回来看到整屏被顶上去、底部空一块。
-  // 取不到归属不影响回放（按上一会话的形态画，后续 ownership 事件会纠正），所以失败只记日志。
+  // 这一步必须排在 fit + 回放**之前**——否则 resyncScreen 会按上一个会话的形态 fit，
+  // 回放完成后输入条才收起，期间给 PTY 连发两次不同尺寸的 resize。
   try {
     applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
   } catch (err) {
     log(`取归属失败: ${String(err)}`);
   }
-  if (sessionId !== id) return;
+  if (focusSessionId !== id) return;
 
-  const ok = await resyncScreen(id);
-  if (!ok || sessionId !== id) return;
+  if (view && replay) {
+    const ok = await resyncScreen(id);
+    if (!ok || focusSessionId !== id) return;
+  }
 
   if (serialKind) await syncSerial(id);
   else await syncPaused(id);
@@ -532,6 +679,93 @@ interface TreeSession {
   cwd: string | null;
   serial: SerialConfig | null;
   settings: SessionSettings;
+  /// 归属项目；项目是唯一容器，所以一定有值
+  owner: string;
+}
+
+interface ProjectNode {
+  id: string;
+  name: string;
+  root: string | null;
+  frozen: boolean;
+  layout: PaneLayout | null;
+}
+
+interface WorkspaceSnapshot {
+  sessions: TreeSession[];
+  projects: ProjectNode[];
+  suspended: string[];
+}
+
+interface SpawnPlacement {
+  project: string;
+  target: string | null;
+  placement: PlacementChoice;
+  ratio?: number;
+}
+
+const PROJECT_KEY = "pinshell.project";
+/// 项目行的展开状态：存 id 数组。没有这个键时按「全部展开」处理。
+const EXPANDED_KEY = "pinshell.projects.expanded";
+
+function readActiveProject(): string | null {
+  try {
+    return localStorage.getItem(PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function readExpanded(): Set<string> | null {
+  try {
+    const raw = localStorage.getItem(EXPANDED_KEY);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((id): id is string => typeof id === "string"))
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+let activeProjectId: string | null = readActiveProject();
+/// 每次切项目 +1。异步拉起回来时对不上就作废，避免旧项目的视图挂进当前主区。
+let projectOpenToken = 0;
+let projects: ProjectNode[] = [];
+/// 本次运行里被用户关掉的格：进项目时跳过，重启清空（后端持有，这里只是副本）
+let suspended = new Set<string>();
+/// 侧栏里展开过的项目。`null` 表示还没有存过：首次读到项目列表时全部展开。
+let expanded: Set<string> | null = readExpanded();
+
+function saveActiveProject() {
+  try {
+    if (activeProjectId) localStorage.setItem(PROJECT_KEY, activeProjectId);
+    else localStorage.removeItem(PROJECT_KEY);
+  } catch {
+    // 存不上不影响本次运行
+  }
+}
+
+function saveExpanded() {
+  if (!expanded) return;
+  try {
+    localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expanded]));
+  } catch {
+    // 同上
+  }
+}
+
+function isExpanded(projectId: string): boolean {
+  return expanded === null || expanded.has(projectId);
+}
+
+function currentProject(): ProjectNode | null {
+  return projects.find((project) => project.id === activeProjectId) ?? null;
+}
+
+function projectLeaves(project: ProjectNode | null): string[] {
+  return project?.layout ? paneList(project.layout) : [];
 }
 
 const pausedBySession = new Map<string, boolean>();
@@ -558,12 +792,33 @@ interface SerialStatus {
 async function refreshTree() {
   const revisions = new Map(pauseStateRevision);
   try {
-    const [sessions, lives, runtimeStates] = await Promise.all([
-      invoke<TreeSession[]>("session_tree"),
+    const [snapshot, lives, runtimeStates] = await Promise.all([
+      invoke<WorkspaceSnapshot>("workspace_snapshot"),
       invoke<SessionInfo[]>("pty_list"),
       invoke<RuntimeState[]>("session_runtime_states")
     ]);
-    tree = sessions;
+    tree = snapshot.sessions;
+    projects = snapshot.projects;
+    suspended = new Set(snapshot.suspended);
+    // 第一次读到项目列表时把所有项目标成展开；之后按用户的操作走
+    if (expanded === null) {
+      expanded = new Set(projects.map((project) => project.id));
+      saveExpanded();
+    } else {
+      // 已删除的项目不必继续占着展开记录
+      const known = new Set(projects.map((project) => project.id));
+      for (const id of [...expanded]) if (!known.has(id)) expanded.delete(id);
+    }
+    // 视图/会话被移除后，按会话存的轻量状态也要跟着清，否则替换、删项目会留下孤儿
+    const known = new Set(tree.map((session) => session.id));
+    for (const id of [...sessionUi.keys()]) {
+      if (!known.has(id)) sessionUi.delete(id);
+    }
+    // 记着的项目可能已被删除：这里只清空选择，切到哪个项目由 boot / 删除流程决定
+    if (activeProjectId && !projects.some((project) => project.id === activeProjectId)) {
+      activeProjectId = projects[0]?.id ?? null;
+      saveActiveProject();
+    }
     live = new Map(lives.map((s) => [s.id, s]));
     const merged = mergeRuntimeStates(
       { paused: pausedBySession, serial: serialStatusBySession },
@@ -588,84 +843,6 @@ let renaming: string | null = null;
 /// 免得隔很久再点那一下，手一滑就把会话删了。
 const DELETE_CONFIRM_MS = 5000;
 
-/// 会话列表的批量选择：进入后点行只勾选，不切换会话。
-/// 勾选只是 id 的集合，全选/反选/清理失效项都走 `selection.ts` 的纯函数。
-let sessSelectMode = false;
-let sessSelected = new Set<string>();
-/// 批量删除与单条删除一样要二次确认：第一次点只把按钮换成「确认删除（n）」，
-/// 5 秒内再点才真的删；改选或超时都会自动收回。
-let sessDeleteArmed = false;
-let sessDeleteArmTimer: number | undefined;
-
-function disarmSessDelete() {
-  sessDeleteArmed = false;
-  window.clearTimeout(sessDeleteArmTimer);
-  sessDeleteArmTimer = undefined;
-}
-
-/// 模式开关、复选框与删除按钮的文案都在这里统一刷，renderTree 每次重画都会调。
-function paintSessBulk() {
-  sessBulk.hidden = !sessSelectMode;
-  sessSelect.classList.toggle("on", sessSelectMode);
-  sessSelect.setAttribute("aria-pressed", String(sessSelectMode));
-  sessPanel.classList.toggle("selecting", sessSelectMode);
-  const n = sessSelected.size;
-  sessDeleteSelected.textContent = sessDeleteArmed
-    ? t("bulk.deleteConfirm", { n })
-    : t("bulk.deleteCount", { n });
-  sessDeleteSelected.disabled = n === 0;
-}
-
-function setSessSelectMode(on: boolean) {
-  if (sessSelectMode === on) {
-    paintSessBulk();
-    return;
-  }
-  sessSelectMode = on;
-  sessSelected = new Set();
-  disarmSessDelete();
-  if (on) {
-    closePopupMenu();
-    // 子栏收着时进入批量模式看不见列表：走标题栏的折叠开关把它展开
-    if (sessPanel.classList.contains("collapsed")) {
-      (document.getElementById("sess-toggle") as HTMLButtonElement).click();
-    }
-  }
-  renderTree();
-}
-
-function toggleSessSelected(id: string) {
-  sessSelected = toggleId(sessSelected, id);
-  disarmSessDelete();
-  renderTree();
-}
-
-/// 批量删除选中的会话。当前会话也在其中时才切走：和单条删除的收尾一致，
-/// 逐条删除，一条失败不影响其余（失败的只记日志）。
-async function deleteSelectedSessions() {
-  const ids = tree.filter((session) => sessSelected.has(session.id)).map((session) => session.id);
-  if (!ids.length) return;
-  const wasActive = ids.includes(sessionId);
-  for (const id of ids) {
-    try {
-      await invoke("pty_close", { id });
-    } catch (err) {
-      console.warn(`[delete] ${String(err)}`);
-    }
-  }
-  sessSelected = new Set();
-  disarmSessDelete();
-  await refreshTree();
-  if (wasActive) {
-    sessionId = "";
-    const next = tree[tree.length - 1];
-    if (next) await openSession(next.id);
-    else await newSession();
-  }
-  renderTree();
-}
-
-
 function showTerminalSelectionMenu(text: string, x: number, y: number) {
   showPopupMenu(
     { x, y },
@@ -683,10 +860,12 @@ function showTerminalSelectionMenu(text: string, x: number, y: number) {
 }
 
 document.getElementById("term-host")!.addEventListener("contextmenu", (event) => {
-  if (!term.hasSelection()) return;
+  // 右键落在哪个格子就复制哪个格子的选区：分格之后不能再看「焦点终端」
+  const view = viewAt(event.target);
+  if (!view || !view.term.hasSelection()) return;
   event.preventDefault();
   event.stopPropagation();
-  showTerminalSelectionMenu(term.getSelection(), event.clientX, event.clientY);
+  showTerminalSelectionMenu(view.term.getSelection(), event.clientX, event.clientY);
 });
 
 function openSessionSettings(session: TreeSession) {
@@ -700,10 +879,10 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
   const pausedNow = serial
     ? cachedStatus
       ? cachedStatus.paused || cachedStatus.status !== "open"
-      : session.id === sessionId
+      : session.id === focusSessionId
         ? !serialStatus || serialStatus.paused || serialStatus.status !== "open"
         : true
-    : session.id === sessionId ? paused : pausedBySession.get(session.id) ?? false;
+    : session.id === focusSessionId ? paused : pausedBySession.get(session.id) ?? false;
 
   const pauseLabel = (down: boolean) => serial
     ? (down ? t("session.connect") : t("session.disconnect"))
@@ -725,8 +904,8 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
     run: () => void clearScreenFor(session.id)
   };
 
-  const currentOverride = session.id === sessionId ? own?.override ?? "none" : "none";
-  const overridePending = isLive && session.id !== sessionId;
+  const currentOverride = session.id === focusSessionId ? own?.override ?? "none" : "none";
+  const overridePending = isLive && session.id !== focusSessionId;
   /// 点的时候再读：异步查到的所有权会改它
   let overrideMode: OverrideMode = currentOverride;
   const overrideItem: PopupItem = {
@@ -789,7 +968,7 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
         return "keep-open";
       }
       disarm();
-      void closeSession(session.id);
+      void removePane(session.id);
       return;
     }
   };
@@ -797,7 +976,7 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
   const items: PopupItem[] = [pauseItem, clearItem, overrideItem, renameItem, settingsItem, freezeItem, deleteItem];
 
   // 后台会话没有本地状态：向它问一次，回来再把标签改对
-  if (isLive && session.id !== sessionId) {
+  if (isLive && session.id !== focusSessionId) {
     const stateCommand = serial ? "serial_status" : "pty_paused";
     void invoke<boolean | SerialStatus>(stateCommand, { id: session.id }).then((state) => {
       if (!stillOpen()) return;
@@ -824,14 +1003,139 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
 
 function renderTree() {
   sessList.textContent = "";
-  // 树刷新后已经消失的会话不该继续占着勾选
-  sessSelected = pruneIds(sessSelected, tree.map((session) => session.id));
-  for (const session of tree) {
+  renderProjectRows();
+  paintProjectButtons();
+}
+
+/// 头部三个按钮的可用性：没有展开中的项目时「全部收起」禁用，
+/// 全部已展开时「全部展开」禁用。禁用而不是隐藏，位置保持稳定。
+function paintProjectButtons() {
+  const anyCollapsed = expanded !== null && projects.some((project) => !expanded!.has(project.id));
+  const anyExpanded = expanded === null || projects.some((project) => expanded!.has(project.id));
+  projCollapseAll.disabled = !anyExpanded;
+  projExpandAll.disabled = !anyCollapsed;
+}
+
+/// 项目行与展开后的会话行。会话行就是进入某一格的侧栏入口。
+function renderProjectRows() {
+  if (!projects.length) {
+    const empty = document.createElement("div");
+    empty.className = "proj-empty";
+    empty.textContent = t("project.empty");
+    sessList.append(empty);
+    return;
+  }
+  for (const project of projects) {
     const row = document.createElement("div");
-    row.className = "sess-row"
-      + ((requestedSessionId || sessionId) === session.id ? " active" : "")
-      + (sessSelectMode ? " selecting" : "")
-      + (sessSelectMode && sessSelected.has(session.id) ? " selected" : "");
+    row.className = "proj-row" + (project.id === activeProjectId ? " active" : "");
+    row.dataset.projectId = project.id;
+    row.title = project.root ?? project.name;
+
+    const chevron = document.createElement("button");
+    chevron.type = "button";
+    chevron.className = "proj-chevron";
+    chevron.textContent = isExpanded(project.id) ? "▾" : "▸";
+    chevron.setAttribute("aria-label", t("project.expand"));
+    chevron.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleProjectRow(project.id);
+    });
+
+    const name = document.createElement("span");
+    name.className = "proj-name";
+    name.textContent = project.name;
+
+    const count = document.createElement("span");
+    count.className = "proj-count";
+    count.textContent = String(projectLeaves(project).length);
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "proj-add";
+    add.textContent = "＋";
+    add.title = t("project.newSession");
+    add.setAttribute("aria-label", `${t("project.newSession")}: ${project.name}`);
+    add.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void openNewSessionDialog(project);
+    });
+
+    const menu = document.createElement("button");
+    menu.type = "button";
+    menu.className = "sess-menu-button";
+    menu.innerHTML = ROW_ICON.more;
+    // 三个点弹出的就是右键那套完整菜单（全部启动 / 项目设置 / 冻结 / 删除），
+    // 两个入口一份内容，不另做精简版
+    menu.title = t("project.menu");
+    menu.setAttribute("aria-label", `${t("project.menu")}: ${project.name}`);
+    menu.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const bounds = menu.getBoundingClientRect();
+      showProjectMenu(project, bounds.right, bounds.bottom);
+    });
+
+    row.append(chevron, name);
+    if (project.frozen) {
+      const frozen = document.createElement("span");
+      frozen.className = "proj-frozen";
+      frozen.textContent = "❄";
+      frozen.title = t("project.frozen");
+      row.append(frozen);
+    }
+    row.append(count, add, menu);
+    // 标题行的单击与双击都只做一件事：展开/收起这个项目。双击的第二下（detail > 1）
+    // 不再翻转，否则连点两下等于没点。点行顺带选中该项目，主区始终跟得上。
+    row.addEventListener("click", (event) => {
+      if (event.detail !== 1) return;
+      closePopupMenu();
+      if (activeProjectId !== project.id) void selectProject(project.id);
+      toggleProjectRow(project.id);
+    });
+    row.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showProjectMenu(project, event.clientX, event.clientY);
+    });
+    sessList.append(row);
+
+    if (!isExpanded(project.id)) continue;
+    const leaves = projectLeaves(project);
+    if (!leaves.length) {
+      const hint = document.createElement("div");
+      hint.className = "proj-child-empty";
+      hint.textContent = t("project.emptyShell");
+      sessList.append(hint);
+      continue;
+    }
+    for (const id of leaves) {
+      const session = tree.find((item) => item.id === id);
+      if (session) buildSessionRow(session);
+    }
+  }
+}
+
+/// 展开/收起单个项目。`expanded` 为 null 时先落成完整集合，再改这一项。
+function toggleProjectRow(projectId: string) {
+  if (expanded === null) expanded = new Set(projects.map((project) => project.id));
+  if (expanded.has(projectId)) expanded.delete(projectId);
+  else expanded.add(projectId);
+  saveExpanded();
+  renderTree();
+}
+
+function setAllProjectsExpanded(open: boolean) {
+  expanded = open ? new Set(projects.map((project) => project.id)) : new Set();
+  saveExpanded();
+  renderTree();
+}
+
+function buildSessionRow(session: TreeSession) {
+    const row = document.createElement("div");
+    row.className = "sess-row child" + (focusSessionId === session.id ? " active" : "");
     row.dataset.sessionId = session.id;
     const detail = session.transport === "serial" && session.serial
       ? `${t("sidebar.serial")} ${session.serial.port} · ${session.serial.baud}`
@@ -942,32 +1246,12 @@ function renderTree() {
     row.append(dot, name);
     if (detailEl) row.append(detailEl);
     row.append(state, menuButton);
-    if (sessSelectMode) {
-      const check = document.createElement("input");
-      check.type = "checkbox";
-      check.className = "sess-check";
-      check.checked = sessSelected.has(session.id);
-      check.tabIndex = -1;
-      check.setAttribute("aria-label", session.title);
-      // 勾选交给复选框自己：点它不要冒泡成「点行」，否则一次点击勾两次
-      check.addEventListener("click", (event) => event.stopPropagation());
-      check.addEventListener("change", () => toggleSessSelected(session.id));
-      row.prepend(check);
-    }
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      // 批量选择时不弹单条会话菜单：这一行现在代表的是「勾选」
-      if (!sessSelectMode) showSessionMenu(session, e.clientX, e.clientY);
+      showSessionMenu(session, e.clientX, e.clientY);
     });
     row.addEventListener("click", (e) => {
-      if (sessSelectMode) {
-        // 双击的第二下不再勾选，否则连点两下等于没点
-        if (e.detail > 1) return;
-        e.preventDefault();
-        toggleSessSelected(session.id);
-        return;
-      }
       closePopupMenu();
       const clicks = e.detail;
       if (clicks > 1) {
@@ -977,15 +1261,804 @@ function renderTree() {
         }
         return; // 双击名称仍交给上面的重命名处理器；会话行双击切换状态
       }
-      void openSession(session.id);
+      void focusProjectPane(session.id);
     });
     sessList.append(row);
-  }
-  paintSessBulk();
 }
 
-function markSessionActivity(id: string) {
-  const session = tree.find((item) => item.id === id);
+// ---------- 项目：选择、主区分格、落点、关闭/移除 ----------
+
+function projectStats(project: ProjectNode): { terminal: number; serial: number } {
+  let terminal = 0;
+  let serial = 0;
+  for (const id of projectLeaves(project)) {
+    const meta = tree.find((session) => session.id === id);
+    if (meta?.transport === "serial") serial += 1;
+    else terminal += 1;
+  }
+  return { terminal, serial };
+}
+
+/// 选一个项目：记住选择、确保展开、确保主区按它的布局挂好。
+async function selectProject(id: string) {
+  const project = projects.find((item) => item.id === id);
+  if (!project) return;
+  activeProjectId = id;
+  if (expanded === null) expanded = new Set(projects.map((item) => item.id));
+  expanded.add(id);
+  saveExpanded();
+  saveActiveProject();
+  const token = ++projectOpenToken;
+  const leaves = projectLeaves(project);
+  // 焦点：记得的那一格还在布局里就沿用，否则挑第一格（跳过本次运行关掉的）
+  if (!focusSessionId || !leaves.includes(focusSessionId)) {
+    focusSessionId = leaves.find((sid) => !suspended.has(sid)) ?? leaves[0] ?? "";
+  }
+  renderTree();
+  await openProject(project, token);
+}
+
+/// 打开项目：终端格全部拉起（冻结项目与 suspended 的除外），串口保持冷；
+/// 然后把整棵布局挂到主区并恢复焦点。
+///
+/// 拉起是异步的：每过一个 await 都要确认「还停在同一个项目」。
+/// 否则用户在拉起完成前切走，旧回调会把旧项目的视图挂进当前主区、或抢走焦点。
+async function openProject(project: ProjectNode, token: number) {
+  const stillCurrent = () =>
+    isProjectOpenCurrent(token, projectOpenToken, activeProjectId, project.id);
+  if (!project.frozen) {
+    for (const id of projectLeaves(project)) {
+      if (!stillCurrent()) return;
+      if (suspended.has(id)) continue;
+      const meta = tree.find((session) => session.id === id);
+      if (!meta || meta.transport !== "terminal" || live.has(id)) continue;
+      try {
+        await spawn(id, meta.cwd, meta.shell, {
+          project: project.id,
+          target: null,
+          placement: "fill"
+        });
+      } catch (err) {
+        console.warn(`[project] warm ${id.slice(0, 8)}: ${String(err)}`);
+      }
+    }
+    if (!stillCurrent()) return;
+    await refreshTree();
+    if (!stillCurrent()) return;
+  }
+  if (focusSessionId) setFocus(focusSessionId);
+  mountProject(project);
+  if (focusSessionId) await finishFocus(focusSessionId, false);
+  if (!stillCurrent()) return;
+  renderTree();
+}
+
+/// 离开项目/切项目/布局变化时重建主区。**按差集销毁**：不在新布局里的视图才销毁，
+/// 仍留在项目里的格子只搬 hostEl——拖 A 到 B 旁边时 C、D 不该整屏重放或闪一下。
+function mountProject(project: ProjectNode) {
+  const layoutIds = new Set(project.layout ? paneList(project.layout) : []);
+  // 记下仍会保留的视图的文本选区：搬 DOM 之后原样恢复，拖动布局不该把选中的文本弄丢
+  const selections = new Map<string, { x: number; y: number; length: number }>();
+  for (const view of pool.all()) {
+    if (!layoutIds.has(view.id)) {
+      destroyView(view.id, { runtimeAlive: true });
+      continue;
+    }
+    const position = view.term.getSelectionPosition();
+    if (position) {
+      selections.set(view.id, {
+        x: position.start.x,
+        y: position.start.y,
+        length: view.term.getSelection().length
+      });
+    }
+  }
+
+  const host = document.getElementById("term-host") as HTMLElement;
+  host.textContent = "";
+  if (!project.layout) {
+    host.append(emptyProjectState(project));
+    return;
+  }
+  host.append(buildProjectNode(project.layout, []));
+
+  const replays: string[] = [];
+  for (const body of host.querySelectorAll<HTMLElement>(".pane-body[data-session]")) {
+    const id = body.dataset.session ?? "";
+    const meta = tree.find((session) => session.id === id);
+    if (live.has(id)) {
+      const existing = pool.view(id);
+      if (existing?.visible) {
+        pool.attach(id, body, true);
+        applySessionFont(id);
+      } else {
+        // 新建或从不可见变可见：先挂上、按会话设字号，再放行可见并按回放重建
+        pool.attach(id, body, false);
+        applySessionFont(id);
+        pool.setVisible(id, true);
+        replays.push(id);
+      }
+    } else {
+      // 冷格：有残留视图就销毁，再显示占位
+      if (pool.view(id)) destroyView(id, { runtimeAlive: false });
+      body.append(coldPlaceholder(project, id, meta));
+    }
+  }
+  for (const view of pool.all()) {
+    if (view.visible) fitView(view);
+  }
+  flushResize();
+  for (const id of replays) void resyncScreen(id);
+  // 只恢复保留下来的视图的选区；新回放/新视图没有选区可恢复
+  for (const [id, selection] of selections) {
+    if (replays.includes(id)) continue;
+    const view = pool.view(id);
+    if (view) view.term.select(selection.x, selection.y, selection.length);
+  }
+}
+
+function emptyProjectState(project: ProjectNode): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "main-empty";
+  const title = document.createElement("div");
+  title.className = "main-empty-title";
+  title.textContent = project.name;
+  const hint = document.createElement("div");
+  hint.className = "main-empty-hint";
+  hint.textContent = t("project.emptyShell");
+  const create = document.createElement("button");
+  create.type = "button";
+  create.className = "main-empty-action";
+  create.textContent = t("project.newSession");
+  create.addEventListener("click", () => void openNewSessionDialog(project));
+  box.append(title, hint, create);
+  return box;
+}
+
+/// 一个项目都没有：主区给说明与唯一的动作（新建项目）。
+function emptyWorkspaceState(): HTMLElement {
+  for (const view of pool.all()) destroyView(view.id, { runtimeAlive: true });
+  const host = document.getElementById("term-host") as HTMLElement;
+  host.textContent = "";
+  const box = document.createElement("div");
+  box.className = "main-empty";
+  const title = document.createElement("div");
+  title.className = "main-empty-title";
+  title.textContent = t("project.empty");
+  const create = document.createElement("button");
+  create.type = "button";
+  create.className = "main-empty-action";
+  create.textContent = t("project.new");
+  create.addEventListener("click", () => projectDialog?.openCreate());
+  box.append(title, create);
+  host.append(box);
+  return box;
+}
+
+function buildProjectNode(node: PaneLayout, path: boolean[]): HTMLElement {
+  if (node.kind === "leaf") return buildProjectPane(node.session);
+  const split = document.createElement("div");
+  split.className = `term-split ${node.axis}`;
+  const first = buildProjectNode(node.first, [...path, false]);
+  const second = buildProjectNode(node.second, [...path, true]);
+  first.style.flex = `${node.ratio} 1 0`;
+  second.style.flex = `${1 - node.ratio} 1 0`;
+  const divider = document.createElement("div");
+  divider.className = `pane-divider ${node.axis}`;
+  divider.title = t("pane.resize");
+  setupDivider(divider, split, first, second, node.axis, node.ratio, path);
+  split.append(first, divider, second);
+  return split;
+}
+
+/// 一个项目格子：可拖的标题条 + 关闭按钮 + 终端/占位主体。
+/// 只有标题条能发起拖动，终端区域留给 xterm 自己处理选区。
+function buildProjectPane(id: string): HTMLElement {
+  const meta = tree.find((session) => session.id === id);
+  const pane = document.createElement("div");
+  pane.className = "term-pane project-pane";
+  pane.dataset.session = id;
+  // 焦点格用边框标出来：方向键把焦点搬到冷格时也要看得见焦点在哪
+  pane.classList.toggle("focused", focusSessionId === id);
+
+  const head = document.createElement("div");
+  head.className = "pane-head";
+  const title = document.createElement("span");
+  title.className = "pane-title";
+  title.textContent = meta?.title ?? id.slice(0, 8);
+  title.title = meta ? `${meta.title} · ${id.slice(0, 8)}` : id;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "pane-close";
+  close.textContent = "×";
+  close.title = t("pane.close");
+  close.addEventListener("mousedown", (event) => event.preventDefault());
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void closePane(id);
+  });
+  head.append(title, close);
+  head.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(".pane-close")) return;
+    void focusProjectPane(id);
+  });
+  // 只有标题条能发起拖动：终端区域的拖动要留给 xterm 选区
+  head.addEventListener("pointerdown", (event) => {
+    if ((event.target as HTMLElement).closest(".pane-close")) return;
+    beginPaneDrag(
+      event,
+      { session: id },
+      {
+        activate: () => closePopupMenu(),
+        drop: (info) => handlePaneDrop(info),
+        cancel: () => {}
+      }
+    );
+  });
+
+  const body = document.createElement("div");
+  body.className = "pane-body";
+  body.dataset.session = id;
+  pane.append(head, body);
+
+  pane.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showPaneMenu(id, event.clientX, event.clientY);
+  });
+  return pane;
+}
+
+/// 分隔条拖动：只改 flex，松手才 fit 一次并落盘比例。
+function setupDivider(
+  divider: HTMLElement,
+  container: HTMLElement,
+  first: HTMLElement,
+  second: HTMLElement,
+  axis: "horizontal" | "vertical",
+  ratio: number,
+  path: boolean[]
+) {
+  divider.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    divider.setPointerCapture(event.pointerId);
+    document.body.classList.add(DRAGGING_CLASS);
+    const rect = container.getBoundingClientRect();
+    const total = axis === "horizontal" ? rect.width : rect.height;
+    let next = ratio;
+    const move = (ev: PointerEvent) => {
+      if (total <= 0) return;
+      const position = axis === "horizontal" ? ev.clientX - rect.left : ev.clientY - rect.top;
+      next = clampRatio(position / total);
+      first.style.flex = `${next} 1 0`;
+      second.style.flex = `${1 - next} 1 0`;
+    };
+    const finish = async () => {
+      window.removeEventListener("pointermove", move);
+      document.body.classList.remove(DRAGGING_CLASS);
+      const project = currentProject();
+      if (project) updateRatio(project.layout, path, next);
+      scheduleFit();
+      if (!project) return;
+      try {
+        await invoke("project_set_split_ratio", {
+          id: project.id,
+          path,
+          ratio: next
+        });
+      } catch (err) {
+        console.warn(`[project] ratio: ${String(err)}`);
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", () => void finish(), { once: true });
+    window.addEventListener("pointercancel", () => void finish(), { once: true });
+  });
+}
+
+/// 内存里的布局比例也一起改：下次重挂主区不该弹回旧值。
+function updateRatio(layout: PaneLayout | null, path: boolean[], ratio: number) {
+  if (!layout || layout.kind === "leaf") return;
+  if (!path.length) {
+    layout.ratio = ratio;
+    return;
+  }
+  updateRatio(path[0] ? layout.second : layout.first, path.slice(1), ratio);
+}
+
+/// 冷格占位：终端可以「重新拉起」，串口只能「连接」（不自动开端口）。
+function coldPlaceholder(
+  project: ProjectNode,
+  id: string,
+  meta: TreeSession | undefined
+): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "pane-cold";
+  const title = document.createElement("div");
+  title.className = "pane-cold-title";
+  title.textContent = meta?.title ?? id.slice(0, 8);
+  const detail = document.createElement("div");
+  detail.className = "pane-cold-detail";
+  if (meta?.transport === "serial" && meta.serial) {
+    detail.textContent = `${meta.serial.port} · ${meta.serial.baud} 8N1`;
+  } else {
+    detail.textContent = suspended.has(id) ? t("pane.suspended") : project.frozen ? t("project.frozen") : t("pane.cold");
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "pane-wake";
+  button.textContent =
+    meta?.transport === "serial" ? t("pane.connect") : t("pane.wake");
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void wakePane(id);
+  });
+  box.append(title, detail, button);
+  return box;
+}
+
+/// 拉起一个冷格：终端走冷会话重开，串口按记住的配置连（还是冷格就 spawn）。
+async function wakePane(id: string) {
+  const meta = tree.find((session) => session.id === id);
+  if (!meta) return;
+  try {
+    if (meta.transport === "serial") {
+      if (live.has(id)) await invoke("serial_connect", { id });
+      else if (meta.serial) {
+        await invoke("spawn_serial_session", {
+          config: meta.serial,
+          sessionId: id,
+          project: meta.owner,
+          target: null,
+          placement: "fill",
+          ratio: null,
+          title: null
+        });
+      } else {
+        throw new Error(t("pane.noSerialConfig"));
+      }
+    } else {
+      // 带上归属：后端据此判断「冻结项目里点醒一格」，解除冻结并把其余冷格
+      // 记进本次运行的 suspended。placement 对已有会话不生效。
+      await spawn(id, meta.cwd, meta.shell, {
+        project: meta.owner,
+        target: null,
+        placement: "fill"
+      });
+    }
+    suspended.delete(id);
+    await refreshTree();
+    const project = currentProject();
+    if (project) mountProject(project);
+    await focusProjectPane(id);
+  } catch (err) {
+    showNotice(spawnErrorText(err), true, 8000);
+  }
+}
+
+/// 焦点格的边框跟着 focusSessionId 走。只切 class，不重挂布局。
+function paintProjectFocus() {
+  for (const pane of document.querySelectorAll<HTMLElement>(".project-pane")) {
+    pane.classList.toggle("focused", pane.dataset.session === focusSessionId);
+  }
+}
+
+/// 焦点搬到某一格：不重挂布局，只更新输入条/归属/历史/面板。
+async function focusProjectPane(id: string) {
+  if (!id) return;
+  if (focusSessionId === id) {
+    pool.focus(id);
+    paintProjectFocus();
+    return;
+  }
+  setFocus(id);
+  renderTree();
+  paintProjectFocus();
+  if (pool.view(id)) {
+    await finishFocus(id, false);
+  } else {
+    // 冷格没有运行时：输入条禁用，等用户点「重新拉起 / 连接」
+    own = null;
+    ib.disabled = true;
+    renderBarStatus();
+    renderSendAvailability();
+  }
+}
+
+/// 只把某一格换成冷占位，不重挂整棵树：关格后另外几格的位置、尺寸与画面都不动。
+function markPaneCold(id: string) {
+  const body = document.querySelector<HTMLElement>(
+    `.pane-body[data-session="${CSS.escape(id)}"]`
+  );
+  if (!body) return;
+  const project = currentProject();
+  if (!project) return;
+  body.textContent = "";
+  body.append(coldPlaceholder(project, id, tree.find((session) => session.id === id)));
+}
+
+/// Ctrl+Alt+方向键的键位映射。H/J/K/L 是给 Intel 驱动占用方向键时的退路。
+function directionOfKey(event: KeyboardEvent): Direction | null {
+  switch (event.code) {
+    case "ArrowLeft":
+    case "KeyH":
+      return "left";
+    case "ArrowRight":
+    case "KeyL":
+      return "right";
+    case "ArrowUp":
+    case "KeyK":
+      return "up";
+    case "ArrowDown":
+    case "KeyJ":
+      return "down";
+    default:
+      return null;
+  }
+}
+
+/// 按几何最近邻搬焦点；边界方向没有邻格时什么都不做。
+async function moveFocusDirection(direction: Direction) {
+  const project = currentProject();
+  if (!project?.layout || !focusSessionId) return;
+  const next = neighborOf(project.layout, focusSessionId, direction);
+  if (!next) return;
+  await focusProjectPane(next);
+  pool.focus(next);
+}
+
+/// 关格 = 冻结：保留节点、布局、历史与快照，本次运行不再自动拉起这一格。
+async function closePane(id: string) {
+  try {
+    await invoke("pty_freeze", { id });
+  } catch (err) {
+    showNotice(String(err), true);
+    return;
+  }
+  suspended.add(id);
+  destroyView(id, { runtimeAlive: false });
+  await refreshTree();
+  // 只换这一格：重挂整棵树会让另外三格整屏重放，位置虽不动但会白闪
+  markPaneCold(id);
+  renderTree();
+  if (focusSessionId === id) {
+    own = null;
+    ib.disabled = true;
+    renderBarStatus();
+    renderSendAvailability();
+  }
+}
+
+/// 移除一格：销毁会话、历史与快照，布局折叠。右键菜单里要二次确认。
+async function removePane(id: string) {
+  try {
+    await invoke("pty_close", { id });
+  } catch (err) {
+    showNotice(String(err), true);
+    return;
+  }
+  forgetSession(id);
+  await refreshTree();
+  const project = currentProject();
+  if (focusSessionId === id) {
+    focusSessionId = projectLeaves(project).find((sid) => sid !== id) ?? "";
+  }
+  renderTree();
+  if (project) mountProject(project);
+  if (focusSessionId) await focusProjectPane(focusSessionId);
+}
+
+function showPaneMenu(id: string, x: number, y: number) {
+  let armed = false;
+  let handle: PopupMenuHandle | null = null;
+  const removeItem: PopupItem = {
+    label: t("pane.remove"),
+    danger: true,
+    run: () => {
+      if (!armed) {
+        armed = true;
+        removeItem.label = t("pane.removeConfirm");
+        handle?.repaint();
+        return "keep-open";
+      }
+      void removePane(id);
+      return;
+    }
+  };
+  handle = showPopupMenu(
+    { x, y },
+    [{ label: t("pane.close"), run: () => void closePane(id) }, removeItem],
+    { minWidth: 180 }
+  );
+}
+
+/// 拖拽落点：交换 / 在边缘切一格。拖到任何格子之外不会走到这里（paneDragUi 已当回弹）。
+function handlePaneDrop(info: PaneDropInfo) {
+  const project = currentProject();
+  if (!project) return;
+  const decision = decideDrop(info.zone, info.payload.session, info.target);
+  if (decision.action === "swap") {
+    void swapProjectPanes(info.payload.session, info.target);
+    return;
+  }
+  if (decision.action === "split" && decision.side) {
+    void moveProjectPane(info.payload.session, info.target, decision.side);
+  }
+}
+
+/// 项目里的布局错误对人话：3 层上限要提示「先合并两格」，而不是静静失败。
+function paneErrorText(err: unknown): string {
+  const text = String(err);
+  // 后端移动格返回 TooDeep；spawn 的落点预检返回英文的 depth 描述，两种都要翻
+  return text.includes("TooDeep") || text.toLowerCase().includes("depth")
+    ? t("pane.tooDeep")
+    : text;
+}
+
+async function moveProjectPane(
+  session: string,
+  target: string,
+  side: "left" | "right" | "top" | "bottom"
+) {
+  const project = currentProject();
+  if (!project) return;
+  try {
+    const changed = await invoke<boolean>("project_move_pane", {
+      id: project.id,
+      session,
+      target,
+      side,
+      ratio: 0.5
+    });
+    if (!changed) return;
+  } catch (err) {
+    showNotice(paneErrorText(err), true, 8000);
+    return;
+  }
+  await refreshTree();
+  const current = currentProject();
+  if (current) mountProject(current);
+  renderTree();
+  if (focusSessionId) await focusProjectPane(focusSessionId);
+}
+
+async function swapProjectPanes(a: string, b: string) {
+  const project = currentProject();
+  if (!project || a === b) return;
+  try {
+    await invoke("project_swap_panes", { id: project.id, a, b });
+  } catch (err) {
+    showNotice(String(err), true, 8000);
+    return;
+  }
+  await refreshTree();
+  const current = currentProject();
+  if (current) mountProject(current);
+  renderTree();
+  if (focusSessionId) await focusProjectPane(focusSessionId);
+}
+
+function showProjectMenu(project: ProjectNode, x: number, y: number) {
+  let armed = false;
+  let handle: PopupMenuHandle | null = null;
+  const deleteItem: PopupItem = {
+    label: t("project.delete"),
+    danger: true,
+    run: () => {
+      if (!armed) {
+        armed = true;
+        deleteItem.label = t("project.deleteConfirm");
+        handle?.repaint();
+        return "keep-open";
+      }
+      void deleteProject(project.id);
+      return;
+    }
+  };
+  handle = showPopupMenu(
+    { x, y },
+    [
+      { label: t("project.startAll"), disabled: !project.layout, run: () => void startProject(project.id) },
+      { label: t("project.settings"), run: () => projectDialog?.openSettings(project) },
+      { label: t("project.freeze"), disabled: !project.layout, run: () => void freezeProject(project.id) },
+      deleteItem
+    ],
+    { minWidth: 190 }
+  );
+}
+
+/// 冻结项目：结束全部运行时、写快照、保留布局与记录。
+/// 视图立即销毁（运行时已经没了），但 `sessionUi` 保留——HEX 之类的设置下次还在。
+async function freezeProject(id: string) {
+  // 冻结会让所有正在进行的异步拉起/启动作废，避免旧循环继续往后开进程
+  projectOpenToken += 1;
+  try {
+    await invoke("project_freeze", { id });
+  } catch (err) {
+    showNotice(String(err), true);
+    return;
+  }
+  const before = projects.find((project) => project.id === id) ?? null;
+  // 只销毁这个项目的视图；项目 A 的视图与主区不在这个列表里
+  for (const leaf of projectLeaves(before)) {
+    destroyView(leaf, { runtimeAlive: false });
+  }
+  await refreshTree();
+  renderTree();
+  // 只有冻结的是当前查看的项目，才动主区与输入条；否则仅刷新侧栏状态
+  if (activeProjectId !== id) return;
+  const project = currentProject();
+  if (project) mountProject(project);
+  // 冻结后焦点格也是冷的：输入条没有可发送的对象
+  own = null;
+  ib.disabled = true;
+  renderBarStatus();
+  renderSendAvailability();
+}
+
+/// 「全部启动」：只拉起终端格，串口保持冷；同时清掉本次运行对该项目的 suspended。
+async function startProject(id: string) {
+  // 共用 projectOpenToken：不主动递增（免得取消另一个项目正在进行的打开），
+  // 但切项目/冻结/删除会让它变化，旧循环在下一个 await 后自己停下。
+  const token = projectOpenToken;
+  let leaves: string[] = [];
+  try {
+    leaves = await invoke<string[]>("project_start_all", { id });
+  } catch (err) {
+    showNotice(String(err), true);
+    return;
+  }
+  if (token !== projectOpenToken) return;
+  await refreshTree();
+  if (token !== projectOpenToken) return;
+  const project = projects.find((item) => item.id === id);
+  if (!project) return;
+  for (const sid of leaves) {
+    if (token !== projectOpenToken) return;
+    // 后端已经过滤过活着的格；这里再挡一次，避免前端 live 快照过期导致重复 spawn
+    if (live.has(sid)) continue;
+    const meta = tree.find((session) => session.id === sid);
+    if (!meta) continue;
+    try {
+      await spawn(sid, meta.cwd, meta.shell, {
+        project: id,
+        target: null,
+        placement: "fill"
+      });
+    } catch (err) {
+      console.warn(`[project] start ${sid.slice(0, 8)}: ${String(err)}`);
+    }
+  }
+  await refreshTree();
+  if (token !== projectOpenToken) return;
+  // 非当前项目只在后台拉起进程：不挂主区、不动焦点
+  if (activeProjectId !== id) return;
+  const current = currentProject();
+  if (!current) return;
+  focusSessionId = leaves.find((sid) => live.has(sid)) ?? focusSessionId;
+  if (focusSessionId) {
+    setFocus(focusSessionId);
+    mountProject(current);
+    await finishFocus(focusSessionId, false);
+  } else {
+    mountProject(current);
+  }
+  renderTree();
+}
+
+async function deleteProject(id: string) {
+  // 删项目同样会让正在进行的异步拉起/启动作废
+  projectOpenToken += 1;
+  let removed: string[] = [];
+  try {
+    removed = await invoke<string[]>("project_delete", { id });
+  } catch (err) {
+    showNotice(String(err), true);
+    return;
+  }
+  for (const session of removed) forgetSession(session);
+  const wasActive = activeProjectId === id;
+  const next = wasActive ? projects.find((project) => project.id !== id) ?? null : null;
+  if (wasActive) {
+    activeProjectId = next?.id ?? null;
+    focusSessionId = "";
+    saveActiveProject();
+  }
+  if (expanded) expanded.delete(id);
+  saveExpanded();
+  await refreshTree();
+  renderTree();
+  if (activeProjectId) {
+    const project = currentProject();
+    if (project) await selectProject(project.id);
+  } else {
+    emptyWorkspaceState();
+  }
+}
+
+/// 结构化错误 → 人话。串口占用要带上「哪个项目的哪个会话」。
+function spawnErrorText(err: unknown): string {
+  if (err && typeof err === "object" && "kind" in err) {
+    const detail = err as {
+      kind: string;
+      port?: string;
+      project?: string;
+      session?: string;
+      message?: string;
+    };
+    if (detail.kind === "port_busy") {
+      return t("project.portBusy", {
+        port: detail.port ?? "",
+        session: detail.session ?? "",
+        project: detail.project ?? ""
+      });
+    }
+    if (detail.kind === "message" && detail.message) return detail.message;
+  }
+  return typeof err === "string" ? err : String(err);
+}
+
+/// 落点 → 目标格。`fill` 用于空项目（target 必须为空）；其余落点贴着焦点格。
+function placementTarget(project: ProjectNode, choice: PlacementChoice): string | null {
+  if (choice === "fill") return null;
+  const leaves = projectLeaves(project);
+  return leaves.includes(focusSessionId) ? focusSessionId : leaves[0] ?? null;
+}
+
+/// 打开新建会话弹窗：先切到目标项目，再按「是否已有格子」决定落点字段。
+async function openNewSessionDialog(project: ProjectNode) {
+  if (!sessionDialog) return;
+  if (project.id !== activeProjectId) await selectProject(project.id);
+  await sessionDialog.open({ hasPanes: project.layout !== null });
+}
+
+// ---------- 新建会话 ----------
+
+/// 新建会话弹窗的回调：真正创建，然后把项目、主区与焦点一起搬过去。
+/// 失败原样抛回弹窗（端口被占、目录不存在、深度超限），由弹窗显示。
+async function createSessionFromDialog(request: NewSessionRequest): Promise<void> {
+  const project = currentProject();
+  if (!project) throw new Error(t("project.empty"));
+  const placement: SpawnPlacement = {
+    project: project.id,
+    target: placementTarget(project, request.placement),
+    placement: request.placement,
+    ratio: 0.5
+  };
+  let id: string;
+  try {
+    if (request.transport === "serial") {
+      if (!request.serial) throw new Error("missing serial config");
+      id = await newSerialSession(request.serial, placement, request.title || null);
+    } else {
+      id = await spawn(
+        null,
+        request.cwd,
+        request.shell,
+        placement,
+        request.title || null
+      );
+    }
+  } catch (err) {
+    throw new Error(spawnErrorText(err));
+  }
+  await refreshTree();
+  suspended.delete(id);
+  setFocus(id);
+  if (expanded === null) expanded = new Set(projects.map((item) => item.id));
+  expanded.add(project.id);
+  saveActiveProject();
+  saveExpanded();
+  renderTree();
+  const current = currentProject() ?? project;
+  mountProject(current);
+  await finishFocus(id, false);
+}
+
+function markSessionActivity(id: string) {  const session = tree.find((item) => item.id === id);
   if (!session || !live.has(id)) return;
   const connected = session.transport === "serial"
     ? (() => {
@@ -1026,34 +2099,25 @@ function markSessionActivity(id: string) {
   arm(SESSION_ACTIVITY_MS);
 }
 
-interface TerminalProfile {
-  id: string;
-  title: string;
-  command: string;
-}
-
-let terminalProfiles: TerminalProfile[] = [];
-
-async function showNewMenu() {
-  closePopupMenu();
+/// Shell profile 列表来自核心（`terminal_profiles`），弹窗本身不猜默认值。
+async function loadShellProfiles(): Promise<TerminalProfile[]> {
   try {
-    terminalProfiles = await invoke<TerminalProfile[]>("terminal_profiles");
+    return await invoke<TerminalProfile[]>("terminal_profiles");
   } catch (err) {
     console.warn(`[terminal-profiles] ${String(err)}`);
-    terminalProfiles = [];
+    return [];
   }
-  showPopupMenu(
-    sessNew,
-    terminalProfiles.map((profile) => ({
-      label: profile.title,
-      run: () => void newSession(profile.command)
-    })),
-    { minWidth: 156 }
-  );
 }
 
-/// 第一次拉起的会话才量冷启动；之后新开的会话不重写这组数字
-async function spawn(id: string | null, cwd: string | null = null, shell: string | null = null): Promise<string> {
+/// 第一次拉起的会话才量冷启动；之后新开的会话不重写这组数字。
+/// `title` 只在新建时生效（冷会话重开不覆盖用户改过的名字）。
+async function spawn(
+  id: string | null,
+  cwd: string | null,
+  shell: string | null,
+  placement: SpawnPlacement,
+  title: string | null = null
+): Promise<string> {
   const first = coldStart.pending;
   if (first) {
     coldStart.pending = false;
@@ -1062,12 +2126,18 @@ async function spawn(id: string | null, cwd: string | null = null, shell: string
   }
   let spawned: string;
   try {
+    const term = focusTerm();
     spawned = await invoke<string>("spawn_session", {
-      cols: term.cols,
-      rows: term.rows,
+      cols: term?.cols ?? 80,
+      rows: term?.rows ?? 24,
       shell,
       cwd,
-      sessionId: id
+      sessionId: id,
+      project: placement.project,
+      target: placement.target,
+      placement: placement.placement,
+      ratio: placement.ratio ?? null,
+      title
     });
   } catch (err) {
     // 本次没拉起成功：把计量状态还回去，让重试仍然算冷启动
@@ -1087,159 +2157,109 @@ async function spawn(id: string | null, cwd: string | null = null, shell: string
   return spawned;
 }
 
-async function openSession(id: string) {
-  const token = ++sessionSwitchToken;
-  requestedSessionId = id;
-  renderTree();
-  filePanel?.selectSession(id);
-  if (id === sessionId && live.has(id)) {
-    term.focus();
-    return;
-  }
-  if (!live.has(id)) {
-    // 冷会话：用同一个 id 拉起，会话树里的位置与历史不变。
-    const known = tree.find((s) => s.id === id);
-    if (known?.transport === "serial") {
-      // 串口冷会话按工作区里记住的配置重连；目录、Shell 与它无关。
-      if (!known.serial) {
-        log(`串口会话 ${id.slice(0, 8)} 缺少连接参数，无法重连`);
-        return;
-      }
-      await invoke("spawn_serial_session", { config: known.serial, sessionId: id });
-    } else {
-      // 后端记住了上次的 CWD，从这里接着开；目录已经不在了就退回默认目录。
-      try {
-        await spawn(id, known?.cwd ?? null, known?.shell ?? null);
-      } catch (err) {
-        console.warn(`[open] ${String(err)}，退回默认目录`);
-        await spawn(id, null, known?.shell ?? null);
-      }
-    }
-    if (token !== sessionSwitchToken || requestedSessionId !== id) return;
-    await refreshTree();
-  }
-  if (token !== sessionSwitchToken || requestedSessionId !== id) return;
-  await attach(id);
-  renderTree();
-}
-
-async function newSession(shell: string | null = null) {
-  const id = await spawn(null, null, shell);
-  await refreshTree();
-  await attach(id);
-  renderTree();
-}
-
-/// 新建串口会话。参数来自对话框，错误一路抛回去让对话框显示（端口被占用、
-/// 设备不在、波特率越界……），不在这里吞掉。成功返回会话 id，挂载交给调用方：
-/// 会话已经建好之后，界面挂载失败不该把对话框留在「创建失败」上（重载页面还能挂回来）。
-async function newSerialSession(config: SerialConfig): Promise<string> {
-  const id = await invoke<string>("spawn_serial_session", { config, sessionId: null });
-  await refreshTree();
+/// 新建串口会话。参数来自弹窗，错误一路抛回去让弹窗显示（端口被占用、
+/// 设备不在、波特率越界……），不在这里吞掉。成功返回会话 id，挂载交给调用方。
+async function newSerialSession(
+  config: SerialConfig,
+  placement: SpawnPlacement,
+  title: string | null
+): Promise<string> {
+  const id = await invoke<string>("spawn_serial_session", {
+    config,
+    sessionId: null,
+    project: placement.project,
+    target: placement.target,
+    placement: placement.placement,
+    ratio: placement.ratio ?? null,
+    title
+  });
   return id;
-}
-
-async function closeSession(id: string) {
-  const wasActive = id === sessionId;
-  await invoke("pty_close", { id });
-  await refreshTree();
-  // 关掉后台会话不该影响当前会话：只有它确实是当前会话、且期间没被切走时才换下一个
-  if (!wasActive || sessionId !== id) return;
-  sessionId = "";
-  const next = tree[tree.length - 1];
-  if (next) await openSession(next.id);
-  else await newSession();
-  renderTree();
 }
 
 /// 冻结会话：结束运行时（终端进程 / 串口句柄）但保留工作区节点、命令历史与屏幕快照。
 /// 点这一行会按原参数重新拉起，和冷会话的恢复路径完全一样。
 async function freezeSession(id: string) {
-  const wasActive = id === sessionId;
   try {
     await invoke("pty_freeze", { id });
   } catch (err) {
     console.warn(`[freeze] ${String(err)}`);
     return;
   }
+  // 冻结保留节点，但运行时没了：视图立即销毁，切回来按快照重建。
+  // 只销毁视图、不删 SessionUiState——HEX 这类设置要活过冻结。
   await refreshTree();
-  if (!wasActive || sessionId !== id) return;
-  // 当前会话被冻结：切到别的会话；不能选它自己，否则 openSession 会立刻又拉起来
-  sessionId = "";
-  const next = [...tree].reverse().find((session) => session.id !== id);
-  if (next) await openSession(next.id);
-  else await newSession();
+  destroyView(id, { runtimeAlive: false });
+  // 格子留在原位变冷占位，不算「关闭会话」，也不切走布局
+  suspended.add(id);
+  markPaneCold(id);
   renderTree();
+  if (focusSessionId === id) {
+    own = null;
+    ib.disabled = true;
+    renderBarStatus();
+    renderSendAvailability();
+  }
 }
 
 async function boot() {
   await refreshTree();
-  if (!tree.length) {
-    await newSession();
+  // 回到上次选中的项目；没有项目就显示空状态，由用户点「新建项目」
+  const project = currentProject() ?? projects[0] ?? null;
+  if (!project) {
+    emptyWorkspaceState();
     return;
   }
-  const last = [...tree].reverse().find((session) => session.transport === "terminal");
-  if (!last) {
-    await newSession();
-    return;
-  }
-  await openSession(last.id);
-  log(`会话 ${tree.length} 个 · 当前 ${last.title}`);
+  await selectProject(project.id);
+  log(`项目 ${project.name} · ${projectLeaves(project).length} 格`);
 }
 
-sessNew.addEventListener("click", () => void showNewMenu());
+projNew.addEventListener("click", () => projectDialog?.openCreate());
+projCollapseAll.addEventListener("click", () => setAllProjectsExpanded(false));
+projExpandAll.addEventListener("click", () => setAllProjectsExpanded(true));
 
-// 会话列表的多选：标题栏按钮切换模式，操作栏负责全选/反选/批量删除
-sessSelect.addEventListener("click", () => setSessSelectMode(!sessSelectMode));
-sessSelectDone.addEventListener("click", () => setSessSelectMode(false));
-sessSelectAll.addEventListener("click", () => {
-  sessSelected = selectAllIds(tree.map((session) => session.id));
-  disarmSessDelete();
-  renderTree();
-});
-sessSelectInvert.addEventListener("click", () => {
-  sessSelected = invertIds(sessSelected, tree.map((session) => session.id));
-  disarmSessDelete();
-  renderTree();
-});
-sessDeleteSelected.addEventListener("click", () => {
-  if (!sessSelected.size) return;
-  if (!sessDeleteArmed) {
-    sessDeleteArmed = true;
-    window.clearTimeout(sessDeleteArmTimer);
-    sessDeleteArmTimer = window.setTimeout(() => {
-      disarmSessDelete();
-      if (sessSelectMode) renderTree();
-    }, DELETE_CONFIRM_MS);
-    renderTree();
-    return;
-  }
-  void deleteSelectedSessions();
-});
-
-
-/// xterm 的 onData 里有真按键，也有终端回报。焦点报告（`ESC[I` / `ESC[O`）不是用户输入：
-/// 原样写进 PTY 会被 PSReadLine 当成按键（响一声、还可能整屏重画）。摘法见 ptyInput.ts。
-term.onData((data) => {
-  if (!sessionId) return;
+/// 每个视图自己的按键出口。xterm 的 onData 里既有真按键，也有终端回报：
+/// 焦点报告（`ESC[I` / `ESC[O`）不是用户输入，原样写进 PTY 会被 PSReadLine 当成按键
+/// （响一声、还可能整屏重画）。摘法见 ptyInput.ts。
+function onViewData(id: string, data: string) {
   const typed = stripFocusReports(data);
   if (!typed) return;
-  trace(`send ${JSON.stringify(typed)}`);
-  void invoke("pty_write", { id: sessionId, data: typed });
-});
+  trace(`send ${id.slice(0, 4)} ${JSON.stringify(typed)}`);
+  void invoke("pty_write", { id, data: typed });
+}
 
-term.onBell(() => trace("BEL fired in xterm"));
-
-let resizeTimer: number | undefined;
-/// 布局变化后同步终端尺寸；输入条切换采用瞬时布局，避免动画期间反复触发重排。
+/// 布局变化后同步尺寸。回调可能一帧内来很多次（拖窗口、折叠面板、改输入条高度），
+/// 合并成一次 rAF：先 fit 所有可见视图，再 60ms 后统一下发真正变了的尺寸。
 function syncSize() {
   if (document.body.classList.contains(DRAGGING_CLASS)) return;
-  fit.fit();
-  if (!sessionId) return;
+  scheduleFit();
+}
+
+let fitFrame: number | undefined;
+function scheduleFit() {
+  if (fitFrame !== undefined) return;
+  fitFrame = requestAnimationFrame(() => {
+    fitFrame = undefined;
+    for (const view of pool.all()) {
+      if (view.visible) fitView(view);
+    }
+    scheduleResizeFlush();
+  });
+}
+
+function scheduleResizeFlush() {
+  if (!pendingResize.size) return;
   window.clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(() => {
-    void invoke("pty_resize", { id: sessionId, cols: term.cols, rows: term.rows });
-  }, 60);
+  resizeTimer = window.setTimeout(flushResize, 60);
+}
+
+function flushResize() {
+  window.clearTimeout(resizeTimer);
+  resizeTimer = undefined;
+  const pending = [...pendingResize];
+  pendingResize.clear();
+  for (const [id, size] of pending) {
+    void invoke("pty_resize", { id, cols: size.cols, rows: size.rows });
+  }
 }
 
 // 终端容器尺寸一变就让画布跟上：拖窗口、折叠面板都会走这里。
@@ -1289,11 +2309,11 @@ async function rebuildHistory(id: string) {
   const token = ++rebuildSeq;
   try {
     const snap = await invoke<HistorySnapshot>("history_snapshot", { id });
-    if (sessionId !== id || token !== rebuildSeq) return; // 附着途中又切走了 / 已有更新的一份
+    if (focusSessionId !== id || token !== rebuildSeq) return; // 附着途中又切走了 / 已有更新的一份
     cache = fromSnapshot(snap);
   } catch (err) {
     console.warn(`[history] ${String(err)}`);
-    if (sessionId !== id || token !== rebuildSeq) return;
+    if (focusSessionId !== id || token !== rebuildSeq) return;
     cache = emptyCache(id); // 留空但认下会话：之后每条追加都会再触发一次重建
   }
   onHistoryChanged();
@@ -1481,8 +2501,8 @@ function acceptHistory() {
 }
 
 function openHistoryOverlay() {
-  trace(`overlay open attempt hidden=${histOverlay.hidden ? 1 : 0} session=${sessionId ? 1 : 0}`);
-  if (!sessionId || !histOverlay.hidden) return;
+  trace(`overlay open attempt hidden=${histOverlay.hidden ? 1 : 0} session=${focusSessionId ? 1 : 0}`);
+  if (!focusSessionId || !histOverlay.hidden) return;
   overlayDraft = ib.value;
   histOverlay.hidden = false;
   trace(`overlay opened hidden=${histOverlay.hidden ? 1 : 0}`);
@@ -1519,11 +2539,11 @@ function closeHistoryOverlay(restoreDraft: boolean, focusInput = true) {
 }
 
 async function runFullSearch(token: number) {
-  const id = sessionId;
+  const id = focusSessionId;
   if (!id || histOverlay.hidden || token !== searchToken) return;
   try {
     const hits = await invoke<HistoryItem[]>("history_search", { id, query: histQuery.value });
-    if (histOverlay.hidden || token !== searchToken || sessionId !== id) return;
+    if (histOverlay.hidden || token !== searchToken || focusSessionId !== id) return;
     historySel = -1;
     renderHistoryRows(withDayAnchors(hits.slice(0, HISTORY_RENDER_MAX)), hits.length);
   } catch (err) {
@@ -1582,7 +2602,7 @@ histClearBtn.addEventListener("click", () => {
   window.clearTimeout(clearTimer);
   histClearBtn.classList.remove("armed");
   histClearBtn.textContent = t("history.clear");
-  const id = sessionId;
+  const id = focusSessionId;
   if (!id) return;
   void invoke("history_clear", { id }).then(() => {
     void rebuildHistory(id);
@@ -1596,10 +2616,11 @@ histOverlay.addEventListener("mousedown", (e) => e.stopPropagation());
 /// 焦点正被别的界面占用时，所有权变化不该抢回来：模态对话框与历史检索面板都算。
 function blocksOwnershipFocus(): boolean {
   if (!histOverlay.hidden) return true;
-  for (const id of ["settings-overlay", "shortcut-overlay", "serial-overlay"]) {
+  for (const id of ["settings-overlay", "shortcut-overlay", "session-overlay"]) {
     const el = document.getElementById(id);
     if (el && !(el as HTMLElement).hidden) return true;
   }
+  if (projectDialog?.isOpen()) return true;
   const sessionSettings = document.querySelector<HTMLElement>(".session-settings-overlay");
   return !!sessionSettings && !sessionSettings.hidden;
 }
@@ -1650,9 +2671,13 @@ function applyOwnership(next: Ownership) {
     active === null ||
     active === document.body ||
     (active instanceof HTMLElement && active.matches("button, [role='menuitem']"));
-  if (!blocksOwnershipFocus() && (active === ib || active === term.textarea || (!editable && transient))) {
+  const view = focusView();
+  if (
+    !blocksOwnershipFocus() &&
+    (active === ib || (view !== null && active === view.term.textarea) || (!editable && transient))
+  ) {
     if (takes) ib.focus();
-    else term.focus();
+    else view?.term.focus();
   }
   if (changed) {
     console.log(`[own] ${next.state}/${next.owner}/${next.confidence} override=${next.override}`);
@@ -1661,8 +2686,8 @@ function applyOwnership(next: Ownership) {
 }
 
 async function setOverrideFor(id: string, mode: Exclude<OverrideMode, "none">) {
-  let current: OverrideMode = id === sessionId && own?.id === id ? own.override : "none";
-  if (id !== sessionId) {
+  let current: OverrideMode = id === focusSessionId && own?.id === id ? own.override : "none";
+  if (id !== focusSessionId) {
     try {
       current = (await invoke<Ownership>("pty_ownership", { id })).override;
     } catch (err) {
@@ -1672,14 +2697,14 @@ async function setOverrideFor(id: string, mode: Exclude<OverrideMode, "none">) {
   }
   try {
     await invoke("pty_set_override", { id, mode: current === mode ? "none" : mode });
-    if (id === sessionId) applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
+    if (id === focusSessionId) applyOwnership(await invoke<Ownership>("pty_ownership", { id }));
   } catch (err) {
     console.warn(`[ownership] ${String(err)}`);
   }
 }
 
 function toggleOverride(mode: Exclude<OverrideMode, "none">) {
-  if (sessionId) void setOverrideFor(sessionId, mode);
+  if (focusSessionId) void setOverrideFor(focusSessionId, mode);
 }
 
 // ---------- 输入条按钮：暂停 / 断开 / 清屏 / 直通 / 接管 ----------
@@ -1697,7 +2722,6 @@ let serialStatus: SerialStatus | null = null;
 /// HEX 发送开关按会话记：切走再切回来还是上次的样子。
 /// 真正的解析在 core-domain，这里只表达「这次发送按十六进制读」。
 let hexMode = false;
-const hexBySession = new Map<string, boolean>();
 
 /// 输入条右侧的临时提示（HEX 解析失败、端口被别的程序抢走……）。
 /// 和「暂停中」共用同一个位置：同一时刻只可能有一件需要说的事。
@@ -1722,6 +2746,9 @@ function showNotice(text: string, isError = true, ttl = 6000) {
 /// 不各自去改 className，否则后画的会抹掉先画的（暂停、断开、错误都是同一行）。
 function renderBarStatus() {
   const takes = own?.owner === "input_bar";
+
+  // 串口列表只做展示：高亮当前焦点串口会话占用的端口（终端会话/无会话都不亮）
+  serialPortsPanel?.setActivePort(serialKind ? serialStatus?.config.port ?? null : null);
 
   bar.classList.toggle("serial", serialKind);
   bar.classList.toggle("failed", serialKind && serialStatus?.status === "failed");
@@ -1811,7 +2838,7 @@ async function syncPaused(id: string) {
   } catch (err) {
     console.warn(`[pause] ${String(err)}`);
   }
-  if (sessionId !== id || (pauseStateRevision.get(id) ?? 0) !== revision) return;
+  if (focusSessionId !== id || (pauseStateRevision.get(id) ?? 0) !== revision) return;
   pausedBySession.set(id, next);
   paused = next;
   renderTree();
@@ -1823,17 +2850,17 @@ async function syncSerial(id: string) {
   try {
     const next = await invoke<SerialStatus>("serial_status", { id });
     serialStatusBySession.set(id, next);
-    if (sessionId === id) {
+    if (focusSessionId === id) {
       serialStatus = next;
       paused = next.paused;
     }
   } catch (err) {
     console.warn(`[serial] ${String(err)}`);
     serialStatusBySession.delete(id);
-    if (sessionId === id) serialStatus = null;
+    if (focusSessionId === id) serialStatus = null;
   }
   renderTree();
-  if (sessionId === id) renderBarStatus();
+  if (focusSessionId === id) renderBarStatus();
 }
 
 /// 暂停 = 冻结画面但不丢数据：后端照常把输出记进回放缓冲，只是不再推事件。
@@ -1844,7 +2871,7 @@ async function syncSerial(id: string) {
 /// 连接按原配置重开并起新的读线程。回放与历史都不动，所以不必重画屏幕。
 async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
   if (transport === "serial") {
-    let status = id === sessionId ? serialStatus : null;
+    let status = id === focusSessionId ? serialStatus : null;
     if (!status) {
       try {
         status = await invoke<SerialStatus>("serial_status", { id });
@@ -1858,10 +2885,11 @@ async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
       if (down) await invoke("serial_connect", { id });
       else await invoke("serial_disconnect", { id });
     } catch (err) {
-      if (id === sessionId) showNotice(t("input.connectFailed") + ": " + String(err), true, 8000);
-      else console.warn(`[serial] ${String(err)}`);
+      const reason = spawnErrorText(err);
+      if (id === focusSessionId) showNotice(t("input.connectFailed") + ": " + reason, true, 8000);
+      else console.warn(`[serial] ${reason}`);
     }
-    if (id === sessionId) await syncSerial(id);
+    if (id === focusSessionId) await syncSerial(id);
     else {
       try {
         const updated = await invoke<SerialStatus>("serial_status", { id });
@@ -1887,12 +2915,14 @@ async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
     if ((pauseStateRevision.get(id) ?? 0) !== revision) return;
     pausedBySession.set(id, next);
     renderTree();
-    if (id === sessionId) {
+    if (id === focusSessionId) {
       paused = next;
       renderBarStatus();
-      if (next) flushOut();
-      else await resyncScreen(id);
     }
+    // 暂停/继续是显示层动作，按 id 生效：只要这一格有视图就补画，
+    // 不管它是不是焦点。恢复后不重放，暂停期间后端没推的那段会永久缺在屏幕上。
+    if (next) flushOut(id);
+    else if (pool.view(id)) await resyncScreen(id);
   } catch (err) {
     console.warn(`[pause] ${String(err)}`);
   } finally {
@@ -1901,8 +2931,8 @@ async function togglePauseFor(id: string, transport: TreeSession["transport"]) {
 }
 
 async function togglePause() {
-  if (!sessionId) return;
-  await togglePauseFor(sessionId, serialKind ? "serial" : "terminal");
+  if (!focusSessionId) return;
+  await togglePauseFor(focusSessionId, serialKind ? "serial" : "terminal");
 }
 
 /// 清窗口：屏幕、回放缓冲、磁盘上的卷轴快照一起清，进程与命令历史不动。
@@ -1910,7 +2940,6 @@ async function togglePause() {
 /// 代价是 Shell 仍以为屏幕上有内容，全屏程序（vim / less）要它们自己的 Ctrl+L 重画。
 async function clearScreenFor(id: string) {
   if (!id) return;
-  const wasActive = id === sessionId;
   let lastCleared = 0;
   try {
     lastCleared = await invoke<number>("pty_clear", { id });
@@ -1918,22 +2947,25 @@ async function clearScreenFor(id: string) {
     console.warn(`[clear] ${String(err)}`);
     return;
   }
-  if (!wasActive || sessionId !== id) return;
-  dropOutQueue();
-  outFloor = Math.max(outFloor, lastCleared);
-  lastSeq = Math.max(lastSeq, lastCleared);
+  // 清屏按 id 生效：可见但非焦点的格子也必须一起清，否则后端清了、屏幕还留着旧内容
+  const view = pool.view(id);
+  const out = outputOf(id);
+  dropOutQueue(id);
+  out.floor = Math.max(out.floor, lastCleared);
+  out.lastSeq = Math.max(out.lastSeq, lastCleared);
   noteAnswered(id, lastCleared);
+  if (!view) return;
   const transport = tree.find((session) => session.id === id)?.transport ?? "terminal";
   if (clearDisplayMode(transport) === "reset") {
-    term.reset();
-    resyncBackgrounds();
+    view.term.reset();
+    resyncBackgrounds(view.term);
   } else {
-    term.clear();
+    view.term.clear();
   }
 }
 
 async function clearScreen() {
-  if (sessionId) await clearScreenFor(sessionId);
+  if (focusSessionId) await clearScreenFor(focusSessionId);
 }
 
 for (const btn of [ibHex, ibLog]) {
@@ -1942,9 +2974,9 @@ for (const btn of [ibHex, ibLog]) {
 
 /// HEX 模式：只改「这次发送怎么读」，不改变输入内容。解析与拒绝原因都在核心。
 ibHex.addEventListener("click", () => {
-  if (!serialKind || !sessionId) return;
+  if (!serialKind || !focusSessionId) return;
   hexMode = !hexMode;
-  hexBySession.set(sessionId, hexMode);
+  uiOf(focusSessionId).hex = hexMode;
   ibHex.classList.toggle("on", hexMode);
   ib.placeholder = serialKind
     ? hexMode ? t("input.placeholderHex") : t("input.placeholderSerial")
@@ -1971,9 +3003,9 @@ ibLog.addEventListener("click", () => {
 window.addEventListener(
   "keydown",
   (e) => {
-    // 串口对话框开着时，按键属于表单：Esc 关闭、Enter 提交都由它自己处理，
+    // 新建会话 / 新建项目弹窗开着时，按键属于表单：Esc 关闭、Enter 提交都由它自己处理，
     // 不能让 Ctrl+Shift+P / Ctrl+R 之类在对话框里生效。
-    if (serialDialog?.isOpen()) return;
+    if (sessionDialog?.isOpen() || projectDialog?.isOpen()) return;
     if (DEBUG) {
       const t = e.target as HTMLElement | null;
       trace(
@@ -1988,13 +3020,25 @@ window.addEventListener(
     // 这里拦下来的只是本应用的开关，不会再触发页面重载。
     if (e.ctrlKey && !e.shiftKey && matchesKey(e, "KeyR", "r")) {
       // 串口没有命令历史与检索能力（`caps.history = false`），Ctrl+R 什么都不做
-      const activeSession = tree.some((session) => session.id === sessionId) && live.has(sessionId);
+      const activeSession = tree.some((session) => session.id === focusSessionId) && live.has(focusSessionId);
       if (!serialKind && (!activeSession || own?.owner === "input_bar" || !histOverlay.hidden)) {
         e.preventDefault();
         e.stopPropagation();
         if (e.repeat) return; // 长按只开/关一次，别让覆盖层闪成跑马灯
         if (histOverlay.hidden) openHistoryOverlay();
         else closeHistoryOverlay(true);
+        return;
+      }
+    }
+    // Ctrl+Alt+方向键：项目内按几何方向搬焦点。部分 Intel 显卡驱动把这一组当成
+    // 旋转屏幕快捷键，所以同时接受 Ctrl+Alt+H/J/K/L 作为退路；两条都走同一套
+    // 几何最近邻。必须在捕获阶段拦下，否则焦点搬走的同时方向键会打进 vim。
+    if (e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey && !e.getModifierState("AltGraph")) {
+      const direction = directionOfKey(e);
+      if (direction && currentProject()?.layout) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) void moveFocusDirection(direction);
         return;
       }
     }
@@ -2024,8 +3068,7 @@ window.addEventListener(
 // 输入条是命令的唯一入口：终端发「文本 + 回车」，串口按会话的发送方式与行结束符组包
 // （HEX 模式下整行按十六进制解析，核心负责拒绝非法输入）。
 // 发送失败时把这一行还给输入条：端口断了、HEX 位数不对都不该让用户重敲。
-function sendLine(line: string) {
-  const id = sessionId;
+function sendLine(id: string, line: string) {
   if (!id) return;
   if (serialKind && hexMode) {
     const clean = normalizeHexInput(line).replaceAll(" ", "");
@@ -2040,7 +3083,7 @@ function sendLine(line: string) {
   const hex = serialKind && hexMode;
   void invoke("pty_send_line", { id, line, hex }).then(
     () => {
-      if (noticeIsError && sessionId === id) {
+      if (noticeIsError && focusSessionId === id) {
         notice = "";
         noticeIsError = false;
         window.clearTimeout(noticeTimer);
@@ -2048,7 +3091,7 @@ function sendLine(line: string) {
       }
     },
     (err) => {
-      if (sessionId !== id) return;
+      if (focusSessionId !== id) return;
       if (!ib.value) ib.value = line;
       renderSendAvailability();
       ib.setSelectionRange(ib.value.length, ib.value.length);
@@ -2059,7 +3102,7 @@ function sendLine(line: string) {
 }
 
 async function executeShortcut(command: string): Promise<void> {
-  const id = sessionId;
+  const id = focusSessionId;
   if (!id) throw new Error(t("input.noSession"));
   const transport = serialKind ? "serial" : "terminal";
   const isPaused = serialKind
@@ -2070,19 +3113,19 @@ async function executeShortcut(command: string): Promise<void> {
     const stillPaused = serialKind
       ? !!serialStatus?.paused || serialStatus?.status !== "open"
       : paused;
-    if (stillPaused || sessionId !== id) throw new Error(t("input.paused"));
+    if (stillPaused || focusSessionId !== id) throw new Error(t("input.paused"));
   }
   await invoke("pty_write", { id, data: `${command}\r` });
 }
 
 function fillShortcut(command: string) {
-  const id = sessionId;
+  const id = focusSessionId;
   if (!id) return;
   const applyFill = () => fillInputBar(command);
   if (own?.id === id && own.override === "passthrough") {
     void invoke("pty_set_override", { id, mode: "input_bar" })
       .then(() => invoke<Ownership>("pty_ownership", { id }))
-      .then((ownership) => { if (sessionId === id) { applyOwnership(ownership); applyFill(); } })
+      .then((ownership) => { if (focusSessionId === id) { applyOwnership(ownership); applyFill(); } })
       .catch((err) => showNotice(`切回输入模式失败：${String(err)}`, true));
     return;
   }
@@ -2093,7 +3136,7 @@ async function sendInput() {
   const line = ib.value;
   if (!line.trim()) return; // 空白回车不发：后端本来也不记，只是白多打一次提示符
 
-  const id = sessionId;
+  const id = focusSessionId;
   if (!id) return;
   const transport = serialKind ? "serial" : "terminal";
   const isPaused = serialKind
@@ -2104,14 +3147,14 @@ async function sendInput() {
     const stillPaused = serialKind
       ? !!serialStatus?.paused || serialStatus?.status !== "open"
       : paused;
-    if (stillPaused || sessionId !== id) return;
+    if (stillPaused || focusSessionId !== id) return;
   }
 
   ib.value = "";
   renderSendAvailability();
   histIdx = -1;
   histDraft = "";
-  sendLine(line);
+  sendLine(id, line);
   updateGhost();
 }
 
@@ -2241,70 +3284,74 @@ ib.addEventListener("blur", () => {
 // 输出按帧聚合：来一块就画一块会在 vim 全屏重绘时掉帧（见 docs/bench-m0.md）
 const OUT_FLUSH_MS = 16;
 const OUT_MAX_PENDING = 512;
-let outQueue: OutChunk[] = [];
-/// 小于等于它的块属于「清屏前」：清屏后即使已经在路上、已经排队，也不再画到空屏上。
-let outFloor = 0;
-let outTimer: number | undefined;
 
-/// 丢弃还没画的块（切会话时用）：它们属于上一个屏幕，画上去只会污染新会话。
-function dropOutQueue() {
-  if (outTimer !== undefined) {
-    window.clearTimeout(outTimer);
-    outTimer = undefined;
+/// 丢弃某个视图还没画的块（切走、清屏时用）：它们属于旧屏幕，画上去只会污染画面。
+function dropOutQueue(id: string) {
+  const out = outputOf(id);
+  if (out.timer !== undefined) {
+    window.clearTimeout(out.timer);
+    out.timer = undefined;
   }
-  outQueue.length = 0;
+  out.queue.length = 0;
 }
 
-function flushOut() {
-  if (outTimer !== undefined) {
-    window.clearTimeout(outTimer);
-    outTimer = undefined;
+function flushOut(id: string) {
+  const out = outputOf(id);
+  if (out.timer !== undefined) {
+    window.clearTimeout(out.timer);
+    out.timer = undefined;
   }
-  if (!outQueue.length) return;
-  const chunks = outQueue;
-  outQueue = [];
+  if (!out.queue.length) return;
+  const chunks = out.queue;
+  out.queue = [];
   // 清屏那一刻可能还有旧块在路上：按序号把它们滤掉，只画真正在清屏之后产生的块
-  const { parts, lastSeq: seq } = keepAfter(chunks, outFloor);
+  const { parts, lastSeq: seq } = keepAfter(chunks, out.floor);
   if (!parts.length) return;
-  const id = sessionId;
-  term.write(parts.join(""));
+  const view = pool.view(id);
+  // 视图不存在或不可见：不画，数据仍在后端回放缓冲里，切回时整屏重建
+  if (!view || !view.visible) return;
+  view.term.write(parts.join(""));
   // 画过即答过：终端查询的应答就在这次写入里发生
-  if (id && seq) noteAnswered(id, seq);
+  if (seq) noteAnswered(id, seq);
 }
 
-function queueOut(data: string, seq: number) {
-  if (seq <= outFloor) return; // 清屏前的块，直接丢
-  outQueue.push({ data, seq });
+function queueOut(id: string, data: string, seq: number) {
+  const out = outputOf(id);
+  if (seq <= out.floor) return; // 清屏前的块，直接丢
+  out.queue.push({ data, seq });
   // 异常爆发时不等帧：先画出来，别把内存堆掉
-  if (outQueue.length >= OUT_MAX_PENDING) {
-    flushOut();
+  if (out.queue.length >= OUT_MAX_PENDING) {
+    flushOut(id);
     return;
   }
-  if (outTimer === undefined) {
-    outTimer = window.setTimeout(flushOut, OUT_FLUSH_MS);
+  if (out.timer === undefined) {
+    out.timer = window.setTimeout(() => flushOut(id), OUT_FLUSH_MS);
   }
 }
 
 const listenOut = listen<{ id: string; seq: number; data: string }>("pty:out", (event) => {
   const payload = event.payload;
   markSessionActivity(payload.id);
-  if (payload.id !== sessionId) return;
+  // 路由按 id 走视图，不再看焦点：四个格子同时刷输出时各画各的
+  const view = pool.view(payload.id);
+  if (!view || !view.visible) return;
+  const out = outputOf(payload.id);
   // 先在本地排队，等回放落地再按 seq 去重补上
-  if (attaching) {
-    pending.push({ seq: payload.seq, data: payload.data });
+  if (out.attaching) {
+    out.pending.push({ seq: payload.seq, data: payload.data });
     return;
   }
-  if (payload.seq <= lastSeq) return;
-  lastSeq = payload.seq;
+  if (payload.seq <= out.lastSeq) return;
+  out.lastSeq = payload.seq;
   noteFirstOutput();
-  queueOut(payload.data, payload.seq);
+  queueOut(payload.id, payload.data, payload.seq);
 });
 
 /// 冷启动计量只认第一次输出；挂回旧会话时 coldStart.measuring 为假，只补画不计量。
 function noteFirstOutput() {
-  if (coldStart.firstOutputAt || !coldStart.measuring || sessionId !== coldStart.session) return;
+  if (coldStart.firstOutputAt || !coldStart.measuring || focusSessionId !== coldStart.session) return;
   coldStart.firstOutputAt = performance.now();
-  log(`session ${sessionId.slice(0, 8)} · 首个字节 ${Math.round(coldStart.firstOutputAt - t0)}ms`);
+  log(`session ${focusSessionId.slice(0, 8)} · 首个字节 ${Math.round(coldStart.firstOutputAt - t0)}ms`);
   if (location.hash === "#bench" && !benchScheduled) {
     benchScheduled = true;
     window.setTimeout(() => void runBench(), 1500);
@@ -2312,30 +3359,48 @@ function noteFirstOutput() {
 }
 
 const listenExit = listen<{ id: string }>("pty:exit", (event) => {
-  if (event.payload.id !== sessionId) {
+  const id = event.payload.id;
+  const view = pool.view(id);
+  if (!view) {
     void refreshTree();
     return;
   }
-  flushOut();
-  // 附着途中（sessionId 已换、整屏还在 reset/回放）不要把退出提示写进正在
-  // 搭建的新屏幕：等回放完成后由 refreshTree 标冷呈现，这里只用 HUD 提一句。
-  if (attaching) {
-    log(`session ${event.payload.id.slice(0, 8)} · 进程已退出`);
+  flushOut(id);
+  // 附着途中（整屏还在 reset/回放）不要把退出提示写进正在搭建的屏幕：
+  // 等回放完成后由 refreshTree 标冷呈现，这里只用 HUD 提一句。
+  if (outputOf(id).attaching) {
+    log(`session ${id.slice(0, 8)} · 进程已退出`);
   } else {
-    term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
+    view.term.writeln("\r\n\x1b[38;5;245m[进程已退出]\x1b[0m");
   }
-  void refreshTree();
+  void refreshTree().then(() => {
+    // 项目格：进程自己退出等同于「关格」——节点留着、格子原位变冷，
+    // 只换这一格，不重挂整棵树（另外几格的画面与尺寸都不该动）。
+    const project = currentProject();
+    if (project && projectLeaves(project).includes(id)) {
+      destroyView(id, { runtimeAlive: false });
+      markPaneCold(id);
+      // 焦点格自己退出：输入条没有可发送的对象，必须立刻进入空保护禁用态
+      if (focusSessionId === id) {
+        own = null;
+        ib.disabled = true;
+        renderBarStatus();
+        renderSendAvailability();
+      }
+      renderTree();
+    }
+  });
 });
 
 const listenOwn = listen<Ownership>("pty:ownership", (event) => {
-  if (event.payload.id !== sessionId) return;
+  if (event.payload.id !== focusSessionId) return;
   applyOwnership(event.payload);
 });
 
 // 串口状态：连上 / 主动断开 / 读写失败。后端只在变化时发，前端只负责画。
 const listenSerial = listen<SerialStatus>("serial:status", (event) => {
   serialStatusBySession.set(event.payload.id, event.payload);
-  if (event.payload.id === sessionId) {
+  if (event.payload.id === focusSessionId) {
     serialStatus = event.payload;
     paused = event.payload.paused;
     renderBarStatus();
@@ -2352,9 +3417,9 @@ const listenCwd = listen<{ id: string; cwd: string }>("session:cwd", (event) => 
 
 // 历史缓存增量：只有当前会话的追加会进缓存；id 严格 +1，缺口就整份重建（L2-02）
 const listenHistory = listen<{ session_id: string; item: HistoryItem }>("history:append", (event) => {
-  const outcome = applyAppend(cache, sessionId, event.payload);
+  const outcome = applyAppend(cache, focusSessionId, event.payload);
   if (outcome.kind === "rebuild") {
-    void rebuildHistory(sessionId); // 跳号 / 缓存还没为该会话建好：整份重建，不逐条修补
+    void rebuildHistory(focusSessionId); // 跳号 / 缓存还没为该会话建好：整份重建，不逐条修补
   } else if (outcome.kind === "append") {
     cache = outcome.cache;
     onHistoryChanged();
@@ -2437,7 +3502,7 @@ async function runBench() {
     const text =
       `前端 ${Math.round(coldStart.spawnStart - t0)}ms + spawn ${Math.round(coldStart.spawnReturn - coldStart.spawnStart)}ms + ` +
       `${ready}（首字节 ${Math.round(coldStart.firstOutputAt - coldStart.spawnReturn)}ms） · IPC p50 ${ping.p50}ms/p99 ${ping.p99}ms · ` +
-      `1MB ${flood.ms}ms (${flood.mbs} MB/s) · webgl ${webgl ? "on" : "off"}`;
+      `1MB ${flood.ms}ms (${flood.mbs} MB/s) · webgl ${focusView()?.webgl ? "on" : "off"}`;
     log(text);
     void invoke("bench_report", { text });
   } catch (err) {
@@ -2445,8 +3510,8 @@ async function runBench() {
   }
 }
 
-// 左栏先装配：文件面板的宽度上限要量它当前多宽，顺序反了第一帧会算错
-setupSidebarHandle = setupSidebar({ layoutChanged: () => syncSize() });
+// 项目栏先装配：功能栏的宽度上限要量它当前多宽，顺序反了第一帧会算错
+const sidebarHandle = setupSidebar({ layoutChanged: () => syncSize() });
 setupInputbarResize({
   // 拖高/双击重置/窗口缩放后回调：输入条高度变了，Ghost Text 的定位度量一并失效
   layoutChanged: () => {
@@ -2456,52 +3521,69 @@ setupInputbarResize({
 });
 
 filePanel = setupFilePanel({
-  sessionId: () => sessionId,
+  sessionId: () => focusSessionId,
   cwdOf: (id) => tree.find((session) => session.id === id)?.cwd ?? null,
   fillInput: (text) => fillInputBar(text),
   layoutChanged: () => syncSize()
 });
 
-// 自绘标题栏：窗口按钮 + 左右栏折叠。两栏都已装配完，这里拿它们的句柄接线。
+// 自绘标题栏：窗口按钮 + 两侧栏折叠。项目栏的折叠能力在装配时一起建好。
 const filePanelHandle = filePanel;
-setupTitlebar({
-  left: setupSidebarHandle,
-  right: filePanelHandle
-});
+setupTitlebar({ left: sidebarHandle, right: filePanelHandle });
 
 sessionSettingsUi = setupSessionSettingsUi({
   saved: async (id) => {
     await refreshTree();
-    if (id === sessionId) {
+    if (id === focusSessionId) {
       filePanel?.onCwd(id);
       applyFontSize(tree.find((session) => session.id === id)?.settings.font_size ?? DEFAULT_FONT_SIZE);
     }
   },
   fontSizePreview: (id, size) => {
-    if (id === sessionId) applyFontSize(size);
+    if (id === focusSessionId) applyFontSize(size);
   }
 });
 
 shortcutsUi = setupShortcutsUi({
-  sessionId: () => sessionId,
+  sessionId: () => focusSessionId,
   fill: fillShortcut,
   execute: executeShortcut,
   layoutChanged: () => syncSize()
 });
 
-// 串口对话框：创建成功才关闭，失败把后端的原因原样显示在表单里
-serialDialog = setupSerialDialog({
-  create: async (config) => {
-    const id = await newSerialSession(config);
-    // 建好的会话已经进了工作区：挂载失败只记日志，别让对话框假装没创建成功
-    void attach(id)
-      .then(() => renderTree())
-      .catch((err) => console.warn(`[serial] attach: ${String(err)}`));
-    return "";
+// 新建项目 / 项目设置：创建成功后选中并展开，保存后重挂当前项目
+projectDialog = setupProjectDialog({
+  statsOf: (id) => {
+    const project = projects.find((item) => item.id === id);
+    return project ? projectStats(project) : { terminal: 0, serial: 0 };
+  },
+  onCreated: async (id) => {
+    activeProjectId = id;
+    if (expanded === null) expanded = new Set(projects.map((item) => item.id));
+    expanded.add(id);
+    saveActiveProject();
+    saveExpanded();
+    await refreshTree();
+    await selectProject(id);
+  },
+  onSaved: async (id) => {
+    await refreshTree();
+    renderTree();
+    if (activeProjectId === id) {
+      const project = currentProject();
+      if (project) await mountProject(project);
+    }
   }
 });
 
-setupSerialPortsPanel({ open: (port) => { if (port) serialDialog?.open(port); } });
+// 新建会话：终端与串口共用一张表单，创建成功后由 `createSessionFromDialog` 搬主区与焦点
+sessionDialog = setupSessionDialog({
+  create: (request) => createSessionFromDialog(request),
+  shellProfiles: () => loadShellProfiles()
+});
+
+// 串口列表：只读展示，唯一要喂给它的是「当前焦点串口会话占着哪个口」。
+serialPortsPanel = setupSerialPortsPanel();
 
 void Promise.all([
   listenOut,

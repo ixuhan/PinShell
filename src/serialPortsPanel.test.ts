@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPortPolling, pollDelay, samePorts } from "./serialPortsPanel";
-import type { SerialPort } from "./serialUi";
+import type { SerialPort } from "./sessionDialogUi";
 
 const port: SerialPort = {
   port: "COM3", kind: "usb", vid: 1, pid: 2,

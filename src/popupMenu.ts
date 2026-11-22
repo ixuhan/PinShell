@@ -53,7 +53,7 @@ export function closePopupMenu(): void {
 export function showPopupMenu(
   anchor: MenuAnchor,
   items: PopupItem[],
-  options: { minWidth?: number } = {}
+  options: { minWidth?: number; onClose?: () => void } = {}
 ): PopupMenuHandle {
   closePopupMenu();
 
@@ -186,6 +186,9 @@ export function showPopupMenu(
     window.removeEventListener("blur", onDismiss);
     window.removeEventListener("resize", onDismiss);
     element.remove();
+    // 关闭原因对调用方可能重要（落点菜单被点外面关掉 = 取消），
+    // 放在 remove 之后调，回调里再开菜单也不会踩到正在拆的节点。
+    options.onClose?.();
   }
 
   function close() {
