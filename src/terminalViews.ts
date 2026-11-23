@@ -38,6 +38,8 @@ export interface TerminalPoolOptions {
   webglEnabled: boolean;
   onData: (id: string, data: string) => void;
   onBell?: (id: string) => void;
+  /** 视图里的终端拿到 DOM 焦点时上报，让应用层把上下文切到该会话。 */
+  onFocus?: (id: string) => void;
 }
 
 export class TerminalPool {
@@ -134,6 +136,9 @@ export class TerminalPool {
     const hostEl = document.createElement("div");
     hostEl.className = "term-view";
     hostEl.dataset.sessionId = id;
+    // 点击终端主体时只有 DOM 焦点会转移（xterm 自己聚焦 textarea），应用层的
+    // 焦点 ids 不会跟着变。focusin 冒泡到这个持久节点，在这里统一上报。
+    hostEl.addEventListener("focusin", () => this.options.onFocus?.(id));
     // 先进 DOM 再 open：xterm 的渲染器要量尺寸，脱离文档的节点会量到 0
     container.append(hostEl);
     term.open(hostEl);

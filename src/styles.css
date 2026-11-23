@@ -16,6 +16,8 @@
   --bg-active: #1c3045;
   --bg-dialog: #0f1620;
   --bg-chip: #223247;
+  /* 悬停底色：引用而非写死，由各主题自己的 --bg-raised 解析，跨主题自动适配 */
+  --bg-hover: var(--bg-raised);
 
   /* 分隔线与描边 */
   --border-subtle: #1b2531;
@@ -60,11 +62,40 @@
   --info-bg: #24405a;
   --dot-idle: #3c4a5c;
 
+  /* 项目标记色：只用于项目行的身份色块，不参与主题语义色。
+     中性低饱和，深浅主题下都能看清；按项目 id 稳定分配，不随排序变化。 */
+  --proj-tone-1: #5d7fa3;
+  --proj-tone-2: #b07a4a;
+  --proj-tone-3: #6e8f6a;
+  --proj-tone-4: #7a6e9a;
+
   /* 遮罩与投影 */
   --overlay-strong: #05090fb8;
   --shadow-color: #000000;
   --shadow-soft: #00000099;
   --shadow-strong: #000000cc;
+
+  /* ---------- 字体与尺度 ----------
+     UI 文字走黑体栈，中文不再回退到宋体；命令 / 路径 / 终端用等宽栈，
+     但等宽栈也把中文字体排在 monospace 之前，保证中文有明确归属。 */
+  --font-ui: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Microsoft YaHei UI", "PingFang SC", monospace;
+  --fs-xs: 11px;    /* 角标、时间戳、状态文字 */
+  --fs-sm: 12px;    /* 次要正文、标签 */
+  --fs-md: 13px;    /* 正文主体 */
+  --fs-lg: 14px;    /* 标题 */
+  --radius-sm: 6px; /* 按钮、行、输入框 */
+  --radius-lg: 8px; /* 面板、弹窗、菜单 */
+
+  /* 间距 scale：全表 padding / gap 只从这里取值，杜绝「每处差 1px」的手调。
+     3/5/7/9px 这类噪声值统一收敛到相邻档；与固定 height 配套的绝对值
+     （14/18/20/22px）保留原样，不强行改节奏。 */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 10px;
+  --sp-5: 12px;
+  --sp-6: 16px;
 }
 
 /* 深空蓝：靛蓝底 + 冷蓝主色。比暗黑更「夜」，整晚写固件不刺眼。
@@ -576,7 +607,7 @@ body {
   /* 外圈 2px 透明边框 + padding-box：让滑块比槽窄，两侧留出缝隙，不顶到面板边线 */
   background: var(--border-strong);
   border: 2px solid transparent;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background-clip: padding-box;
 }
 
@@ -595,7 +626,7 @@ body {
   height: 32px;
   background: var(--bg-chrome);
   border-bottom: 1px solid var(--border-subtle);
-  font: 11px/1 system-ui, "Segoe UI", sans-serif;
+  font: var(--fs-sm)/1 var(--font-ui);
   color: var(--text-muted);
   user-select: none;
 }
@@ -605,16 +636,15 @@ body {
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-3);
   min-width: 0;
-  padding: 0 10px 0 12px;
+  padding: 0 var(--sp-4) 0 var(--sp-5);
 }
 
 #titlebar-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  letter-spacing: 0.3px;
   color: var(--text);
 }
 
@@ -624,7 +654,7 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 0 4px;
+  padding: 0 var(--sp-1);
 }
 
 #titlebar-tools button {
@@ -635,7 +665,7 @@ body {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: default;
@@ -731,9 +761,9 @@ body {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
   min-height: 28px;
-  padding: 0 6px 0 4px;
+  padding: 0 var(--sp-2) 0 var(--sp-1);
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-muted);
   /* 整条标题栏都是折叠开关：手形 + 悬停高亮，告诉用户这里能点 */
@@ -766,17 +796,16 @@ body {
   flex: 0 1 auto;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--sp-2);
   min-width: 0;
   height: 24px;
-  padding: 0 4px;
+  padding: 0 var(--sp-1);
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 11px;
-  letter-spacing: 0.4px;
+  font-size: var(--fs-sm);
   text-align: left;
   cursor: pointer;
 }
@@ -790,7 +819,7 @@ body {
   flex: none;
   width: 10px;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   line-height: 1;
   text-align: center;
 }
@@ -814,7 +843,7 @@ body {
   flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
-  gap: 3px;
+  gap: var(--sp-1);
   margin-left: auto;
 }
 
@@ -823,13 +852,13 @@ body {
   flex: none;
   height: 22px;
   min-width: 22px;
-  padding: 0 5px;
+  padding: 0 var(--sp-2);
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   line-height: 1;
   cursor: pointer;
 }
@@ -876,6 +905,10 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 面板被拖到比自己的固定行（标题栏、操作行、路径栏、页脚……）还矮时，
+     多出来的内容不能画到下一个面板上——那看起来像两个面板「重叠」了。
+     剪在这里而不是 .panel 上：标题栏里的拖高手柄是故意伸出底边 5px 的。 */
+  overflow: hidden;
 }
 
 /* 面板体内的操作行：按钮多、可换行，不挤标题栏 */
@@ -884,21 +917,21 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .panel-toolbar button {
   flex: none;
   height: 22px;
-  padding: 0 6px;
+  padding: 0 var(--sp-2);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--bg-panel);
   color: var(--text-muted);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   line-height: 1;
   cursor: pointer;
 }
@@ -932,11 +965,11 @@ body {
   height: 19px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-md);
   line-height: 1;
   cursor: pointer;
 }
@@ -1009,7 +1042,7 @@ body {
   flex-direction: column;
   background: var(--bg-chrome);
   border-right: 1px solid var(--border-subtle);
-  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md)/1.6 var(--font-ui);
   user-select: none;
 }
 
@@ -1050,12 +1083,12 @@ body.layout-dragging #sess-resizer::after {
 
 /* 项目栏的标题栏：固定高度，标题不可点（折叠入口在标题栏按钮上） */
 #sess-head {
-  padding: 4px 6px 4px 4px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-1);
   border-bottom: 1px solid var(--border-subtle);
 }
 
 #sess-head .panel-title {
-  padding-left: 6px;
+  padding-left: var(--sp-2);
 }
 
 /* 三个头部按钮与底部设置入口都不抢焦点 */
@@ -1067,18 +1100,18 @@ body.layout-dragging #sess-resizer::after {
 /* 底部固定的全局设置入口：与标题栏齿轮同一个弹窗（ADR 0008） */
 #sidebar-foot {
   flex: none;
-  padding: 6px;
+  padding: var(--sp-2);
   border-top: 1px solid var(--border-subtle);
 }
 
 #settings-open-sidebar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   width: 100%;
-  padding: 5px 8px;
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   font: inherit;
@@ -1109,7 +1142,7 @@ body.layout-dragging #sess-resizer::after {
 /* 收起后的竖条：上半是展开按钮，下半是设置入口（只显示齿轮） */
 #sidebar.collapsed #sidebar-foot {
   border-top: 0;
-  padding: 4px 0;
+  padding: var(--sp-1) 0;
 }
 
 #sidebar.collapsed #settings-open-sidebar span {
@@ -1118,13 +1151,13 @@ body.layout-dragging #sess-resizer::after {
 
 #sidebar.collapsed #settings-open-sidebar {
   justify-content: center;
-  padding: 5px 0;
+  padding: var(--sp-2) 0;
 }
 
 #sess-expand {
   flex: 1 1 auto;
   width: 100%;
-  padding: 10px 0;
+  padding: var(--sp-4) 0;
   border: 0;
   background: transparent;
   color: var(--text-link);
@@ -1152,7 +1185,7 @@ body.layout-dragging #sess-resizer::after {
 .sess-state {
   flex: none;
   color: var(--warn);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 
 .sess-state:empty {
@@ -1171,15 +1204,15 @@ body.layout-dragging #sess-resizer::after {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 0 6px;
+  padding: 0 var(--sp-2);
 }
 
 .sess-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 6px;
-  border-radius: 6px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   cursor: pointer;
   white-space: nowrap;
@@ -1193,18 +1226,18 @@ body.layout-dragging #sess-resizer::after {
   position: relative;
   background: var(--bg-active);
   color: var(--text-strong);
-  box-shadow: inset 0 0 0 1px var(--focus-ring);
+  /* 选中态只用「柔底 + 细条」一个信号，不再叠内描边 */
 }
 
 .sess-row.active::before {
   content: "";
   position: absolute;
   left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--info);
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
 }
 
 .sess-row.active .sess-name {
@@ -1217,8 +1250,8 @@ body.layout-dragging #sess-resizer::after {
   flex: none;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px 6px;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
   border-bottom: 1px solid var(--border);
 }
 
@@ -1229,13 +1262,13 @@ body.layout-dragging #sess-resizer::after {
 .bulk-bar button {
   flex: none;
   height: 22px;
-  padding: 0 7px;
+  padding: 0 var(--sp-3);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   line-height: 1;
   cursor: pointer;
 }
@@ -1271,7 +1304,7 @@ body.layout-dragging #sess-resizer::after {
   margin: 0;
   appearance: none;
   border: 1px solid var(--border-strong);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--bg-panel);
   cursor: pointer;
   transition: background-color 0.1s ease, border-color 0.1s ease;
@@ -1328,7 +1361,6 @@ body.layout-dragging #sess-resizer::after {
 
 .sess-dot.connected {
   background: var(--accent);
-  box-shadow: 0 0 6px -1px var(--accent);
 }
 
 .sess-dot.activity {
@@ -1338,7 +1370,6 @@ body.layout-dragging #sess-resizer::after {
 @keyframes sess-dot-blink {
   50% {
     opacity: 0.25;
-    box-shadow: 0 0 1px var(--accent);
   }
 }
 
@@ -1356,10 +1387,10 @@ body.layout-dragging #sess-resizer::after {
   box-sizing: border-box;
   width: 100%;
   margin: -1px 0;
-  padding: 0 4px;
+  padding: 0 var(--sp-1);
   background: var(--bg-sunken);
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   outline: 0;
   color: var(--text-strong);
   font: inherit;
@@ -1371,7 +1402,7 @@ body.layout-dragging #sess-resizer::after {
   background: transparent;
   border: 0;
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   opacity: 0;
 }
@@ -1452,20 +1483,25 @@ body.layout-dragging .panel-height::after {
 }
 
 #ports-head {
-  padding: 4px 6px 4px 4px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-1);
 }
 
-/* 刷新时间放在列表上方，不挤占标题栏的按钮位置 */
+/* 刷新时间放在列表上方，不挤占标题栏的按钮位置。
+   与文件栏的 #files-refreshed 保持一致：文字自成一条信息行，上方由标题栏的
+   下边框、下方由自己的下边框各画一条细线把它夹在中间，上下留出空白，
+   不和下面的端口行贴在一起。 */
 #ports-refreshed {
   flex: none;
-  padding: 2px 10px 4px;
-  color: var(--text-dim);
-  font-size: 10px;
-  line-height: 12px;
-  white-space: nowrap;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--accent-section);
+  font-size: var(--fs-xs);
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 #ports-refreshed[hidden] {
@@ -1480,12 +1516,11 @@ body.layout-dragging .panel-height::after {
   flex: none;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 5px var(--accent);
   animation: refresh-pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes refresh-pulse {
-  50% { opacity: 0.35; box-shadow: 0 0 1px var(--accent); }
+  50% { opacity: 0.35; }
 }
 
 /* 端口行是只读展示：没有 ＋、没有右键、点了不做事。
@@ -1506,15 +1541,15 @@ body.layout-dragging .panel-height::after {
   min-height: 0;
   max-height: none;
   overflow: auto;
-  padding: 0 6px;
+  padding: 0 var(--sp-2);
 }
 
 .port-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 6px;
-  border-radius: 6px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font: inherit;
 }
@@ -1535,9 +1570,9 @@ body.layout-dragging .panel-height::after {
 
 #ports-status {
   flex: none;
-  padding: 4px 10px;
+  padding: var(--sp-1) var(--sp-4);
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   overflow-wrap: anywhere;
 }
 
@@ -1612,7 +1647,7 @@ body.layout-dragging .panel-height::after {
   justify-content: center;
   color: var(--text-faint);
   background: var(--bg-app);
-  font-size: 12px;
+  font-size: var(--fs-md);
 }
 
 /* 留白写在 .xterm 自己身上，不能留在 #term-host：FitAddon 量的是宿主的
@@ -1622,7 +1657,7 @@ body.layout-dragging .panel-height::after {
 #term-host .xterm {
   height: 100%;
   box-sizing: border-box;
-  padding: 8px 10px 6px;
+  padding: var(--sp-3) var(--sp-4) var(--sp-2);
 }
 
 /* xterm 自带样式给 `.xterm-viewport` 写了 `background-color: #000`。画布只覆盖字符区，
@@ -1676,7 +1711,7 @@ body.layout-dragging .panel-height::after {
   right: 0;
   height: 2px;
   background: transparent;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 #inputbar-resizer:hover::after,
@@ -1700,11 +1735,11 @@ body.layout-dragging {
   box-sizing: border-box;
   gap: 0;
   margin: 0 10px 8px;
-  padding: 8px 10px 7px;
+  padding: var(--sp-3) var(--sp-4) var(--sp-3);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(var(--bg-panel-hi), var(--bg-dialog));
-  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md)/1.6 var(--font-mono);
   color: var(--text-muted);
   opacity: 1;
   overflow: hidden;
@@ -1732,22 +1767,22 @@ body.layout-dragging {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-4);
   min-width: 0;
   min-height: 30px;
-  padding-top: 4px;
+  padding-top: var(--sp-1);
 }
 
 #ib-history {
   flex: none;
   height: 30px;
-  padding: 4px 9px;
+  padding: var(--sp-1) var(--sp-4);
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font: inherit;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: nowrap;
   cursor: pointer;
@@ -1762,7 +1797,7 @@ body.layout-dragging {
   display: flex;
   flex: 1 1 auto;
   align-items: center;
-  gap: 7px;
+  gap: var(--sp-3);
   min-width: 0;
 }
 
@@ -1789,17 +1824,15 @@ body.layout-dragging {
 
 #own-dot.ok {
   background: var(--accent);
-  box-shadow: 0 0 7px -1px var(--accent);
 }
 
 #own-dot.guess {
   background: var(--warn);
-  box-shadow: 0 0 7px -1px var(--warn);
 }
 
 #own-label {
   min-width: 0;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
   white-space: nowrap;
 }
@@ -1843,7 +1876,7 @@ body.layout-dragging {
   max-height: none;
   resize: none;
   overflow: auto;
-  padding: 4px 0;
+  padding: var(--sp-1) 0;
   box-sizing: border-box;
   background: transparent;
   border: 0;
@@ -1871,7 +1904,7 @@ body.layout-dragging {
 
 #ib-hint {
   flex: none;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--text-faint);
   white-space: nowrap;
 }
@@ -1882,7 +1915,7 @@ body.layout-dragging {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
 #ib-actions[hidden] {
@@ -1894,13 +1927,13 @@ body.layout-dragging {
   flex: none;
   min-width: 34px;
   height: 30px;
-  padding: 4px 9px;
+  padding: var(--sp-1) var(--sp-4);
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font: inherit;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: nowrap;
   cursor: pointer;
@@ -1912,14 +1945,14 @@ body.layout-dragging {
   justify-content: center;
   min-width: 58px;
   height: 30px;
-  padding: 4px 12px;
+  padding: var(--sp-1) var(--sp-5);
   background: var(--accent-solid);
   border: 1px solid var(--accent-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   /* 主色块上的字单独给一个变量：浅色主题里 --text-strong 是深墨色，压在深绿底上看不清 */
   color: var(--on-accent);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: nowrap;
   cursor: pointer;
@@ -1969,7 +2002,7 @@ body.layout-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--warn);
 }
 
@@ -1982,7 +2015,6 @@ body.layout-dragging {
 /* 状态点：主动断开是琥珀，读写失败是红；连上时仍用绿色 ok */
 #own-dot.warn {
   background: var(--warn);
-  box-shadow: 0 0 7px -1px var(--warn);
 }
 
 #own-dot.err {
@@ -2011,9 +2043,9 @@ body.layout-dragging {
   right: 10px;
   bottom: calc(100% + 6px);
   max-width: min(520px, calc(100% - 20px));
-  padding: 3px 9px;
+  padding: var(--sp-1) var(--sp-4);
   border: 1px solid var(--danger-border);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   background: var(--danger-bg);
   box-shadow: 0 6px 18px -10px var(--shadow-color);
   white-space: normal;
@@ -2030,7 +2062,7 @@ body.layout-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 
 /* 串口的 HEX 模式亮着时提示「这次发送按十六进制解析」 */
@@ -2059,12 +2091,12 @@ body.layout-dragging {
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 40px);
   overflow: auto;
-  padding: 14px 16px 12px;
+  padding: 14px var(--sp-6) var(--sp-5);
   background: var(--bg-dialog);
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 18px 48px -12px var(--shadow-strong);
-  font: 12px/1.7 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md)/1.7 var(--font-ui);
   color: var(--text-muted);
 }
 
@@ -2079,7 +2111,7 @@ body.layout-dragging {
 }
 
 #session-head button {
-  padding: 0 6px;
+  padding: 0 var(--sp-2);
   background: transparent;
   border: 0;
   color: var(--text-dim);
@@ -2094,7 +2126,7 @@ body.layout-dragging {
 #session-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
+  gap: var(--sp-3) var(--sp-5);
   margin-bottom: 10px;
 }
 
@@ -2102,7 +2134,7 @@ body.layout-dragging {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
@@ -2114,13 +2146,13 @@ body.layout-dragging {
 #session-grid select {
   width: 100%;
   box-sizing: border-box;
-  padding: 4px 8px;
+  padding: var(--sp-1) var(--sp-3);
   background: var(--bg-sunken);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
@@ -2134,38 +2166,38 @@ body.layout-dragging {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 18px;
+  gap: var(--sp-2) 18px;
   margin: 0;
-  padding: 6px 10px 8px;
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
 }
 
 #session-transport-field legend {
-  padding: 0 4px;
+  padding: 0 var(--sp-1);
   color: var(--text-dim);
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
 }
 
 #session-transport-field label {
   flex-direction: row;
   align-items: center;
-  gap: 5px;
-  font-size: 12px;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
   color: var(--text-muted);
   cursor: pointer;
 }
 
 #session-terminal {
   display: grid;
-  gap: 8px;
+  gap: var(--sp-3);
 }
 
 #session-terminal label {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
@@ -2173,13 +2205,13 @@ body.layout-dragging {
 #session-terminal select {
   width: 100%;
   box-sizing: border-box;
-  padding: 4px 8px;
+  padding: var(--sp-1) var(--sp-3);
   background: var(--bg-sunken);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
@@ -2207,21 +2239,21 @@ body.layout-dragging {
 
 .dialog-hint {
   color: var(--warn);
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
 
 #serial-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
+  gap: var(--sp-3) var(--sp-5);
 }
 
 #serial-grid label {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
@@ -2233,13 +2265,13 @@ body.layout-dragging {
 #serial-grid select {
   width: 100%;
   box-sizing: border-box;
-  padding: 4px 8px;
+  padding: var(--sp-1) var(--sp-3);
   background: var(--bg-sunken);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-md);
   outline: none;
 }
 
@@ -2255,7 +2287,7 @@ body.layout-dragging {
 
 .serial-inline {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
 .serial-inline input {
@@ -2267,7 +2299,7 @@ body.layout-dragging {
   width: 30px;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font: inherit;
   cursor: pointer;
@@ -2283,7 +2315,7 @@ body.layout-dragging {
 .baud-field {
   display: flex;
   align-items: stretch;
-  gap: 6px;
+  gap: var(--sp-2);
   min-width: 0;
 }
 
@@ -2297,7 +2329,7 @@ body.layout-dragging {
   width: 28px;
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
@@ -2321,14 +2353,14 @@ body.layout-dragging {
   align-items: center;
   gap: 14px;
   margin-top: 10px;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
 #serial-flags label {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
   color: var(--text-muted);
 }
 
@@ -2340,7 +2372,7 @@ body.layout-dragging {
 #session-error {
   min-height: 1.7em;
   margin-top: 8px;
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--danger);
   white-space: pre-wrap;
 }
@@ -2349,15 +2381,15 @@ body.layout-dragging {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--sp-3);
   margin-top: 4px;
 }
 
 #session-foot button {
-  padding: 4px 14px;
+  padding: var(--sp-1) 14px;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   color: var(--text-muted);
   font: inherit;
   cursor: pointer;
@@ -2389,11 +2421,11 @@ body.layout-dragging {
   right: 12px;
   z-index: 3;
   max-width: min(70%, 900px);
-  padding: 3px 8px;
+  padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-dialog);
-  font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-sm)/1.5 var(--font-mono);
   color: var(--text-dim);
   pointer-events: none;
   white-space: nowrap;
@@ -2417,9 +2449,9 @@ body.layout-dragging {
   z-index: 40;
   display: grid;
   place-items: center;
-  padding: 16px;
+  padding: var(--sp-6);
   background: var(--overlay-strong);
-  font: 13px/1.5 "Segoe UI", sans-serif;
+  font: var(--fs-md)/1.5 var(--font-ui);
 }
 .session-settings-dialog {
   width: min(560px, 100%);
@@ -2428,7 +2460,7 @@ body.layout-dragging {
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   background: var(--bg-dialog);
   color: var(--text);
   box-shadow: 0 18px 60px var(--shadow-strong);
@@ -2444,44 +2476,44 @@ body.layout-dragging {
   min-height: 44px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 16px;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-6);
   border-bottom: 1px solid var(--border);
 }
 .session-settings-dialog > header { cursor: move; touch-action: none; }
-.session-settings-dialog > header h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.session-settings-dialog > header h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-lg); font-weight: 600; }
 .session-settings-dialog > header button { margin-left: auto; width: 28px; height: 28px; border: 0; background: transparent; color: var(--text-muted); font-size: 20px; cursor: pointer; }
 .session-settings-body { min-height: 0; overflow: auto; }
-.session-settings-dialog section { padding: 10px 16px 12px; border-bottom: 1px solid var(--border); }
-.session-settings-dialog section h3 { margin: 0 0 6px; color: var(--accent-section); font-size: 11px; font-weight: 600; }
-.session-settings-dialog section label { min-height: 34px; display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr); align-items: center; gap: 12px; color: var(--text); }
+.session-settings-dialog section { padding: var(--sp-4) var(--sp-6) var(--sp-5); border-bottom: 1px solid var(--border); }
+.session-settings-dialog section h3 { margin: 0 0 6px; color: var(--accent-section); font-size: var(--fs-sm); font-weight: 600; }
+.session-settings-dialog section label { min-height: 34px; display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr); align-items: center; gap: var(--sp-5); color: var(--text); }
 .session-settings-dialog input[type="text"],
 .session-settings-dialog input[type="number"],
 .session-settings-dialog select {
-  width: 100%; min-width: 0; box-sizing: border-box; padding: 5px 7px;
-  border: 1px solid var(--border-strong); border-radius: 4px; outline: none;
-  background: var(--bg-sunken); color: var(--text-strong); font: 12px "Cascadia Mono", Consolas, monospace;
+  width: 100%; min-width: 0; box-sizing: border-box; padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); outline: none;
+  background: var(--bg-sunken); color: var(--text-strong); font: var(--fs-md) var(--font-mono);
 }
 .session-settings-dialog input[type="checkbox"] { justify-self: start; accent-color: var(--accent-strong); }
-.session-settings-path { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr); align-items: center; gap: 12px; min-height: 34px; }
+.session-settings-path { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 1.4fr); align-items: center; gap: var(--sp-5); min-height: 34px; }
 .session-settings-path > span:first-child { color: var(--text); }
-.session-settings-path-field { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-settings-path-field { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .session-settings-path-field input { flex: 1 1 auto; min-width: 0; }
 .session-settings-path button,
-.session-settings-dialog > footer button { min-height: 28px; padding: 3px 9px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-panel); color: var(--text); cursor: pointer; }
+.session-settings-dialog > footer button { min-height: 28px; padding: var(--sp-1) var(--sp-4); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-panel); color: var(--text); cursor: pointer; }
 /* 「浏览 / 打开」不参与收缩：空间不够时让输入框变窄，
    否则按钮会被挤到一个字宽，中文就竖着排成一列。 */
 .session-settings-path button { flex: none; white-space: nowrap; }
 .session-settings-dialog > footer { justify-content: flex-end; border-top: 0; border-bottom: 0; }
-.session-settings-error { flex: none; min-height: 0; padding: 0 16px; color: var(--danger); overflow-wrap: anywhere; }
-.session-settings-error:not(:empty) { padding-top: 8px; }
+.session-settings-error { flex: none; min-height: 0; padding: 0 var(--sp-6); color: var(--danger); overflow-wrap: anywhere; }
+.session-settings-error:not(:empty) { padding-top: var(--sp-3); }
 .session-settings-dialog button:disabled { opacity: .5; cursor: default; }
 .session-settings-dialog input[readonly] { opacity: .65; cursor: default; }
 
 @media (max-width: 520px) {
-  .session-settings-overlay { padding: 8px; }
-  .session-settings-dialog section label { grid-template-columns: minmax(95px, .8fr) minmax(0, 1.2fr); gap: 8px; }
-  .session-settings-path { grid-template-columns: minmax(95px, .8fr) minmax(0, 1.2fr); gap: 8px; }
+  .session-settings-overlay { padding: var(--sp-3); }
+  .session-settings-dialog section label { grid-template-columns: minmax(95px, .8fr) minmax(0, 1.2fr); gap: var(--sp-3); }
+  .session-settings-path { grid-template-columns: minmax(95px, .8fr) minmax(0, 1.2fr); gap: var(--sp-3); }
 }
 
 #hist-overlay {
@@ -2494,9 +2526,9 @@ body.layout-dragging {
   flex-direction: column;
   background: var(--bg-dialog);
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 10px 32px -8px var(--shadow-soft);
-  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md)/1.6 var(--font-mono);
   overflow: hidden;
   z-index: 20;
 }
@@ -2508,33 +2540,32 @@ body.layout-dragging {
 #hist-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-muted);
 }
 
 #hist-title {
-  font-size: 11px;
-  letter-spacing: 0.5px;
+  font-size: var(--fs-sm);
 }
 
 #hist-count {
   flex: 1 1 auto;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
 }
 
 #hist-clear,
 #hist-close {
   flex: none;
-  padding: 1px 6px;
+  padding: 1px var(--sp-2);
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font: inherit;
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
@@ -2553,7 +2584,7 @@ body.layout-dragging {
   border: 0;
   border-bottom: 1px solid var(--border-subtle);
   outline: 0;
-  padding: 6px 10px;
+  padding: var(--sp-2) var(--sp-4);
   background: var(--bg-sunken);
   color: var(--text-strong);
   font: inherit;
@@ -2564,22 +2595,21 @@ body.layout-dragging {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 4px 6px 6px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
 }
 
 .hist-day {
-  padding: 6px 6px 2px;
+  padding: var(--sp-2) var(--sp-2) 2px;
   color: var(--text-faint);
-  font-size: 10.5px;
-  letter-spacing: 0.5px;
+  font-size: var(--fs-sm);
 }
 
 .hist-row {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  padding: 3px 8px;
-  border-radius: 5px;
+  gap: var(--sp-4);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm);
   color: var(--text);
   cursor: pointer;
   white-space: pre;
@@ -2601,19 +2631,19 @@ body.layout-dragging {
 .hist-badge {
   flex: none;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
 }
 
 .hist-older {
   flex: none;
   color: var(--warn);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 
 .hist-time {
   flex: none;
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
 }
 
 .hist-empty {
@@ -2623,10 +2653,10 @@ body.layout-dragging {
 }
 
 #hist-foot {
-  padding: 4px 10px 6px;
+  padding: var(--sp-1) var(--sp-4) var(--sp-2);
   border-top: 1px solid var(--border-subtle);
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-sm);
 }
 
 /* ---------- 会话快捷指令 ---------- */
@@ -2636,24 +2666,24 @@ body.layout-dragging {
 }
 
 #shortcuts-head {
-  padding: 4px 6px 4px 4px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-1);
 }
 
 /* 行内那四个操作按钮（↑ ↓ ✎ ×）的样式在文件前面「行内图标按钮」一节，
    和会话行的「⋯」共用一套，这里不再重复定义。 */
-#shortcuts-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 3px; }
-#shortcuts-status { flex: none; min-height: 13px; padding: 1px 6px; color: var(--text-dim); font-size: 10px; overflow-wrap: anywhere; }
+#shortcuts-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: var(--sp-1); }
+#shortcuts-status { flex: none; min-height: 13px; padding: 1px var(--sp-2); color: var(--text-dim); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 /* 一行就是一张卡片：命令区与右侧操作按钮共用同一层边框与底色，
    按钮不再孤零零地落在面板背景上。 */
-.shortcut-row { display: flex; gap: 2px; align-items: center; margin-bottom: 2px; padding: 1px 3px 1px 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-dialog); }
+.shortcut-row { display: flex; gap: 2px; align-items: center; margin-bottom: 2px; padding: 1px var(--sp-1) 1px 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-dialog); }
 .shortcut-row:hover { border-color: var(--border-hover); background: var(--bg-raised); }
-.shortcut-card { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: 3px 6px; border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.shortcut-card { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; padding: var(--sp-1) var(--sp-2); border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
 .shortcut-card:disabled { cursor: default; }
-.shortcut-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 11px; }
-.shortcut-command { grid-column: 1; grid-row: 2; min-width: 0; color: var(--text-muted); font-size: 10px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shortcut-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: var(--fs-sm); }
+.shortcut-command { grid-column: 1; grid-row: 2; min-width: 0; color: var(--text-muted); font-size: var(--fs-xs); line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 执行/填入：和右侧操作按钮同一档高度（19px）、同一圆角（4px），
    由 .shortcut-row 的 align-items:center 统一垂直居中，四种控件一条线。 */
-.shortcut-mode { flex: none; height: 19px; padding: 0 6px; border-radius: 4px; font-size: 10px; line-height: 19px; }
+.shortcut-mode { flex: none; height: 19px; padding: 0 var(--sp-2); border-radius: var(--radius-sm); font-size: var(--fs-xs); line-height: 19px; }
 /* 文字色不用 --accent-strong：它在暗色主题里压在 --accent-bg 上只有 2.8:1，
    十套主题里最差的一档。--accent-section 是按主题调过深浅的「浅主色文字」，
    暗色下 5.3 起步、浅色下 4.1 打底，一套写法通吃。 */
@@ -2661,18 +2691,20 @@ body.layout-dragging {
 .shortcut-mode.fill { color: var(--warn); background: var(--warn-bg); }
 .shortcut-controls { flex: none; display: flex; flex-direction: row; gap: 2px; padding-right: 2px; }
 
-#shortcut-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 16px; background: var(--overlay-strong); }
+/* 弹窗字体基准：和另外三个 overlay 一样显式声明，否则中文会掉回浏览器默认的宋体、
+   字号也不是 scale 里的值（名称/命令框就是这么变得和界面格格不入的）。 */
+#shortcut-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: var(--sp-6); background: var(--overlay-strong); font: var(--fs-md)/1.5 var(--font-ui); }
 #shortcut-overlay[hidden] { display: none; }
-#shortcut-form { width: min(480px, 100%); display: grid; gap: 12px; padding: 16px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-dialog); color: var(--text); box-shadow: 0 16px 48px var(--shadow-strong); }
-#shortcut-dialog-head, #shortcut-dialog-foot { display: flex; align-items: center; gap: 8px; }
-#shortcut-dialog-head { justify-content: space-between; font-size: 14px; cursor: move; touch-action: none; }
-#shortcut-form > label { display: grid; gap: 5px; color: var(--text-muted); }
-#shortcut-form input[type="text"], #shortcut-form textarea { box-sizing: border-box; width: 100%; padding: 7px; border: 1px solid var(--border-strong); border-radius: 4px; outline: 0; background: var(--bg-sunken); color: var(--text-strong); font: inherit; }
-#shortcut-form textarea { resize: vertical; min-height: 100px; font-family: "Cascadia Mono", Consolas, monospace; }
+#shortcut-form { width: min(480px, 100%); display: grid; gap: var(--sp-5); padding: var(--sp-6); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-dialog); color: var(--text); box-shadow: 0 16px 48px var(--shadow-strong); }
+#shortcut-dialog-head, #shortcut-dialog-foot { display: flex; align-items: center; gap: var(--sp-3); }
+#shortcut-dialog-head { justify-content: space-between; font-size: var(--fs-lg); cursor: move; touch-action: none; }
+#shortcut-form > label { display: grid; gap: var(--sp-2); color: var(--text-muted); }
+#shortcut-form input[type="text"], #shortcut-form textarea { box-sizing: border-box; width: 100%; padding: var(--sp-3); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); outline: 0; background: var(--bg-sunken); color: var(--text-strong); font: inherit; }
+#shortcut-form textarea { resize: vertical; min-height: 100px; font-family: var(--font-mono); }
 #shortcut-form input:focus, #shortcut-form textarea:focus { border-color: var(--accent-strong); }
-#shortcut-form fieldset { display: flex; gap: 18px; border: 1px solid var(--border-strong); border-radius: 4px; color: var(--text); }
-#shortcut-form fieldset label { display: inline-flex; align-items: center; gap: 6px; }
-#shortcut-dialog-head button, #shortcut-dialog-foot button { padding: 5px 10px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg-panel); color: var(--text); font: inherit; cursor: pointer; }
+#shortcut-form fieldset { display: flex; gap: 18px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text); }
+#shortcut-form fieldset label { display: inline-flex; align-items: center; gap: var(--sp-2); }
+#shortcut-dialog-head button, #shortcut-dialog-foot button { padding: var(--sp-2) var(--sp-4); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-panel); color: var(--text); font: inherit; cursor: pointer; }
 #shortcut-error { flex: 1 1 auto; color: var(--danger); }
 
 /* ---------- 文件面板（M4）：跟随焦点会话的 CWD ---------- */
@@ -2687,7 +2719,7 @@ body.layout-dragging {
   flex-direction: column;
   background: var(--bg-chrome);
   border-left: 1px solid var(--border-subtle);
-  font: 12px/1.5 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md)/1.5 var(--font-ui);
   user-select: none;
 }
 
@@ -2744,7 +2776,7 @@ body.layout-dragging {
 #files-expand {
   flex: 1 1 auto;
   width: 100%;
-  padding: 10px 0;
+  padding: var(--sp-4) 0;
   border: 0;
   background: transparent;
   color: var(--text-link);
@@ -2779,7 +2811,7 @@ body.layout-dragging {
 }
 
 #files-head {
-  padding: 4px 6px 4px 4px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-1);
 }
 
 /* 操作行（#files-tools）用 .panel-toolbar 的通用样式，这里只补它自己的宽度限制 */
@@ -2792,9 +2824,9 @@ body.layout-dragging {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   min-height: 26px;
-  padding: 4px 10px;
+  padding: var(--sp-1) var(--sp-4);
   color: var(--text-muted);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -2818,7 +2850,7 @@ body.layout-dragging {
 .f-crumb {
   flex: none;
   padding: 0 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
 
@@ -2838,7 +2870,7 @@ body.layout-dragging {
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   font: inherit;
@@ -2854,23 +2886,23 @@ body.layout-dragging {
   flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
-  padding: 2px 6px;
+  padding: 2px var(--sp-2);
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   outline: none;
   background: var(--bg-sunken);
   color: var(--text-strong);
-  font: 12px "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md) var(--font-mono);
 }
 
 #files-refreshed {
   flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-4);
   color: var(--accent-section);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -2883,7 +2915,7 @@ body.layout-dragging {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 4px 0;
+  padding: var(--sp-1) 0;
 }
 
 /* 列表可被点空白处聚焦（F5 刷新的落点）；鼠标点击不画焦点框，键盘进入才画 */
@@ -2899,9 +2931,9 @@ body.layout-dragging {
 .f-row {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) auto auto;
-  gap: 6px;
+  gap: var(--sp-2);
   align-items: center;
-  padding: 1px 10px;
+  padding: 1px var(--sp-4);
   color: var(--text);
   cursor: default;
 }
@@ -2949,21 +2981,21 @@ body.layout-dragging {
 .f-size,
 .f-time {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 
 .f-empty {
-  padding: 8px 10px;
+  padding: var(--sp-3) var(--sp-4);
   color: var(--text-dim);
 }
 
 #files-foot {
   flex: none;
-  padding: 4px 10px;
+  padding: var(--sp-1) var(--sp-4);
   border-top: 1px solid var(--border-subtle);
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2980,25 +3012,25 @@ body.layout-dragging {
   min-width: 132px;
   max-width: min(320px, calc(100vw - 12px));
   box-sizing: border-box;
-  padding: 4px;
+  padding: var(--sp-1);
   background: var(--bg-dialog);
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 10px 28px var(--shadow-soft);
   color: var(--text);
-  font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md)/1.6 var(--font-ui);
   user-select: none;
 }
 
 .popup-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   width: 100%;
   min-height: 24px;
-  padding: 3px 8px;
+  padding: var(--sp-1) var(--sp-3);
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -3023,7 +3055,7 @@ body.layout-dragging {
 .popup-item .popup-hint {
   flex: none;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 
 .popup-item:hover:not(:disabled),
@@ -3060,44 +3092,44 @@ body.layout-dragging {
   max-height: min(680px, 92vh);
   overflow: auto;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   background: var(--bg-dialog);
   color: var(--text);
   box-shadow: 0 18px 60px var(--shadow-strong);
-  font: 13px/1.5 "Segoe UI", sans-serif;
+  font: var(--fs-md)/1.5 var(--font-ui);
 }
 #settings-dialog > header,
 #settings-dialog > footer {
   min-height: 44px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 16px;
+  gap: var(--sp-5);
+  padding: 0 var(--sp-6);
   border-bottom: 1px solid var(--border);
 }
-#settings-dialog > header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+#settings-dialog > header h2 { margin: 0; font-size: var(--fs-lg); font-weight: 600; }
 /* 整条标题栏是拖动把手（与其它弹窗一致）：光标与触控提示跟着变 */
 #settings-dialog > header { cursor: move; touch-action: none; }
 #settings-dialog > header button,
 #settings-dialog > footer button,
 .settings-update button {
   min-height: 28px;
-  padding: 3px 10px;
+  padding: var(--sp-1) var(--sp-4);
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-panel);
   color: var(--text);
   cursor: pointer;
 }
 #settings-dialog > header button { margin-left: auto; width: 28px; padding: 0; font-size: 18px; }
-.settings-section { padding: 12px 16px 14px; border-bottom: 1px solid var(--border); }
-.settings-section h3 { margin: 0 0 8px; color: var(--accent-section); font-size: 11px; font-weight: 600; }
+.settings-section { padding: var(--sp-5) var(--sp-6) 14px; border-bottom: 1px solid var(--border); }
+.settings-section h3 { margin: 0 0 8px; color: var(--accent-section); font-size: var(--fs-sm); font-weight: 600; }
 .settings-section > label {
   min-height: 36px;
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(130px, 1.4fr);
   align-items: center;
-  gap: 12px;
+  gap: var(--sp-5);
   color: var(--text);
 }
 .settings-section input[type="number"],
@@ -3106,38 +3138,38 @@ body.layout-dragging {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  padding: 5px 7px;
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   outline: none;
   background: var(--bg-sunken);
   color: var(--text-strong);
-  font: 12px "Cascadia Mono", Consolas, monospace;
+  font: var(--fs-md) var(--font-ui);
 }
 .settings-section input[type="checkbox"] { justify-self: start; accent-color: var(--accent-strong); }
-.settings-section output { color: var(--text-muted); font-size: 11px; }
-.settings-update { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-section output { color: var(--text-muted); font-size: var(--fs-sm); }
+.settings-update { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
 .settings-update span { flex: 1 1 180px; min-width: 0; color: var(--text-muted); overflow-wrap: anywhere; }
 .settings-update button:disabled { opacity: .5; cursor: default; }
 
 /* 功能栏设置：一行一个面板，勾选控制可见性，↑↓ 调整上下顺序（ADR 0007） */
-.settings-hint { margin: -2px 0 8px; color: var(--text-dim); font-size: 11px; line-height: 1.5; }
+.settings-hint { margin: -2px 0 8px; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.5; }
 .settings-rightbar {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 .settings-rightbar li {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) 24px 24px;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-3);
   min-height: 30px;
-  padding: 2px 6px;
+  padding: 2px var(--sp-2);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-sunken);
 }
 .settings-rightbar input[type="checkbox"] {
@@ -3152,7 +3184,7 @@ body.layout-dragging {
   height: 24px;
   padding: 0;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--bg-panel);
   color: var(--text-muted);
   font: inherit;
@@ -3167,11 +3199,11 @@ body.layout-dragging {
   opacity: 0.4;
   cursor: default;
 }
-#settings-dialog > footer { justify-content: flex-end; border-top: 0; border-bottom: 0; color: var(--text-dim); font-size: 11px; }
+#settings-dialog > footer { justify-content: flex-end; border-top: 0; border-bottom: 0; color: var(--text-dim); font-size: var(--fs-sm); }
 
 @media (max-width: 560px) {
-  #settings-overlay { padding: 10px; }
-  .settings-section > label { grid-template-columns: minmax(90px, .8fr) minmax(0, 1.2fr); gap: 8px; }
+  #settings-overlay { padding: var(--sp-4); }
+  .settings-section > label { grid-template-columns: minmax(90px, .8fr) minmax(0, 1.2fr); gap: var(--sp-3); }
 }
 
 /* ---------- 项目：项目行、分格标题条 ---------- */
@@ -3183,7 +3215,7 @@ body.layout-dragging {
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   font: inherit;
@@ -3197,11 +3229,12 @@ body.layout-dragging {
 }
 
 .proj-row {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 6px 3px 2px;
-  border-radius: 4px;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) 2px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text);
 }
@@ -3223,7 +3256,7 @@ body.layout-dragging {
   border: 0;
   background: transparent;
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
@@ -3233,33 +3266,66 @@ body.layout-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--fs-md);
 }
+
+/* 项目身份色块：项目行唯一的图形锚点，让同类行不再是清一色文字 */
+.proj-name::before {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 7px;
+  border-radius: 3px;
+  background: var(--proj-tone-1);
+  vertical-align: -1px;
+}
+
+.proj-row[data-tone="1"] .proj-name::before { background: var(--proj-tone-2); }
+.proj-row[data-tone="2"] .proj-name::before { background: var(--proj-tone-3); }
+.proj-row[data-tone="3"] .proj-name::before { background: var(--proj-tone-4); }
 
 .proj-count {
   flex: none;
-  min-width: 16px;
-  text-align: right;
-  color: var(--text-faint);
-  font-size: 11px;
+  min-width: 18px;
+  padding: 1px var(--sp-2);
+  border-radius: 999px;
+  background: var(--bg-chip);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  text-align: center;
+  line-height: 1.5;
 }
 
 .proj-frozen {
   flex: none;
   color: var(--accent-section);
-  font-size: 11px;
+  font-size: var(--fs-sm);
 }
 
 .proj-empty,
 .proj-child-empty {
-  padding: 8px 10px;
+  padding: var(--sp-3) var(--sp-4);
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
 
+/* 子会话：竖向引导线连到父项目的 chevron，层级不再只靠缩进猜 */
 .sess-row.child {
-  padding-left: 18px;
+  position: relative;
+  padding-left: 22px;
+}
+
+.sess-row.child::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 
 /* 项目格子：标题条 + 主体。只有标题条可拖动，终端区域留给 xterm 选区。 */
@@ -3272,13 +3338,13 @@ body.layout-dragging {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   height: 24px;
-  padding: 0 4px 0 8px;
+  padding: 0 var(--sp-1) 0 var(--sp-3);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   cursor: grab;
   user-select: none;
 }
@@ -3312,10 +3378,10 @@ body.layout-dragging {
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-faint);
-  font-size: 14px;
+  font-size: var(--fs-lg);
   line-height: 18px;
   cursor: pointer;
 }
@@ -3365,31 +3431,31 @@ body.layout-dragging {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--sp-2);
   background: var(--bg-app);
   color: var(--text-muted);
   text-align: center;
-  padding: 12px;
+  padding: var(--sp-5);
 }
 
 .pane-cold-title {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-md);
 }
 
 .pane-cold-detail {
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
 }
 
 .pane-wake {
   margin-top: 4px;
-  padding: 3px 10px;
+  padding: var(--sp-1) var(--sp-4);
   border: 1px solid var(--accent-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-link);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
@@ -3464,14 +3530,14 @@ body.pane-drag-active .pane-head {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--sp-2);
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: var(--fs-md);
 }
 
 .main-empty-title {
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-lg);
 }
 
 .main-empty-hint {
@@ -3480,9 +3546,9 @@ body.pane-drag-active .pane-head {
 
 .main-empty-action {
   margin-top: 12px;
-  padding: 5px 16px;
+  padding: var(--sp-2) var(--sp-6);
   border: 1px solid var(--accent-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg-chip);
   color: var(--text-strong);
   font: inherit;
@@ -3513,40 +3579,40 @@ body.pane-drag-active .pane-head {
   width: min(420px, calc(100vw - 40px));
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px;
+  gap: var(--sp-4);
+  padding: var(--sp-6);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--bg-panel);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .35);
 }
 
 .project-dialog h3 {
   margin: 0 0 4px;
-  font-size: 14px;
+  font-size: var(--fs-lg);
   color: var(--text-strong);
 }
 
 .project-dialog label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--sp-1);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--fs-sm);
 }
 
 .project-dialog input {
-  padding: 5px 7px;
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--bg-app);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-md);
 }
 
 .project-stats {
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-sm);
 }
 
 .project-stats[hidden],
@@ -3556,28 +3622,94 @@ body.pane-drag-active .pane-head {
 
 .project-error {
   color: var(--danger);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   white-space: pre-wrap;
 }
 
 .project-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--sp-3);
   margin-top: 4px;
 }
 
 .project-actions button {
-  padding: 4px 12px;
+  padding: var(--sp-1) var(--sp-5);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 
 .project-actions button.primary {
   border-color: var(--accent-border);
   color: var(--text-strong);
+}
+
+/* ---------- 键盘焦点与交互反馈 ----------
+   :focus-visible 只在键盘 / 无障碍导航时命中，鼠标点击不画环。
+   显式列出带 ID 的表单容器：它们的 outline:none 优先级更高，
+   只在键盘进入时把焦点环加回来。 */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+.proj-row:focus-visible,
+.sess-row:focus-visible,
+.shortcut-card:focus-visible,
+#files-list:focus-visible,
+#hist-query:focus-visible,
+#session-grid input:focus-visible,
+#session-grid select:focus-visible,
+#session-terminal input:focus-visible,
+#session-terminal select:focus-visible,
+#serial-grid input:focus-visible,
+#serial-grid select:focus-visible,
+#shortcut-form input:focus-visible,
+#shortcut-form textarea:focus-visible,
+.session-settings-dialog input:focus-visible,
+.session-settings-dialog select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 按下态：轻微下沉，给点击一个确认感 */
+button:active:not(:disabled),
+.proj-row:active,
+.sess-row:active,
+.shortcut-card:active {
+  transform: translateY(1px);
+}
+
+/* 底色 / 边框 / 文字统一 120ms 过渡，避免状态硬跳 */
+button,
+.proj-row,
+.sess-row,
+.shortcut-card,
+[role="button"] {
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+/* 数字等宽：计数 / 时间 / 波特率刷新时列不左右跳动，小数点成列对齐 */
+.proj-count,
+.hist-time,
+.f-size,
+.f-time,
+.project-stats,
+.port-label,
+.baud-field input[type="number"],
+.sess-state {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 尊重系统「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

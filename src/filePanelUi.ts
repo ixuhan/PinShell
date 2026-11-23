@@ -39,7 +39,7 @@ import {
 // 拖动调宽/调高的手势与 body 上的类名三个面板共用，别各自再写一份
 import { DRAGGING_CLASS, dragHeight, dragWidth } from "./resize";
 import { clampPanelHeight, RIGHT_BAR_EVENT } from "./rightBar";
-import { panelColumnBudget } from "./rightBarUi";
+import { FILL_CLASS, panelColumnBudget } from "./rightBarUi";
 
 export interface FilePanelDeps {
   /// 当前焦点会话的 id；没有会话时返回空串
@@ -69,6 +69,10 @@ function loadStored(): FilePanelStore {
 /// 拖动时把宽度夹进合法区间；规则在 `filePanel.ts`，这里只提供窗口与左栏的实时宽度。
 export function setupFilePanel(deps: FilePanelDeps) {
   const root = document.getElementById("files") as HTMLElement;
+  /// 文件面板本身（`#files-panel`）。高度、可见性与 `rb-fill` 都看它；
+  /// `root` 是整条功能栏（`#files`），管的是宽度与整栏收起，两者别混用。
+  const panel = document.getElementById("files-panel") as HTMLElement;
+  const mainEl = document.getElementById("files-main") as HTMLDivElement;
   const expandBtn = document.getElementById("files-expand") as HTMLButtonElement;
   const modeBtn = document.getElementById("files-mode") as HTMLButtonElement;
   const sortBtn = document.getElementById("files-sort") as HTMLButtonElement;
@@ -131,9 +135,9 @@ export function setupFilePanel(deps: FilePanelDeps) {
   let upTarget: string | null = null;
   let token = 0;
   let selected: HTMLElement | null = null;
-  /// 重画后按名字恢复选中：自动刷新每 3 秒重建一次列表，不能把用户点的那行弄丢
+  /// 重画后按名字恢复选中：自动刷新每秒重建一次列表，不能把用户点的那行弄丢
   let selectedName: string | null = null;
-  /// 自动刷新的定时器与连续失败次数（失败要退避，别对断开的网络盘每 3 秒重试）
+  /// 自动刷新的定时器与连续失败次数（失败要退避，别对断开的网络盘每秒重试）
   let autoTimer: number | undefined;
   let autoFailures = 0;
 
@@ -618,7 +622,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       auto &&
       expanded &&
       !collapsed &&
-      !root.hidden &&
+      !panel.hidden &&
       deps.sessionId() !== "" &&
       document.visibilityState === "visible" &&
       !isPopupMenuOpen() &&
@@ -654,7 +658,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
   /// 拉一次目录。返回 false 表示没拉成（没会话、被更新的请求取代、读盘失败）。
   async function reload(sessionOverride?: string): Promise<boolean> {
     // 面板被取消勾选时不读盘；重新勾选时由 `pinshell:rightbar` 补一次
-    if (root.hidden) return false;
+    if (panel.hidden) return false;
     const id = sessionOverride ?? deps.sessionId();
     // 切了会话就先换上它自己的设置，再按那套设置决定列哪个目录
     bindSession(id);
@@ -679,7 +683,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
         showHidden
       });
       if (mine !== token || id !== boundId || id !== (sessionOverride ?? deps.sessionId())) return false;
-      // 内容完全一样就不动 DOM：自动刷新不该每 3 秒把列表重建一遍
+      // 内容完全一样就不动 DOM：自动刷新不该每秒把列表重建一遍
       if (!sameListing(lastListing, listing)) render(listing);
       showLastRefresh(new Date());
       return true;
@@ -749,8 +753,11 @@ export function setupFilePanel(deps: FilePanelDeps) {
   autoBtn.addEventListener("click", () => {
     auto = !auto;
     autoFailures = 0;
-    save();
     syncChrome();
+    // 「刷新于」那一行开关自动刷新才占高度；面板正好卡在下限时补一次高度，
+    // 免得新出现的一行把页脚挤出面板（折叠/撑满状态下 handle 不存在，夹取仍是安全的）。
+    applyHeight();
+    save();
     if (auto) {
       void reload(); // 立刻刷一次，用户马上能看到开关生效
     } else {
@@ -773,23 +780,47 @@ export function setupFilePanel(deps: FilePanelDeps) {
   // 三个面板共用一套规则：各自记住高度，最后一个展开的面板由 rightBarUi 挂 `rb-fill` 撑满；
   // 撑满时手柄被 CSS 收掉，这里也拦一道，防止点到已经隐藏的手柄。
   const heightHandle = document.getElementById("files-height") as HTMLDivElement;
-  /// 夹取高度：既不超过可用高度的 70%，也不把别的定高面板挤到栏底之外。
+  /// 面板里「列表之外」那几行的最小高度：标题栏 + 操作行 + 路径栏 + 刷新行 + 页脚，
+  /// 再加上列表自己的内边距与边框（`min-height: 0` 也压不掉这些）。
+  /// 矮于它时列表已经没有空间，再缩只会把固定行挤出面板、盖到下一个面板上，
+  /// 所以它同时是拖动的下限。宽度变窄让操作行换行时，这个值会跟着变大。
+  function chromeHeight(): number {
+    const head = panel.querySelector<HTMLElement>(".panel-head");
+    let sum = head ? head.getBoundingClientRect().height : 0;
+    for (const child of mainEl.children) {
+      if (child === listEl) continue;
+      sum += child.getBoundingClientRect().height;
+    }
+    // 列表本身能缩到 0，但内边距与边框还在
+    const listStyle = getComputedStyle(listEl);
+    sum +=
+      parseFloat(listStyle.paddingTop) +
+      parseFloat(listStyle.paddingBottom) +
+      parseFloat(listStyle.borderTopWidth) +
+      parseFloat(listStyle.borderBottomWidth);
+    return Math.ceil(sum);
+  }
+  /// 夹取高度：既不超过可用高度的 70%，也不把别的定高面板挤到栏底之外；
+  /// 再矮也不能矮过面板自己的固定行（`chromeHeight`）。
   /// 可用高度为 0（整栏收起）时 `panelColumnBudget` 会退回窗口高度。
   const clampHeight = (desired: number) => {
-    const budget = panelColumnBudget(root);
-    return clampPanelHeight(Math.min(desired, budget.room), budget.available);
+    const budget = panelColumnBudget(panel);
+    // 折叠时 `.panel-body` 不参与布局，量出来的固定行高度是 0；
+    // 这时只按可用空间夹，别把用户存下来的高度压到下限。
+    const wanted = expanded ? Math.max(desired, chromeHeight()) : desired;
+    return clampPanelHeight(Math.min(wanted, budget.room), budget.available);
   };
   function applyHeight() {
     height = clampHeight(height);
-    root.style.setProperty("--files-height", `${height}px`);
+    panel.style.setProperty("--files-height", `${height}px`);
   }
 
   heightHandle.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || !expanded || root.classList.contains("rb-fill")) return;
+    if (event.button !== 0 || !expanded || panel.classList.contains(FILL_CLASS)) return;
     event.preventDefault();
     dragHeight(event, heightHandle, {
       edge: "bottom",
-      startHeight: root.getBoundingClientRect().height,
+      startHeight: panel.getBoundingClientRect().height,
       clamp: clampHeight,
       onHeight: (next) => {
         height = next;
@@ -874,7 +905,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
   // 重新出现时补一次列表——否则回来的是一份上次留下的旧目录内容。
   document.addEventListener(RIGHT_BAR_EVENT, () => {
     scheduleAuto();
-    if (!root.hidden && expanded && !collapsed && !lastListing) void reload();
+    if (!panel.hidden && expanded && !collapsed && !lastListing) void reload();
   });
 
   // 窗口被遮住/最小化时没必要继续读盘；回到前台先补一次（这期间文件可能变了）

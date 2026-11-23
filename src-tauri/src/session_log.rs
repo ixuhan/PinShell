@@ -236,40 +236,27 @@ impl RuntimeLog {
         }
     }
 
-    /// 文件始终记录接收原文；串口换行转换只影响返回的显示文本。
+    /// 串口「单独的 \r 视为换行」：屏幕和用户日志都改用同一份转换结果。
+    /// 日志以前保留设备的原始字节，可 Windows 上的编辑器（记事本、VS Code）
+    /// 不认单独的 `\r` 为行尾，整段日志看着就是一行——和屏幕对不上。
     /// 日志写入失败时关闭日志文件，仍返回显示内容；调用方无法从此接口获知该写入错误。
     pub fn receive(&mut self, text: &str, is_serial: bool) -> Result<String, String> {
-        let display_text = if is_serial && self.settings.cr_as_newline {
-            let mut out = String::with_capacity(text.len());
-            for c in text.chars() {
-                let in_escape = advance_escape(&mut self.serial_escape, c);
-                if self.serial_after_cr {
-                    self.serial_after_cr = false;
-                    if !in_escape && c == '\n' {
-                        continue;
-                    }
-                }
-                if !in_escape && c == '\r' {
-                    out.push_str("\r\n");
-                    self.serial_after_cr = true;
-                } else {
-                    out.push(c);
-                }
-            }
-            out
+        let converted = if is_serial && self.settings.cr_as_newline {
+            Some(self.cr_to_newline(text))
         } else {
             self.serial_after_cr = false;
             // 跟踪控制序列，即使此时未开启转换，后续设置变化也不会破坏它。
             for c in text.chars() {
                 advance_escape(&mut self.serial_escape, c);
             }
-            text.to_owned()
+            None
         };
+        let text = converted.as_deref().unwrap_or(text);
         self.rotate_if_pending();
         let fmt = timestamp_format(&self.settings.timestamp_format);
         let display = self
             .display
-            .render(&display_text, self.settings.console_timestamps, fmt.as_ref());
+            .render(text, self.settings.console_timestamps, fmt.as_ref());
         let write_failed = if let Some(file) = &mut self.file {
             let content = self
                 .logged
@@ -293,6 +280,29 @@ impl RuntimeLog {
             self.dirty_since.get_or_insert(Instant::now());
         }
         Ok(display)
+    }
+
+    /// 裸 `\r` 立刻落成 `\r\n`，紧跟着的 `\n`（CRLF 的后半截）只吞掉、不重复断行。
+    /// 跨块靠 `serial_after_cr` 记住「上一块以 `\r` 结尾」，所以一块正好切在
+    /// `\r` 和 `\n` 之间时也只会产生一次换行。
+    fn cr_to_newline(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            let in_escape = advance_escape(&mut self.serial_escape, c);
+            if self.serial_after_cr {
+                self.serial_after_cr = false;
+                if !in_escape && c == '\n' {
+                    continue;
+                }
+            }
+            if !in_escape && c == '\r' {
+                out.push_str("\r\n");
+                self.serial_after_cr = true;
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -584,8 +594,10 @@ mod tests {
             ..Default::default()
         }
     }
+    /// 单独的 `\r` 在屏幕和日志里都断行：日志写的是 CRLF，Windows 编辑器
+    /// 才认它是行尾；紧跟着的 `\n`（CRLF 的后半截）不重复断行。
     #[test]
-    fn serial_cr_crosses_chunks_without_delaying_display_or_changing_file() {
+    fn lone_cr_breaks_the_screen_and_the_log_as_crlf() {
         let d = dir();
         let mut s = settings(&d);
         s.cr_as_newline = true;
@@ -594,7 +606,64 @@ mod tests {
         assert_eq!(log.receive("\nb\rc", true).unwrap(), "b\r\nc");
         // BufWriter 的内容在 flush 前不可见：drop 走兜底 flush 后再读
         drop(log);
-        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "a\r\nb\rc");
+        assert_eq!(
+            fs::read_to_string(d.join("test.log")).unwrap(),
+            "a\r\nb\r\nc"
+        );
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// 原生 CRLF 只算一次换行：转换不能把 `\r\n` 拆成两行。
+    #[test]
+    fn native_crlf_stays_one_break_in_the_log() {
+        let d = dir();
+        let mut s = settings(&d);
+        s.cr_as_newline = true;
+        let mut log = RuntimeLog::new(s).unwrap();
+        assert_eq!(log.receive("a\r\nb", true).unwrap(), "a\r\nb");
+        drop(log);
+        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "a\r\nb");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// 一块数据以 `\r` 结尾时立刻断行：光标不会悬在行首等下一块。
+    #[test]
+    fn cr_at_the_end_of_a_read_breaks_immediately() {
+        let d = dir();
+        let mut s = settings(&d);
+        s.cr_as_newline = true;
+        let mut log = RuntimeLog::new(s).unwrap();
+        assert_eq!(log.receive("a\r", true).unwrap(), "a\r\n");
+        assert_eq!(log.receive("b", true).unwrap(), "b");
+        drop(log);
+        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "a\r\nb");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// 控制序列里的 `\r` 是参数/数据，不算换行（与时间戳插入同一套跟踪）。
+    #[test]
+    fn cr_inside_a_control_sequence_is_not_a_line_break() {
+        let d = dir();
+        let mut s = settings(&d);
+        s.cr_as_newline = true;
+        let mut log = RuntimeLog::new(s).unwrap();
+        assert_eq!(log.receive("\x1b[31\rma", true).unwrap(), "\x1b[31\rma");
+        drop(log);
+        assert_eq!(
+            fs::read_to_string(d.join("test.log")).unwrap(),
+            "\x1b[31\rma"
+        );
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// 没勾选时行为不变：屏幕和日志都原样保留裸 `\r`。
+    #[test]
+    fn raw_cr_is_kept_when_the_option_is_off() {
+        let d = dir();
+        let mut log = RuntimeLog::new(settings(&d)).unwrap();
+        assert_eq!(log.receive("a\rb", true).unwrap(), "a\rb");
+        drop(log);
+        assert_eq!(fs::read_to_string(d.join("test.log")).unwrap(), "a\rb");
         fs::remove_dir_all(d).unwrap();
     }
     #[test]

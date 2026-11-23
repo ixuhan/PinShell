@@ -145,6 +145,8 @@ pub struct SessionMeta {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSettings {
+    /// 串口「单独的 \r 视为换行」：裸 CR 在屏幕和会话日志里都落成 CRLF。
+    /// 界面标签为「单独的 \r 视为换行」；默认关闭，保持设备原始字节的观感。
     pub cr_as_newline: bool,
     pub console_timestamps: bool,
     pub file_timestamps: bool,

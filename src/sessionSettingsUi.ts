@@ -54,7 +54,7 @@ export function setupSessionSettingsUi(deps: SessionSettingsDeps) {
           <label><span data-i18n="sessionSettings.fontSize">字体大小</span><input name="font_size" type="number" min="${MIN_FONT_SIZE}" max="${MAX_FONT_SIZE}" step="1" autocomplete="off"></label>
         </section>
         <section><h3 data-i18n="sessionSettings.sectionTerminal">终端与时间</h3>
-          <label><span data-i18n="sessionSettings.crAsNewline">回车作为换行</span><input name="cr_as_newline" type="checkbox"></label>
+          <label><span data-i18n="sessionSettings.crAsNewline">单独的 \\r 视为换行</span><input name="cr_as_newline" type="checkbox" data-i18n-title="sessionSettings.crAsNewlineHint"></label>
           <label><span data-i18n="sessionSettings.consoleTimestamps">控制台显示时间戳</span><input name="console_timestamps" type="checkbox"></label>
           <label><span data-i18n="sessionSettings.fileTimestamps">文件记录时间戳</span><input name="file_timestamps" type="checkbox"></label>
           <label><span data-i18n="sessionSettings.timestampFormat">时间戳格式</span><input name="timestamp_format" type="text" autocomplete="off" spellcheck="false" data-i18n-title="sessionSettings.timestampFormatHint"></label>

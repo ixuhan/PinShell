@@ -295,7 +295,7 @@ export function panelTarget(
 }
 
 /// 同一目录的两次列目录结果是否完全一样。自动刷新靠它决定要不要重画：
-/// 内容没变就什么都不动，滚动位置与选中行不会被 3 秒一次的轮询打断。
+/// 内容没变就什么都不动，滚动位置与选中行不会被每秒一次的轮询打断。
 export function sameListing(previous: FsListing | null, next: FsListing): boolean {
   if (!previous) return false;
   if (
@@ -325,15 +325,16 @@ export function sameListing(previous: FsListing | null, next: FsListing): boolea
   return true;
 }
 
-/// 自动刷新的基础周期：普通目录 3 秒；条目多的目录放慢到 10 秒。
-/// 读盘是每条目两次 stat、重绘是整表重建，几千项的目录按 3 秒轮询并不划算。
-export const AUTO_REFRESH_MS = 3000;
+/// 自动刷新的基础周期：普通目录 1 秒，与串口面板的轮询节拍对齐；
+/// 条目多的目录放慢到 10 秒——读盘是每条目两次 stat、重绘是整表重建，
+/// 几千项的目录按 1 秒轮询并不划算。
+export const AUTO_REFRESH_MS = 1000;
 export const AUTO_REFRESH_SLOW_MS = 10000;
 /// 过滤前（含隐藏项）超过这个条目数就按「大目录」放慢。
 export const AUTO_REFRESH_SLOW_TOTAL = 1000;
 
-/// 下一次自动刷新等多久：大目录放慢；连续失败时指数退避（最多 24 秒），
-/// 免得一个不可读的目录或断开的网络盘每 3 秒重试一次。
+/// 下一次自动刷新等多久：大目录放慢；连续失败时指数退避（1 秒起步，最多 24 秒），
+/// 免得一个不可读的目录或断开的网络盘每秒重试一次。
 export function autoRefreshDelay(total: number, failures: number): number {
   const base = total > AUTO_REFRESH_SLOW_TOTAL ? AUTO_REFRESH_SLOW_MS : AUTO_REFRESH_MS;
   if (failures <= 0) return base;

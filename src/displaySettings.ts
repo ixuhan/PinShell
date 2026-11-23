@@ -5,7 +5,7 @@
 // 于是收敛成这里的常量——不再有 localStorage 读写，也不会因为存坏了而改变行为。
 
 /// 终端字体。等宽字体优先，找不到时回退到系统自带的三档。
-export const TERMINAL_FONT_FAMILY = '"Cascadia Mono", Consolas, "Courier New", monospace';
+export const TERMINAL_FONT_FAMILY = '"Cascadia Mono", Consolas, "Courier New", "Microsoft YaHei UI", "PingFang SC", monospace';
 
 /// 光标是否闪烁。终端里光标闪烁更容易找到焦点，保持开启。
 export const TERMINAL_CURSOR_BLINK = true;

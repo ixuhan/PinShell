@@ -60,9 +60,12 @@ interface FakeElement {
   dataset: Record<string, string>;
   children: FakeElement[];
   parentElement: FakeElement | null;
+  listeners: Map<string, Array<() => void>>;
   append(child: FakeElement): void;
   remove(): void;
   contains(target: unknown): boolean;
+  addEventListener(type: string, fn: () => void): void;
+  fire(type: string): void;
 }
 
 function fakeElement(): FakeElement {
@@ -71,6 +74,7 @@ function fakeElement(): FakeElement {
     dataset: {},
     children: [],
     parentElement: null,
+    listeners: new Map<string, Array<() => void>>(),
     append(child) {
       // 真 DOM 的 append 会先把节点从旧父节点上摘下来，假节点必须照做，
       // 否则「搬 hostEl」这件事在测试里会看起来像多复制了一份。
@@ -88,6 +92,14 @@ function fakeElement(): FakeElement {
     },
     contains(target) {
       return target === el;
+    },
+    addEventListener(type, fn) {
+      const list = el.listeners.get(type) ?? [];
+      list.push(fn);
+      el.listeners.set(type, list);
+    },
+    fire(type) {
+      for (const fn of el.listeners.get(type) ?? []) fn();
     }
   };
   return el;
@@ -180,6 +192,32 @@ describe("TerminalPool", () => {
     pool.disposeAll();
     expect(pool.all()).toHaveLength(0);
     expect(counts.webglDisposed).toBe(2);
+  });
+
+  it("reports focusin from the view so the app can switch session context", async () => {
+    const { TerminalPool } = await import("./terminalViews");
+    const focused: string[] = [];
+    const pool = new TerminalPool({
+      fontFamily: "mono",
+      fontSize: 13,
+      lineHeight: 1.4,
+      cursorBlink: false,
+      scrollback: 100,
+      theme: () => ({}),
+      webglEnabled: false,
+      onData: () => {},
+      onFocus: (id) => focused.push(id)
+    });
+    const a = pool.attach("a", container() as unknown as HTMLElement, true);
+    const b = pool.attach("b", container() as unknown as HTMLElement, true);
+
+    // 点击 B 的终端主体：DOM 焦点落在 B 的宿主节点上，应用层据此切上下文
+    (b.hostEl as unknown as FakeElement).fire("focusin");
+    expect(focused).toEqual(["b"]);
+
+    // 程序化把焦点搬回 A 也走同一条上报；去重由应用层的 focusSessionId 判断负责
+    (a.hostEl as unknown as FakeElement).fire("focusin");
+    expect(focused).toEqual(["b", "a"]);
   });
 
   it("does not mount WebGL when the global switch is off", async () => {

@@ -129,11 +129,33 @@ pub(crate) fn st_end(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 ///
 /// 快照里的**终端查询**一律删掉：那是上一个进程问的，早就没人等了，
 /// 画上去只会让终端再答一次，答案回到新 Shell 里就是乱码。
-pub fn compose(previous: &str) -> String {
-    if previous.is_empty() {
-        return String::new();
+/// 去掉历史 `compose` 留在尾部、可能被换行隔开的 TAIL_RESET；其余字节（含末尾换行）原样保留。
+/// 只剥 reset 不剥换行，是为了不破坏「半行/整行」的换行语义。
+fn strip_trailing_reset(mut text: &str) -> &str {
+    loop {
+        let without_breaks = text.trim_end_matches(['\r', '\n']);
+        if let Some(rest) = without_breaks.strip_suffix(TAIL_RESET) {
+            text = rest;
+        } else {
+            return text;
+        }
     }
-    let previous = without_host_queries(previous);
+}
+
+pub fn compose(previous: &str) -> String {
+    // 快照会被 seed→save→seed 反复读写：save 把整个回放缓冲（含上次 seed 的分隔线）
+    // 原样落盘，下次 seed 再读回来。若这里每次都追加一条，分隔线就会逐次累积，
+    // 直到把整屏塞满、真实提示符被挤出可视区。
+    // 所以只取「最后一条分隔线之后」的内容作为上次屏幕：compose 的输出里永远只有一条。
+    // 全是分隔线的坏快照（历史遗留）会命中下面的 find → None，返回空，不再画任何东西。
+    let Some(recent) = previous
+        .rsplit(SEPARATOR)
+        .find(|part| !part.trim().is_empty())
+    else {
+        return String::new();
+    };
+    // 剥掉上一次 compose 追加的 reset，保证 compose(compose(x)) == compose(x)
+    let previous = without_host_queries(strip_trailing_reset(recent));
     let mut out = String::with_capacity(previous.len() + SEPARATOR.len() + TAIL_RESET.len() + 2);
     out.push_str(previous.as_ref());
     for switch in DROPPED_SWITCHES {
@@ -207,11 +229,29 @@ mod tests {
 
     #[test]
     fn compose_is_idempotently_prefixed() {
-        // 反复重开：每次都在最前面追加自己的分隔线，历史内容原样保留
+        // 反复重开：分隔线不累积，快照里永远只有一条。
+        // 这条约束很关键——save 会把 compose 的结果原样落盘，非幂等就会逐次 +1。
         let once = compose("old\r\n");
         let twice = compose(&once);
-        assert!(twice.starts_with("old\r\n"));
-        assert_eq!(twice.matches("上次会话结束于此").count(), 2);
+        let thrice = compose(&twice);
+        assert!(twice.contains("old"));
+        assert_eq!(twice.matches("上次会话结束于此").count(), 1);
+        assert_eq!(thrice.matches("上次会话结束于此").count(), 1);
+        assert_eq!(twice, thrice);
+    }
+
+    #[test]
+    fn compose_cleans_up_already_polluted_snapshots() {
+        // 历史遗留的坏快照：一堆分隔线叠在一起，几乎没真实内容。
+        // 清洗后只剩最后一段有效内容，分隔线收敛到一条。
+        let polluted = format!("{}\r\nold last screen\r\n{}", SEPARATOR, SEPARATOR);
+        let out = compose(&polluted);
+        assert_eq!(out.matches("上次会话结束于此").count(), 1);
+        assert!(out.contains("old last screen"));
+
+        // 极端：全是分隔线，没有真实内容 → 不画任何东西（不该凭空留一条线）
+        let only_seps = format!("{}{}{}", SEPARATOR, SEPARATOR, SEPARATOR);
+        assert_eq!(compose(&only_seps), "");
     }
 
     #[test]

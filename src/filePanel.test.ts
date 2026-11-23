@@ -323,17 +323,17 @@ describe("排序字段与方向", () => {
 });
 
 describe("autoRefreshDelay", () => {
-  it("普通目录 3 秒，大目录放慢到 10 秒", () => {
+  it("普通目录 1 秒，大目录放慢到 10 秒", () => {
     expect(autoRefreshDelay(20, 0)).toBe(AUTO_REFRESH_MS);
     expect(autoRefreshDelay(AUTO_REFRESH_SLOW_TOTAL, 0)).toBe(AUTO_REFRESH_MS);
     expect(autoRefreshDelay(AUTO_REFRESH_SLOW_TOTAL + 1, 0)).toBe(AUTO_REFRESH_SLOW_MS);
   });
 
   it("连续失败按 2 的幂退避，最多 24 秒", () => {
-    expect(autoRefreshDelay(20, 1)).toBe(6000);
-    expect(autoRefreshDelay(20, 2)).toBe(12000);
-    expect(autoRefreshDelay(20, 3)).toBe(24000);
-    expect(autoRefreshDelay(20, 9)).toBe(24000);
+    expect(autoRefreshDelay(20, 1)).toBe(2000);
+    expect(autoRefreshDelay(20, 2)).toBe(4000);
+    expect(autoRefreshDelay(20, 3)).toBe(8000);
+    expect(autoRefreshDelay(20, 9)).toBe(8000);
     expect(autoRefreshDelay(5000, 2)).toBe(24000);
   });
 });

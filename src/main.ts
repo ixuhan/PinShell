@@ -172,7 +172,12 @@ const pool = new TerminalPool({
   theme: () => xtermTheme(readTheme()),
   webglEnabled: TERMINAL_WEBGL,
   onData: (id, data) => onViewData(id, data),
-  onBell: () => trace("BEL fired in xterm")
+  onBell: () => trace("BEL fired in xterm"),
+  // 点终端主体（而不是项目树/标题条）时也要切上下文：DOM 焦点落到哪个视图，
+  // focusSessionId 就跟过去。相等时直接返回，挡掉 pool.focus() 引起的回环。
+  onFocus: (id) => {
+    if (id !== focusSessionId) void focusProjectPane(id);
+  }
 });
 
 /// 焦点终端的唯一出口。**从阶段 1 起就是可空**：空壳项目、冷格占位、
@@ -859,14 +864,21 @@ function showTerminalSelectionMenu(text: string, x: number, y: number) {
   );
 }
 
-document.getElementById("term-host")!.addEventListener("contextmenu", (event) => {
+/// 右键落在终端选区上时弹「复制」，返回 true 表示这次右键已被处理。
+/// 分格后 xterm 挂在 .pane 内：contextmenu 从终端往外冒，.pane 会比 #term-host
+/// 先收到事件。所以 .pane 的处理器必须先调这里，否则它自己的 stopPropagation
+/// 会把复制菜单截断，只剩「关格 / 移除」——复制选项就是这样丢的。
+function tryCopySelectionMenu(event: MouseEvent): boolean {
   // 右键落在哪个格子就复制哪个格子的选区：分格之后不能再看「焦点终端」
   const view = viewAt(event.target);
-  if (!view || !view.term.hasSelection()) return;
+  if (!view || !view.term.hasSelection()) return false;
   event.preventDefault();
   event.stopPropagation();
   showTerminalSelectionMenu(view.term.getSelection(), event.clientX, event.clientY);
-});
+  return true;
+}
+
+document.getElementById("term-host")!.addEventListener("contextmenu", tryCopySelectionMenu);
 
 function openSessionSettings(session: TreeSession) {
   void sessionSettingsUi?.open(session.id, session.title, session.transport === "serial");
@@ -933,6 +945,15 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
     run: () => openSessionSettings(session)
   };
 
+  /// 重启：结束旧运行时并立即用同一 id 拉起新的。卡住没反应时的一键恢复入口。
+  /// 串口会话同样适用（断开端口再重连）。冷会话没有运行时，改从格子的「重新拉起」进入。
+  const restartItem: PopupItem = {
+    label: t("session.restart"),
+    title: t("session.restartHint"),
+    disabled: !isLive,
+    run: () => void restartSession(session.id)
+  };
+
   /// 冻结：结束进程/端口但保留记录、历史与屏幕，点开会按原参数重新拉起。
   /// 与「删除」是两件事，所以单独一项；冷会话无运行时可结束，禁用。
   const freezeItem: PopupItem = {
@@ -973,7 +994,7 @@ function showSessionMenu(session: TreeSession, x: number, y: number) {
     }
   };
 
-  const items: PopupItem[] = [pauseItem, clearItem, overrideItem, renameItem, settingsItem, freezeItem, deleteItem];
+  const items: PopupItem[] = [pauseItem, clearItem, overrideItem, renameItem, settingsItem, restartItem, freezeItem, deleteItem];
 
   // 后台会话没有本地状态：向它问一次，回来再把标签改对
   if (isLive && session.id !== focusSessionId) {
@@ -1029,6 +1050,10 @@ function renderProjectRows() {
     const row = document.createElement("div");
     row.className = "proj-row" + (project.id === activeProjectId ? " active" : "");
     row.dataset.projectId = project.id;
+    // 项目身份色：按 id 稳定 hash 到 4 档，同一项目颜色固定，避免每次重排换色
+    let tone = 0;
+    for (let i = 0; i < project.id.length; i++) tone = (tone * 31 + project.id.charCodeAt(i)) % 4;
+    row.dataset.tone = String(tone);
     row.title = project.root ?? project.name;
 
     const chevron = document.createElement("button");
@@ -1261,7 +1286,7 @@ function buildSessionRow(session: TreeSession) {
         }
         return; // 双击名称仍交给上面的重命名处理器；会话行双击切换状态
       }
-      void focusProjectPane(session.id);
+      void focusSessionRow(session);
     });
     sessList.append(row);
 }
@@ -1503,6 +1528,8 @@ function buildProjectPane(id: string): HTMLElement {
   pane.append(head, body);
 
   pane.addEventListener("contextmenu", (event) => {
+    // 有终端选区时优先弹「复制」，别让格子菜单吞掉这次右键
+    if (tryCopySelectionMenu(event)) return;
     event.preventDefault();
     event.stopPropagation();
     showPaneMenu(id, event.clientX, event.clientY);
@@ -1643,6 +1670,24 @@ async function wakePane(id: string) {
 function paintProjectFocus() {
   for (const pane of document.querySelectorAll<HTMLElement>(".project-pane")) {
     pane.classList.toggle("focused", pane.dataset.session === focusSessionId);
+  }
+}
+
+/// 项目栏会话行单击：先确保它所属的项目已经打开在主区，再把焦点搬到这一格。
+/// 跨项目时只调 focusProjectPane 会得到一个「焦点 id 在主区没有视图」的悬空状态：
+/// 归属、历史、输入条全部按这个 id 查空，表现为会话能选中但什么也输不进去。
+async function focusSessionRow(session: TreeSession) {
+  if (session.owner !== activeProjectId) {
+    await selectProject(session.owner);
+  }
+  await focusProjectPane(session.id);
+  // 点会话行后必须把焦点交给这个会话的输入端。两条现成路径都不保证这一点：
+  // 同会话时 focusProjectPane 直接 pool.focus() 把焦点塞进终端 textarea；
+  // 换会话时 applyOwnership 只认「焦点在 body/按钮/输入控件」才接管，而此刻
+  // 焦点在被点的会话行 div 上，不满足。结果敲键全走终端直通，输入框收不到，
+  // 表现就是「切过去了但什么也输不进去」。这里按输入权明确归位。
+  if (focusSessionId === session.id && own?.id === session.id && !ib.disabled) {
+    ib.focus();
   }
 }
 
@@ -2198,6 +2243,36 @@ async function freezeSession(id: string) {
     ib.disabled = true;
     renderBarStatus();
     renderSendAvailability();
+  }
+}
+
+/// 重启会话运行时：结束旧进程后立即用同一 id 拉起新的，记录/历史/屏幕快照都保留。
+/// 用于 ConPTY 偶发僵死（进程还在、写能进、但不再吐输出，ownership 卡在 running）——
+/// 这种情况「暂停/继续」只翻标志位救不回来，必须重建 ConPTY 通道。
+async function restartSession(id: string) {
+  const meta = tree.find((session) => session.id === id);
+  if (!meta) return;
+  try {
+    await invoke("pty_freeze", { id });
+  } catch (err) {
+    console.warn(`[restart] freeze failed: ${String(err)}`);
+  }
+  // 旧运行时已结束：即使 freeze 报错也按僵死处理，避免把死通道又当成活的。
+  live.delete(id);
+  destroyView(id, { runtimeAlive: false });
+  suspended.delete(id);
+  try {
+    await spawn(id, meta.cwd, meta.shell, {
+      project: meta.owner,
+      target: null,
+      placement: "fill"
+    });
+    await refreshTree();
+    const project = currentProject();
+    if (project) mountProject(project);
+    await focusProjectPane(id);
+  } catch (err) {
+    showNotice(spawnErrorText(err), true, 8000);
   }
 }
 
