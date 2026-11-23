@@ -1,0 +1,41 @@
+name: Build
+
+# 纯构建验证：不签名、不发 Release，只产出 Windows 安装包并上传为 artifact。
+# 手动触发（workflow_dispatch）或 push 到 main 时运行。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app (NSIS + MSI)
+        # tauri.conf.json 的 updater 公钥是占位符；不设置 TAURI_SIGNING_PRIVATE_KEY
+        # 时构建走普通产物，不生成更新签名——正是这里想要的纯构建。
+        run: npm run tauri build
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: PinShell-windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
