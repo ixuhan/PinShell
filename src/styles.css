@@ -2022,6 +2022,12 @@ body.layout-dragging {
   box-shadow: 0 0 7px -1px var(--danger);
 }
 
+/* 查找条拿到键盘焦点时才现身的那个点：它说的是「按键现在归查找条」 */
+#own-dot.find {
+  display: inline-block;
+  background: var(--info);
+}
+
 #inputbar.serial {
   border-color: var(--info-bg);
 }
@@ -2658,6 +2664,75 @@ body.layout-dragging {
   color: var(--text-faint);
   font-size: var(--fs-sm);
 }
+
+/* ---------- 查找条（Ctrl+Shift+F）：浮在分格右上角 ----------
+   条本身挂在终端宿主里，所以绝对定位就能跟着分格走；不占布局，不影响 fit()。 */
+.find-bar {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-dialog);
+  box-shadow: 0 6px 20px -8px var(--shadow-soft);
+  font: var(--fs-sm)/1.4 var(--font-ui);
+}
+
+.find-bar[hidden] { display: none; }
+
+.find-bar .find-input {
+  flex: none;
+  width: 170px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  outline: 0;
+  padding: 2px 6px;
+  background: var(--bg-sunken);
+  color: var(--text-strong);
+  font: var(--fs-sm)/1.4 var(--font-mono);
+  caret-color: var(--accent);
+}
+
+/* 0 命中：输入框描红，比只把计数改成 0/0 更容易被看见 */
+.find-bar.nomatch .find-input { box-shadow: inset 0 0 0 1px var(--danger); }
+
+.find-bar .find-count {
+  flex: none;
+  min-width: 44px;
+  padding: 0 2px;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* 「已经到头了」：循环关掉时走到两端给一次瞬时提示，不静默不动 */
+.find-bar .find-count.edge { color: var(--warn); }
+
+.find-bar button {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.find-bar button:hover { color: var(--text-strong); border-color: var(--border); }
+.find-bar button.on { color: var(--accent); border-color: var(--accent-border); background: var(--accent-bg); }
+.find-bar .find-case { font-weight: 600; letter-spacing: -0.5px; }
+.find-bar .find-close { color: var(--text-faint); }
 
 /* ---------- 会话快捷指令 ---------- */
 #shortcuts-panel {
@@ -3660,6 +3735,7 @@ a:focus-visible,
 .shortcut-card:focus-visible,
 #files-list:focus-visible,
 #hist-query:focus-visible,
+.find-bar .find-input:focus-visible,
 #session-grid input:focus-visible,
 #session-grid select:focus-visible,
 #session-terminal input:focus-visible,

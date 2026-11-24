@@ -160,6 +160,18 @@ const DICT = {
   "history.count": ["{n} 条", "{n} items"],
   "history.countCapped": ["{n} 条 · 显示最近 {m}", "{n} items · showing latest {m}"],
 
+  // ---------- 查找（终端内容，Ctrl+Shift+F） ----------
+  "find.placeholder": ["查找本会话内容", "Find in this session"],
+  "find.hint": ["Enter 下一个 · Shift+Enter 上一个 · Esc 关闭", "Enter next · Shift+Enter previous · Esc closes"],
+  "find.countHint": ["第几个命中 / 命中总数", "Current match / total matches"],
+  "find.prev": ["上一个命中（Shift+Enter）", "Previous match (Shift+Enter)"],
+  "find.next": ["下一个命中（Enter）", "Next match (Enter)"],
+  "find.caseSensitive": ["区分大小写", "Match case"],
+  "find.wrap": ["循环查找", "Wrap around"],
+  "find.close": ["关闭（Esc）", "Close (Esc)"],
+  "find.edge": ["已经到头了", "No more matches this way"],
+  "find.ownsKeys": ["按键归查找条", "The find box owns the keys"],
+
   // ---------- 输入条 ----------
   "input.resize": ["拖动调整输入区高度 · 双击恢复默认", "Drag to resize the input area · double-click to reset"],
   "input.placeholder": ["输入命令", "Type a command"],

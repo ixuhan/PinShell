@@ -138,7 +138,7 @@
 | `$env:CARGO_TARGET_DIR="<repo>\src-tauri\target-m5"` 后 `.\scripts\test-guard.ps1 -Layer all -Force` | dev 在跑、又必须跑 L1 时：换一份独立 target，不碰被占用的 `target\debug`，也就不用停 dev | 首次全量编译几分钟，之后 ~3 s | 磁盘多一份 target（`src-tauri/target-*/` 已忽略）；`-Force` 只跳过闸门判断，不跳过测试 |
 | `.\scripts\push.ps1` | 先跑 L0 门禁再推；`-SkipTests` 可跳过 | +0.5 s | 无 |
 
-前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）、`src/outQueue.ts`（清屏后的输出过滤）、`src/sessionDialogUi.ts`（端口下拉文案）、`src/displaySettings.ts`（字号区间收敛）、`src/i18n.ts`（中英文词典与占位符）与 `src/theme.ts`（主题偏好与终端配色）都是值得测的纯函数模块，用 vitest（node 环境，不起窗口、不占 1420），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
+前端单测已接入：`src/history.ts`（Ghost Text / 检索 / 跨天锚点）、`src/historyCache.ts`（历史缓存契约）、`src/outQueue.ts`（清屏后的输出过滤）、`src/findBar.ts`（查找偏好 / 命中序号 / 到头判定 / 插件契约）、`src/findBarUi.test.ts`（查找条状态机，happy-dom + 桩插件）、`src/findBarAddon.test.ts`（真实插件的折行 / 大小写 / 绕回）、`src/sessionDialogUi.ts`（端口下拉文案）、`src/displaySettings.ts`（字号区间收敛）、`src/i18n.ts`（中英文词典与占位符）与 `src/theme.ts`（主题偏好与终端配色）都是值得测的纯函数模块，用 vitest（默认 node 环境，不起窗口、不占 1420；查找的两条 DOM 用例按文件切到 happy-dom），已并入 L0 门禁。L3 性能采集仍然靠 `npm run app:dev` 手工采集；卷轴上限的吞吐与内存用 `scripts/bench-scrollback.mjs` 单独测（不依赖窗口）。
 
 ## 7. 汇报（已落地）
 
@@ -261,6 +261,7 @@
 | L2-02 历史缓存契约 | `src/historyCache.ts` + `src/historyCache.test.ts` | 9 个用例：快照带 `upto_id` 且只留 5000 条、`id` 严格 +1 才追加、跳号整份重建、重复投递丢弃、非当前会话事件忽略、切会话丢弃整份缓存、同命令挪到最新、追加也按 5000 条挤掉最旧 |
 | Ghost Text | `src/main.ts` + `index.html` | 输入框后灰色建议，`→` 接受；建议不可选中，不改变输入直到被采纳 |
 | Ctrl+R 覆盖层 | `src/main.ts` + `index.html` + `src/styles.css` | `Esc` 恢复草稿、`Enter` 只填充不发送、40 ms 防抖后查全量、日期分隔行、`更早` 标记、两段式「清空本会话」 |
+| 查找（Ctrl+Shift+F） | `src/findBar.ts` + `src/findBarUi.ts` + `src/findBarAddon.test.ts` + `src/styles.css` | 每分格一条、只搜前端缓冲区（ADR 0009）；`Ctrl+Shift+F` 独占，`Ctrl+F` 留给 Shell 的 forward-char；Enter / Shift+Enter 走命中；循环关掉后在两端给「已经到头了」；切走隐藏、切回还原；清屏关闭；高亮上限 1000。折行、大小写、绕回由 `findBarAddon.test.ts` 钉住（happy-dom 下 `open()` 过真 xterm；纯 Node 没有 selection service，插件会抛 `TypeError`） |
 | 输入条交互边界（M3 打磨） | `src/main.ts` + `src/styles.css` | 输入法组合期间不发送、不画建议（`isComposing` + `composing` 双保险）；手动编辑后 `↑↓` 游标归位，不再从旧位置跳条；切会话清空草稿、关掉覆盖层并丢掉旧会话缓存；覆盖层按键（`Esc` / `↑↓` / `Enter` / `Tab`）统一挂在容器上，点过「清空」「关闭」之后仍生效；长按 `Ctrl+R` 与 `Ctrl+Shift+P/L` 只切一次；长命令的 Ghost 跟随横向滚动并在输入条边缘截断；空白回车不发送；按键热路径上的诊断 IPC 默认关闭（`#debug` 才开） |
 | 本地门禁 | `scripts/test-guard.ps1`（接入 `scripts/push.ps1`） | dev 在跑时自动只跑 L0 并说明原因；已验证「锁住 exe 时拒绝 L1」 |
 | L0-19 清屏过滤 | `src/outQueue.ts` + `src/outQueue.test.ts` | 4 个用例：下限之前的块全部丢掉、全丢时序号归零、下限为 0 一块不丢、乱序到达按到达顺序拼并取最大序号 |
