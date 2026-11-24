@@ -713,6 +713,21 @@ body {
   stroke: none;
 }
 
+/* 置顶（Always on top）：开着时图钉头填实、按钮亮主色，关掉时只剩描边轮廓。
+   和侧栏按钮「涂黑表示开」同一套读法，不用额外文字说明。 */
+#titlebar-tools svg .pin-body {
+  fill: transparent;
+}
+
+#titlebar-tools #win-pin[aria-pressed="true"] {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+#titlebar-tools #win-pin[aria-pressed="true"] .pin-body {
+  fill: currentColor;
+}
+
 #titlebar-actions {
   flex: none;
   display: flex;

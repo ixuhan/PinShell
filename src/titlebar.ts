@@ -1,7 +1,7 @@
 // 自绘标题栏：原生标题栏已在 tauri.conf.json 里关掉（decorations: false），
 // 这条顶栏就是窗口唯一的装饰，所以拖动、双击最大化、三个窗口按钮都得自己接。
 //
-// 右侧工具区放「收起项目栏 / 收起功能栏 / 全局设置」三个按钮——它们属于窗口级布局，
+// 右侧工具区放「收起项目栏 / 收起功能栏 / 全局设置 / 置顶」四个按钮——它们属于窗口级布局，
 // 放在标题栏比藏在各自侧栏的角落里更好找。样式在 styles.css 的 #titlebar 一节。
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -25,10 +25,30 @@ export function setupTitlebar(deps: TitlebarDeps): void {
   const minimizeBtn = document.getElementById("win-minimize") as HTMLButtonElement | null;
   const maximizeBtn = document.getElementById("win-maximize") as HTMLButtonElement | null;
   const closeBtn = document.getElementById("win-close") as HTMLButtonElement | null;
-  if (!dragArea || !leftBtn || !rightBtn || !minimizeBtn || !maximizeBtn || !closeBtn) return;
+  const pinBtn = document.getElementById("win-pin") as HTMLButtonElement | null;
+  if (!dragArea || !leftBtn || !rightBtn || !pinBtn || !minimizeBtn || !maximizeBtn || !closeBtn) return;
 
   const win = getCurrentWindow();
   let maximized = false;
+  let pinned = false;
+
+  /// 置顶状态同样现问 `isAlwaysOnTop()`：窗口可能被系统或其它入口改过。
+  /// 图标填充与提示文案都跟着真实状态走（按下态见 styles.css 的 `#win-pin` 一节）。
+  async function syncPinButton(): Promise<void> {
+    try {
+      pinned = await win.isAlwaysOnTop();
+    } catch {
+      // 拿不到就当未置顶
+    }
+    paintPinButton();
+  }
+
+  function paintPinButton(): void {
+    pinBtn!.setAttribute("aria-pressed", String(pinned));
+    const label = t(pinned ? "titlebar.unpin" : "titlebar.pin");
+    pinBtn!.title = label;
+    pinBtn!.setAttribute("aria-label", label);
+  }
 
   /// 最大化状态决定「最大化 / 还原」按钮的图标与提示。
   /// 用 `isMaximized()` 现问，不自己维护一份可能过期的布尔值。
@@ -72,7 +92,7 @@ export function setupTitlebar(deps: TitlebarDeps): void {
   }
 
   // 按钮都不抢焦点：点完还能接着在终端里敲键盘
-  for (const button of [leftBtn, rightBtn, minimizeBtn, maximizeBtn, closeBtn]) {
+  for (const button of [leftBtn, rightBtn, pinBtn, minimizeBtn, maximizeBtn, closeBtn]) {
     button.addEventListener("mousedown", (event) => event.preventDefault());
   }
 
@@ -85,6 +105,20 @@ export function setupTitlebar(deps: TitlebarDeps): void {
     syncBarButtons();
   });
   minimizeBtn.addEventListener("click", () => void win.minimize().catch(() => {}));
+  pinBtn.addEventListener("click", () => {
+    // 按当前真实状态取反，不依赖可能过期的本地变量
+    const next = !pinned;
+    void win
+      .setAlwaysOnTop(next)
+      .then(() => {
+        pinned = next;
+        paintPinButton();
+      })
+      .catch((err) => {
+        // 权限缺失时 setAlwaysOnTop 会抛错；留一条日志，别让按钮静默失效
+        console.warn(`[titlebar] setAlwaysOnTop: ${String(err)}`);
+      });
+  });
   maximizeBtn.addEventListener("click", () => {
     void win
       .toggleMaximize()
@@ -113,6 +147,7 @@ export function setupTitlebar(deps: TitlebarDeps): void {
   syncBarButtons();
   document.addEventListener("pinshell:rightbar", syncBarButtons);
   void syncMaximizeButton();
+  void syncPinButton();
   void win
     .onResized(() => {
       void syncMaximizeButton();
@@ -124,5 +159,6 @@ export function setupTitlebar(deps: TitlebarDeps): void {
   onLocaleChange(() => {
     syncBarButtons();
     paintMaximizeButton();
+    paintPinButton();
   });
 }

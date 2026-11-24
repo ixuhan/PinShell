@@ -18,6 +18,8 @@ const DICT = {
   "titlebar.expandRight": ["展开功能栏", "Expand the panel column"],
   "titlebar.noRightPanels": ["功能栏已全部关闭（在全局设置里打开）", "All panels are off (turn them on in global settings)"],
   "titlebar.settings": ["全局设置", "Global settings"],
+  "titlebar.pin": ["置顶", "Always on top"],
+  "titlebar.unpin": ["取消置顶", "Stop always on top"],
   "titlebar.minimize": ["最小化", "Minimize"],
   "titlebar.maximize": ["最大化", "Maximize"],
   "titlebar.restore": ["还原", "Restore"],
