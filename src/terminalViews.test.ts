@@ -236,4 +236,23 @@ describe("TerminalPool", () => {
     expect(view.webgl).toBeNull();
     expect(counts.webglCreated).toBe(0);
   });
+
+  it("turns LF into a real line break only for serial views", async () => {
+    // 串口设备常只发裸 `\n`：不开启 convertEol 时 xterm 只下移一行、列不动，
+    // 屏幕上每一行都从上一行结尾接着写（像没换行），日志文件却是正常分行。
+    const pool = await loadPool();
+    const serial = pool.attach("serial", container() as unknown as HTMLElement, true, true);
+    const terminal = pool.attach("term", container() as unknown as HTMLElement, true);
+    expect(serial.convertEol).toBe(true);
+    expect((serial.term as unknown as { options: Record<string, unknown> }).options.convertEol).toBe(true);
+    expect(terminal.convertEol).toBe(false);
+    expect((terminal.term as unknown as { options: Record<string, unknown> }).options.convertEol).toBe(false);
+
+    // 复用同一个视图时按新参数改，不重建终端
+    const again = pool.attach("serial", container() as unknown as HTMLElement, true, false);
+    expect(again).toBe(serial);
+    expect(again.convertEol).toBe(false);
+    expect((again.term as unknown as { options: Record<string, unknown> }).options.convertEol).toBe(false);
+    expect((again.term as unknown as { openCount: number }).openCount).toBe(1);
+  });
 });

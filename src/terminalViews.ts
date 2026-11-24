@@ -29,6 +29,8 @@ export interface TerminalView {
   /** 每次整屏重建 +1；回放回来时对不上就说明中间又切走了，丢弃这份过期内容。 */
   replayGen: number;
   fontSize: number;
+  /** 是否把裸 `\n` 也当成「回车 + 换行」（串口需要，见 `attach` 注释）。 */
+  convertEol: boolean;
 }
 
 export interface TerminalPoolOptions {
@@ -63,13 +65,24 @@ export class TerminalPool {
     return [...this.views.values()];
   }
 
-  /** 把一个会话的视图挂到格子里。已存在就只搬节点，不重建 Terminal。 */
-  attach(id: string, container: HTMLElement, visible: boolean): TerminalView {
+  /** 把一个会话的视图挂到格子里。已存在就只搬节点，不重建 Terminal。
+   *
+   *  `convertEol`：串口会话传 `true`。串口设备（尤其是嵌入式/Linux 板子）经常
+   *  只吐裸 `\n` 当行尾——真终端和 xterm 的默认语义是「只下移一行、列不动」，
+   *  于是屏幕上每一行都从上一行结尾处接着写（阶梯状、看着像没换行），
+   *  但同一个 `\n` 在日志文件里就是标准的换行。开启后 xterm 收到 `\n` 会先
+   *  回到列首再下移，屏幕和文件才对得上。终端会话保持默认（ConPTY 自己发 CRLF，
+   *  全屏程序也依赖裸 LF 的原始语义）。 */
+  attach(id: string, container: HTMLElement, visible: boolean, convertEol = false): TerminalView {
     let view = this.views.get(id);
     if (!view) {
-      view = this.create(id, container);
+      view = this.create(id, container, convertEol);
     } else if (view.hostEl.parentElement !== container) {
       container.append(view.hostEl);
+    }
+    if (view.convertEol !== convertEol) {
+      view.convertEol = convertEol;
+      view.term.options.convertEol = convertEol;
     }
     this.setVisible(id, visible);
     return view;
@@ -124,13 +137,14 @@ export class TerminalPool {
     for (const id of [...this.views.keys()]) this.dispose(id);
   }
 
-  private create(id: string, container: HTMLElement): TerminalView {
+  private create(id: string, container: HTMLElement, convertEol: boolean): TerminalView {
     const term = new Terminal({
       fontFamily: this.options.fontFamily,
       fontSize: this.options.fontSize,
       lineHeight: this.options.lineHeight,
       cursorBlink: this.options.cursorBlink,
       scrollback: this.options.scrollback,
+      convertEol,
       theme: this.options.theme(),
       allowProposedApi: true
     });
@@ -162,7 +176,8 @@ export class TerminalPool {
       webgl: null,
       visible: false,
       replayGen: 0,
-      fontSize: this.options.fontSize
+      fontSize: this.options.fontSize,
+      convertEol
     };
     this.views.set(id, view);
     return view;

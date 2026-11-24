@@ -1398,14 +1398,16 @@ function mountProject(project: ProjectNode) {
   for (const body of host.querySelectorAll<HTMLElement>(".pane-body[data-session]")) {
     const id = body.dataset.session ?? "";
     const meta = tree.find((session) => session.id === id);
+    // 串口设备常只发裸 `\n`：让 LF 也回到列首，屏幕才会和日志文件一样分行
+    const serial = meta?.transport === "serial";
     if (live.has(id)) {
       const existing = pool.view(id);
       if (existing?.visible) {
-        pool.attach(id, body, true);
+        pool.attach(id, body, true, serial);
         applySessionFont(id);
       } else {
         // 新建或从不可见变可见：先挂上、按会话设字号，再放行可见并按回放重建
-        pool.attach(id, body, false);
+        pool.attach(id, body, false, serial);
         applySessionFont(id);
         pool.setVisible(id, true);
         replays.push(id);
