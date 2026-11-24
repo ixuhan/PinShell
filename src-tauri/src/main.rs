@@ -3159,9 +3159,18 @@ fn pty_close(state: State<'_, AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 更新包验签公钥。发布构建在编译期把公钥写进二进制（`PINSHELL_UPDATER_PUBKEY` 也作为
+/// 编译期环境变量传入），本地开发和普通构建读不到就返回 `None`，updater 插件不注册。
+fn updater_pubkey() -> Option<String> {
+    std::env::var("PINSHELL_UPDATER_PUBKEY")
+        .ok()
+        .or_else(|| option_env!("PINSHELL_UPDATER_PUBKEY").map(str::to_owned))
+        .filter(|key| !key.trim().is_empty())
+}
+
 #[tauri::command]
 fn updater_configured() -> bool {
-    std::env::var("PINSHELL_UPDATER_PUBKEY").is_ok_and(|key| !key.trim().is_empty())
+    updater_pubkey().is_some()
 }
 
 /// 空命令，用于测 IPC 往返开销。
@@ -3236,9 +3245,7 @@ fn main() {
         }
     }
 
-    let updater_pubkey = std::env::var("PINSHELL_UPDATER_PUBKEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty());
+    let updater_pubkey = updater_pubkey();
     let mut builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     if let Some(pubkey) = updater_pubkey {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());

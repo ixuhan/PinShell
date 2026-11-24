@@ -1,0 +1,59 @@
+name: Release
+
+# 正式发布：打 tag（v*）时构建 Windows 安装包、签名更新包，并创建 GitHub Release。
+# 与 build.yml 的区别：build.yml 只在 push main 时做构建验证，产物只留在 Actions artifact，
+# 不进 Releases；这里才会写 Releases（安装包 + .sig + latest.json），客户端据此自动更新。
+on:
+  push:
+    tags: ["v*"]
+
+# 同一 tag 重复推送时不要并发发布，避免两个 job 抢同一个 Release。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    permissions:
+      # 创建 Release 并上传资产需要写权限
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 签名私钥只存在于 secret 里；缺失时 tauri build 会因为要签名更新包而直接报错，
+          # 这是有意的：宁可不发，也不发一个客户端无法验签的更新。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 公钥既用于打包时比对密钥对，也会被编译进二进制（见 main.rs 的 updater_pubkey）。
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+          PINSHELL_UPDATER_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: PinShell ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          # 更新包只在发布构建里生成；本地 npm run app:build 仍然出普通安装包。
+          args: --config src-tauri/tauri.release.conf.json
+          # Windows 的自动更新走 NSIS（installMode: passive），latest.json 优先指向 setup.exe。
+          updaterJsonPreferNsis: true
+          # 构建完把产物也留一份到 Actions artifact，便于不登录 Releases 也能取到。
+          uploadWorkflowArtifacts: true
