@@ -22,6 +22,7 @@ import { normalizeHexInput } from "./hexInput";
 import { keepAfter, type OutChunk } from "./outQueue";
 import { clearDisplayMode } from "./displayClear";
 import { setupFilePanel } from "./filePanelUi";
+import { setupFindBar } from "./findBarUi";
 import { setupShortcutsUi } from "./shortcutsUi";
 import { DRAGGING_CLASS } from "./resize";
 import { setupInputbarResize } from "./inputbarResize";
@@ -237,6 +238,7 @@ function applyFontSize(size: number) {
 /// 只改 `theme` 不会重绘已有内容，所以对每个可见视图各补一次整屏 refresh。
 function applyTermTheme() {
   pool.applyTheme();
+  findBar?.recolor();
   invalidateGhostMetrics();
   for (const view of pool.all()) {
     if (!view.visible) continue;
@@ -315,6 +317,8 @@ let sessionDialog: ReturnType<typeof setupSessionDialog> | null = null;
 let projectDialog: ReturnType<typeof setupProjectDialog> | null = null;
 /// 串口列表面板：只用来推「当前焦点会话占着哪个口」的高亮
 let serialPortsPanel: SerialPortsPanelHandle | null = null;
+/// 查找条：每分格一条，数据源是前端 xterm 缓冲区（docs/find.md、ADR 0009）
+let findBar: ReturnType<typeof setupFindBar> | null = null;
 let benchTerm: Terminal | null = null;
 let benchScheduled = false;
 
@@ -561,6 +565,7 @@ function destroyView(id: string, options: { runtimeAlive?: boolean } = {}) {
     }
   }
   pool.dispose(id);
+  findBar?.forget(id);
   viewOutput.delete(id);
 }
 
@@ -579,6 +584,8 @@ function setFocus(id: string) {
   // 切走前把当前格子的输入条状态存进按会话的表；切回来时再取回
   saveFocusUi(focusSessionId);
   focusSessionId = id;
+  // 查找条按分格保留：别的格子的条藏起来，切回这一格再显出来
+  findBar?.setActive(id);
   filePanel?.selectSession(id);
   shortcutsUi?.selectSession(id);
 
@@ -2688,9 +2695,11 @@ histClearBtn.addEventListener("click", () => {
 
 histOverlay.addEventListener("mousedown", (e) => e.stopPropagation());
 
-/// 焦点正被别的界面占用时，所有权变化不该抢回来：模态对话框与历史检索面板都算。
+/// 焦点正被别的界面占用时，所有权变化不该抢回来：模态对话框、历史检索面板与查找条都算。
 function blocksOwnershipFocus(): boolean {
   if (!histOverlay.hidden) return true;
+  // 查找条在直通模式下也会被打开：它拿焦点期间，按键确实不进通道，别被抢走
+  if (findBar?.holdsKeys()) return true;
   for (const id of ["settings-overlay", "shortcut-overlay", "session-overlay"]) {
     const el = document.getElementById(id);
     if (el && !(el as HTMLElement).hidden) return true;
@@ -2833,6 +2842,10 @@ function renderBarStatus() {
   dot.classList.toggle("err", serialKind && serialStatus?.status === "failed");
   dot.classList.toggle("warn", serialKind && (!serialStatus || serialStatus.paused || serialStatus.status === "released"));
   dot.classList.toggle("ok", serialKind && serialStatus?.status === "open" && takes);
+  // 查找条开着并且拿着键盘焦点时，按键既不归输入条也不归通道：状态点要说实话
+  const findKeys = findBar?.holdsKeys() ?? false;
+  dot.classList.toggle("find", findKeys);
+  dot.title = findKeys ? t("find.ownsKeys") : "";
 
   let labelText: string;
   if (own?.override === "passthrough") {
@@ -3029,6 +3042,8 @@ async function clearScreenFor(id: string) {
   out.floor = Math.max(out.floor, lastCleared);
   out.lastSeq = Math.max(out.lastSeq, lastCleared);
   noteAnswered(id, lastCleared);
+  // 清屏会清掉缓冲区：查找条连查询一起关掉，别让切回来还挂着一屏高亮
+  findBar?.closeFor(id);
   if (!view) return;
   const transport = tree.find((session) => session.id === id)?.transport ?? "terminal";
   if (clearDisplayMode(transport) === "reset") {
@@ -3131,6 +3146,15 @@ window.addEventListener(
       e.preventDefault();
       e.stopPropagation();
       if (!e.repeat) void clearScreen();
+    } else if (matchesKey(e, "KeyF", "f")) {
+      // 查找只作用于屏幕内容，所以入口用 Ctrl+Shift+F 独占：Ctrl+F 是 Shell 的
+      // forward-char / ForwardWord，抢走它会打断行编辑。直通与备用屏下也截获——
+      // 用户显式要查，代价是那一刻按键不进程序，状态点会如实显示。
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat) return;
+      if (!histOverlay.hidden) closeHistoryOverlay(true, false);
+      findBar?.toggle();
     } else if (matchesKey(e, "Space", " ")) {
       e.preventDefault();
       e.stopPropagation();
@@ -3624,6 +3648,24 @@ shortcutsUi = setupShortcutsUi({
   fill: fillShortcut,
   execute: executeShortcut,
   layoutChanged: () => syncSize()
+});
+
+// 查找条：每分格一条，挂在各自的终端视图里，只搜前端缓冲区（docs/find.md、ADR 0009）。
+// 放在快捷指令之后装配：它只依赖 pool 与焦点 id，DOM 是第一次按 Ctrl+Shift+F 时才建的。
+findBar = setupFindBar({
+  view: (id) => pool.view(id),
+  activeId: () => focusSessionId,
+  restoreFocus: (id) => {
+    if (id !== focusSessionId) return;
+    // 关掉查找条之后，键该回哪就回哪：输入条拥有按键就回输入条，否则回终端
+    if (own?.owner === "input_bar" && !ib.disabled) {
+      ib.focus();
+      ib.setSelectionRange(ib.value.length, ib.value.length);
+    } else {
+      pool.focus(id);
+    }
+  },
+  changed: () => renderBarStatus()
 });
 
 // 新建项目 / 项目设置：创建成功后选中并展开，保存后重挂当前项目

@@ -1,5 +1,6 @@
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { hasWebglRoom } from "./webglBudget";
 
@@ -19,6 +20,9 @@ export interface TerminalView {
   id: string;
   term: Terminal;
   fit: FitAddon;
+  /// 查找插件。命中高亮、命中计数与「当前是第几个」都从这里来；
+  /// 与 Terminal 同生命周期，`term.dispose()` 时一起释放。
+  search: SearchAddon;
   hostEl: HTMLDivElement;
   webgl: WebglAddon | null;
   visible: boolean;
@@ -132,6 +136,9 @@ export class TerminalPool {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // 查找是只读的显示能力：不进「能力位」，终端与串口一视同仁（见 docs/find.md）
+    const search = new SearchAddon();
+    term.loadAddon(search);
 
     const hostEl = document.createElement("div");
     hostEl.className = "term-view";
@@ -150,6 +157,7 @@ export class TerminalPool {
       id,
       term,
       fit,
+      search,
       hostEl,
       webgl: null,
       visible: false,
