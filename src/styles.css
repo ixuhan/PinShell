@@ -2964,6 +2964,23 @@ body.layout-dragging {
   text-overflow: ellipsis;
 }
 
+/* 行内重命名：输入框撑满名字列，字号与配色跟同一行的文字一致 */
+.f-rename {
+  width: 100%;
+  min-width: 0;
+  padding: 0 2px;
+  border: 1px solid var(--focus-ring);
+  border-radius: 2px;
+  background: var(--bg-raised);
+  color: var(--text-strong);
+  font: inherit;
+  line-height: inherit;
+}
+
+.f-rename:focus {
+  outline: none;
+}
+
 .f-row.dir .f-name {
   color: var(--info);
 }

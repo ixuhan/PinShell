@@ -106,27 +106,32 @@ export interface FsListing {
 }
 
 /// 排序字段与方向。字段是「按什么排」，方向是正序（升序）还是倒序（降序）。
-export type FileSortField = "name" | "created";
+///
+/// 时间字段是**修改时间**（列表最后一列显示的就是它），不是创建时间：
+/// 排序结果必须和肉眼看到的数字一致，否则用户会以为时间列显示错了。
+export type FileSortField = "name" | "modified";
 export type FileSortDir = "asc" | "desc";
 
 export const SORT_FIELD_KEY = "pinshell.files.sort";
 export const SORT_DIR_KEY = "pinshell.files.sortDir";
 
-/// 旧版本只存了字段名，方向按字段的惯用值补：名称正序、创建时间最新优先。
+/// 旧版本只存了字段名，方向按字段的惯用值补：名称正序、修改时间最新优先。
+/// 更早的版本把时间字段存成 `created`：读到时按 `modified` 处理，
+/// 免得升级后面板悄悄退回按名称排序。
 export function parseSortField(raw: string | null): FileSortField {
-  return raw === "created" ? "created" : "name";
+  return raw === "modified" || raw === "created" ? "modified" : "name";
 }
 
 export function parseSortDir(raw: string | null, field: FileSortField = "name"): FileSortDir {
   if (raw === "asc" || raw === "desc") return raw;
-  return field === "created" ? "desc" : "asc";
+  return field === "modified" ? "desc" : "asc";
 }
 
 /// 按字段与方向排一份条目。
 ///
 /// - 名称：纯字典序（数字按大小比较），目录与文件混排，和旧版一致；
-/// - 创建时间：目录始终在前（找目录不用翻到底），组内按时间排，时间相同按名称兜底；
-/// - 时间缺失的条目排在该组末尾，避免「没有创建时间」的空值跑到最前面。
+/// - 修改时间：目录始终在前（找目录不用翻到底），组内按时间排，时间相同按名称兜底；
+/// - 时间缺失的条目排在该组末尾，避免「没有时间」的空值跑到最前面。
 export function sortEntries(
   entries: FsEntry[],
   field: FileSortField,
@@ -136,11 +141,11 @@ export function sortEntries(
   const byName = (a: FsEntry, b: FsEntry) =>
     a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
   return [...entries].sort((a, b) => {
-    if (field === "created") {
+    if (field === "modified") {
       if (a.kind === "dir" && b.kind !== "dir") return -1;
       if (a.kind !== "dir" && b.kind === "dir") return 1;
-      const aTime = a.created_ms;
-      const bTime = b.created_ms;
+      const aTime = a.modified_ms;
+      const bTime = b.modified_ms;
       if (aTime === null && bTime !== null) return 1;
       if (aTime !== null && bTime === null) return -1;
       if (aTime !== null && bTime !== null && aTime !== bTime) return aTime < bTime ? -sign : sign;
@@ -181,6 +186,19 @@ export function formatTime(ms: number | null, now = Date.now()): string {
   if (sameDay) return `${hh}:${mm}`;
   if (date.getFullYear() === ref.getFullYear()) return `${month}-${day} ${hh}:${mm}`;
   return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/// 完整的修改时间，用作时间列的悬停提示。列表里为了省宽度做了省略显示
+/// （当天只给时分），悬停时把年月日时分秒补全，便于核对到底是哪个时间。
+export function formatFullTime(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return "";
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
 }
 
 /// 进入子项。规则与 `core_domain::fsview::child_of` 一致：根后面不补第二个分隔符。
@@ -357,20 +375,30 @@ export function clampPanelWidth(
   return Math.max(MIN_PANEL_WIDTH, Math.min(room, Math.round(desired)));
 }
 
-/// 右键菜单的一行。原生菜单由系统 Shell 提供；这套项只在 helper 不可用
-/// （或环境里弹不出 shell 菜单）时使用，所以它必须覆盖面板最常用的几件事。
-export type MenuCommand = "open" | "reveal" | "copy" | "fill" | "refresh";
+/// 右键菜单的一行。这是面板自己画的菜单（不依赖系统 Shell），
+/// 系统菜单放在末项「系统菜单…」里另行调起。
+export type MenuCommand =
+  | "open"
+  | "reveal"
+  | "copy"
+  | "fill"
+  | "rename"
+  | "delete"
+  | "newFolder"
+  | "refresh";
 
 export interface MenuItem {
   command: MenuCommand;
   label: string;
+  /// 危险操作（删除）：整行标红
+  danger?: boolean;
 }
 
 /// 一行的身份：`parent` 是列表顶部的 `..`。
 export type RowKind = "parent" | "dir" | "file" | "other";
 
-/// 降级菜单的项与顺序：打开 → 在资源管理器中显示 → 复制路径 →（文件）填入输入条。
-/// `..` 行没有「填入输入条」——它不是一个具体文件的路径，填进去没有意义。
+/// 行菜单的项与顺序：打开 → 在资源管理器中显示 → 复制路径 →（文件）填入输入条
+/// → 重命名 → 删除。`..` 行只有前三项：它不是一个可以改名或删除的具体条目。
 /// 文案随当前语言走：这个菜单每次右键都会重新构造，所以不必缓存。
 export function rowMenu(kind: RowKind): MenuItem[] {
   const items: MenuItem[] = [
@@ -387,15 +415,18 @@ export function rowMenu(kind: RowKind): MenuItem[] {
   if (kind === "file" || kind === "other") {
     items.push({ command: "fill", label: t("files.fill") });
   }
+  if (kind !== "parent") {
+    items.push({ command: "rename", label: t("files.rename") });
+    items.push({ command: "delete", label: t("files.delete"), danger: true });
+  }
   return items;
 }
 
-/// 文件列表空白处的降级菜单：原生 Shell 的背景菜单弹不出来时用它。
-/// 打开当前目录 → 在资源管理器中显示 → 复制路径 → 刷新。
+/// 文件列表空白处的菜单：新建文件夹 → 在资源管理器中打开当前目录 → 复制路径 → 刷新。
 export function blankMenu(): MenuItem[] {
   return [
-    { command: "open", label: t("files.open") },
-    { command: "reveal", label: t("files.reveal") },
+    { command: "newFolder", label: t("files.newFolder") },
+    { command: "open", label: t("files.openInExplorer") },
     { command: "copy", label: t("files.copyPath") },
     { command: "refresh", label: t("files.refresh") }
   ];

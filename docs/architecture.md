@@ -115,7 +115,11 @@ trait Transport {
 
 面板是**窗口级 UI**，显示**焦点会话**的 CWD（ADR 0004），只有「跟随 / 固定」两种模式：跟随时路径由会话的 `OSC 7` 决定；手动导航（双击进入子目录、上一级）即转成固定路径，否则 Shell 每 `cd` 一次就会把用户正在看的目录拽走。**面板内容**跟焦点会话走，但「跟随 / 固定」「自动」「隐」这三项是**会话级设置**：每个会话各存一套，切会话时整套换掉，A 会话停在固定路径、开着自动刷新、显示隐藏项，B 会话仍然可以是跟随、手动刷新、隐藏隐藏项。面板宽度与展开状态属于窗口布局，不随会话变化。
 
-已落地（M4 第一片）：**只读目录服务**。`fs_list` 接三个可选参数：`path` 为空时按 `session` 记下的 `cwd` 取，两者都没有回退用户主目录；读盘放阻塞线程池，网络盘慢也不堵 IPC。条目模型与显示规则在 `core-domain/src/fsview.rs`（目录优先、名字大小写不敏感排序、隐藏项计数、2000 条截断、`normalize`/`parent_of`/`child_of`），`src-tauri/src/fsview.rs` 只负责把 `std::fs` 的元数据填进结构体（跟随链接判类型、Windows 隐藏属性、取不到时间留空）。CWD 真变化时后端推 `session:cwd`，面板只在跟随模式下据此重画。
+已落地（M4 第一片）：**目录服务**。`fs_list` 接三个可选参数：`path` 为空时按 `session` 记下的 `cwd` 取，两者都没有回退用户主目录；读盘放阻塞线程池，网络盘慢也不堵 IPC。条目模型与显示规则在 `core-domain/src/fsview.rs`（目录优先、名字大小写不敏感排序、隐藏项计数、2000 条截断、`normalize`/`parent_of`/`child_of`），`src-tauri/src/fsview.rs` 只负责把 `std::fs` 的元数据填进结构体（跟随链接判类型、Windows 隐藏属性、取不到时间留空）。CWD 真变化时后端推 `session:cwd`，面板只在跟随模式下据此重画。
+
+时间列显示**修改时间**（`modified_ms`），排序字段也只有「名称」与「修改时间」两种，保证排序结果与肉眼看到的列一致；当天只显示时分、同年显示月日、跨年显示完整日期，完整时间放在悬停提示里。
+
+双击的语义与资源管理器一致：双击目录进入（转固定路径），双击文件用系统默认程序打开（`fs_open`）；「填入输入条」只留在右键菜单里，双击不再改动输入条。列表有焦点时 `F2` 行内重命名、`Delete` 删除（先弹一次确认），空白处右键可新建文件夹（新建后直接进入重命名）。三条写操作在 `fs_rename` / `fs_delete` / `fs_new_folder`：改名只接受名字本身（带路径分隔符、非法字符、Windows 保留设备名都会被拒绝），删除走系统 Shell 的删除即**进回收站**而不是 `std::fs` 的永久删除，新建文件夹的重名规则在后端（`新建文件夹 (2)`、`(3)`…）。写操作成功后前端补一次列目录；原生菜单执行完也补一次（Shell 改盘不会通知面板）。
 
 面板的列表顶部固定一行 `..`（父目录那一行）：双击回退一级，和头部 ↑ 走同一条 `enter`；它没有大小与时间、颜色压暗一档，不参与排序与「N 项」计数，没有父目录（盘符根、UNC 根）时整行不出现。
 
@@ -131,13 +135,15 @@ trait Transport {
 
 面板宽度可拖动（140–560px，双击分隔条恢复默认）。拖动中只改 CSS 宽度，终端保持原尺寸、由 `#term-host` 裁掉多出来的部分——拖动中每跨一列就重排一次会让会话区不停闪；松手后才 fit 一次并把新尺寸下给 PTY。左栏（项目栏）用同一套手势（`src/resize.ts`，150–360px，双击恢复默认），两栏各自量对方的实时宽度来决定自己的上限，所以拖宽一栏不会把终端挤到 180px 以下。两栏都能收起成 26px 的竖条：项目栏收起后是竖排「项目」的展开按钮加一个齿轮（全局设置入口），功能栏收起后是一条竖排「功能」的展开按钮；收起状态与宽度一起存进 `localStorage`，重开还是原样，收起时拖拽手柄隐藏、宽度原值保留，展开时先按当前窗口重新夹一遍。项目行自身的展开/收起（`expanded` 集合）与「全部收起 / 全部展开」按钮是另一套，收的是项目行不是整栏。三个功能面板各自的高度也用同一套 `dragHeight`（下限 120px、上限为可用高度的 70%），排在最后的那一个由 flex 决定高度、手柄隐藏。拖高时传的是面板自己（`#files-panel` / `#ports-panel` / `#shortcuts-panel`），可用空间与邻居高度都按 `#files-body` 里的兄弟面板算——传成整条功能栏（`#files`）会把 `#app` 的兄弟当成邻居，夹取结果恒为下限、拖不动。文件面板的下限还会抬到「标题栏 + 操作行 + 路径栏 + 刷新行 + 页脚」的高度（宽度变窄让操作行换行时随之变大），因为矮于这些固定行时列表已经没有空间。任何面板被挤得比自己的固定行还矮（窗口变小、最后的撑满面板被压扁）时，`.panel-body` 的 `overflow: hidden` 把多出来的内容裁掉，不会画到下一个面板上——那看起来就是两个面板「重叠」。其它布局变化（拖窗口、折叠面板、改另一栏的宽度）由 `#term-host` 上的 `ResizeObserver` 负责：它在布局后、绘制前触发，而 WebGL 画布是独立合成层，晚一帧就会把旧尺寸画到面板上。窗口变窄时两栏已保存的宽度都会被重新夹到合法区间。诊断 HUD 相对 `#main` 定位并单行截断，不覆盖面板与输入条；`#main` / `#term-host` 裁剪溢出（再加 `clip-path`），窗口或面板缩放时画布不会画到邻居上。
 
-右键菜单（M4 第三片）走**原生菜单 + 降级**两条路。列表行（含顶部 `..`）右键后调 `fs_context_menu(path)`，列表空白处右键调 `fs_context_menu(path, background=true)`：前者是条目菜单，后者是目录自己的背景菜单（`IShellFolder::CreateViewObject` 请求 `IContextMenu`，与资源管理器右键空白处同源，含新建 / 粘贴 / 属性）。主进程起同目录的 `pinshell-shellmenu.exe` helper；helper 用系统 Shell 的 `IContextMenu`（`SHParseDisplayName`，条目菜单再 `SHBindToParent` → `GetUIObjectOf`，背景菜单 `SHGetDesktopFolder` → `BindToObject` → `CreateViewObject`，然后 `QueryContextMenu` → `TrackPopupMenuEx` → `InvokeCommand`）弹出真正的资源管理器菜单，所以 7-Zip、TortoiseGit 之类的扩展都在。菜单坐标取鼠标当前位置，不做 DPI 换算。
+右键菜单（M4 第三片之后又调整过一次）**以面板自己的菜单为主**：列表行（含顶部 `..`）右键弹「打开 / 在资源管理器中显示 / 复制路径 /（文件）填入输入条 / 重命名 / 删除」，空白处弹「新建文件夹 / 打开 / 在资源管理器中显示 / 复制路径 / 刷新」，两者最后一项都是「系统菜单…」，点了才去调 `fs_context_menu(path)`（空白处是 `background=true`）弹原生 Shell 菜单。这样重命名、删除、新建这些日常操作不依赖 helper 是否就位，而「打开方式 / 发送到 / 7-Zip / TortoiseGit」这些扩展仍能从一个入口拿到。之所以不再让原生菜单当主菜单：系统菜单里的「重命名」要由 Shell 视图（DefView）接管，独立 helper 进程里没有视图，点了往往毫无反应；删除虽然能执行，但改盘后不会通知面板。
 
-helper 必须是独立进程：第三方 shell 扩展以 DLL 注入宿主，崩了会带走宿主。主进程只等退出码与一行 stdout（`handled` / `cancelled`），上限 10 分钟；找不到 helper、启动失败、非零退出或超时都返回 `unavailable`，前端改用自建菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条），不弹错误框、不丢会话。自建菜单的项集合与位置夹取是纯函数（`rowMenu` / `clampMenuPosition`），由 vitest 覆盖；菜单打开期间自动刷新暂停，列表重建、窗口失焦、滚动或 `Esc` 都会关掉它，不在重建后指向一行已经不存在的条目。
+原生菜单仍走 helper：主进程起同目录的 `pinshell-shellmenu.exe`，helper 用系统 Shell 的 `IContextMenu`（`SHParseDisplayName`，条目菜单再 `SHBindToParent` → `GetUIObjectOf`，背景菜单 `SHGetDesktopFolder` → `BindToObject` → `CreateViewObject`，然后 `QueryContextMenu` → `TrackPopupMenuEx` → `InvokeCommand`）。菜单坐标取鼠标当前位置，不做 DPI 换算。
+
+helper 必须是独立进程：第三方 shell 扩展以 DLL 注入宿主，崩了会带走宿主。主进程只等退出码与一行 stdout（`handled` / `cancelled`），上限 10 分钟；找不到 helper、启动失败、非零退出或超时都返回 `unavailable`，前端在页脚提示缺少 `pinshell-shellmenu.exe`，不弹错误框、不丢会话。执行完（`handled`）补一次列目录——Shell 直接改盘不会通知面板。菜单的项集合与位置夹取是纯函数（`rowMenu` / `blankMenu` / `clampMenuPosition`），由 vitest 覆盖；菜单打开期间自动刷新暂停，列表重建、窗口失焦、滚动或 `Esc` 都会关掉它，不在重建后指向一行已经不存在的条目。
 
 `fs_open` / `fs_reveal` 是两条路共用的动作出口，都交给系统关联（`explorer.exe`），应用内不维护扩展名表。helper 与主程序同目录（开发期 `target/debug`，运行时先看 `PINSHELL_SHELLMENU`）。安装版不声明 `bundle.externalBin`：tauri-cli 2.12 起会把应用 crate 的每个 `[[bin]]` 当作 sidecar 打进安装包，再声明 externalBin 就是同一个文件装两遍，WiX 以 ICE30 拒绝链接（本机实测，MSI 直接构建失败）。因此 helper 只是一个普通 `[[bin]]`，`app:build` 时随 crate 一起编译，MSI 与 NSIS 各装一份到安装目录、与主程序同级。helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出，用来验证 COM 链路而不弹菜单（`--background` 时验证的是背景菜单，`F:\PinShell` 上实测 10 项）。开发期由 `npm run app:dev` 先跑 `cargo build --bin pinshell-shellmenu` 把它送到 `target/debug`，否则右键永远走降级菜单；`Cargo.toml` 里的 `default-run = "pinshell"` 则保证有两个可执行文件时 `cargo run` 仍然知道该起哪个。
 
-列表空白处点一下会让列表自己拿到焦点，之后 `F5` 重读当前目录；焦点在终端时 `F5` 照常发给 Shell。路径栏是可点的面包屑：单击某一级进入该目录，`✎`（或双击路径栏空白处）切成输入框，回车跳转、`Esc` 或失焦还原。两者都不在列表重建时丢状态：面包屑由当前路径重画，输入中的文本框由用户提交后才被替换。
+列表空白处点一下会让列表自己拿到焦点，之后 `F5` 重读当前目录、`F2` 行内重命名、`Delete` 删除（带一次确认）；焦点在终端时这些键照常发给 Shell。路径栏是可点的面包屑：单击某一级进入该目录，`✎`（或双击路径栏空白处）切成输入框，回车跳转、`Esc` 或失焦还原。两者都不在列表重建时丢状态：面包屑由当前路径重画，输入中的文本框由用户提交后才被替换；行内重命名期间自动刷新暂停、列表不重建，避免输入框被每秒一次的重绘抹掉。
 
 ## 3. 状态机（会话）
 

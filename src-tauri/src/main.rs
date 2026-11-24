@@ -2764,6 +2764,165 @@ async fn fs_context_menu(
     Ok(outcome.as_str().to_string())
 }
 
+/// 重命名（原地改名，不移动）。`name` 只接受名字本身：带路径分隔符会被拒绝，
+/// 免得一次改名悄悄变成「移动文件」。返回改名后的完整路径。
+///
+/// 校验放在这里而不是只放前端：右键菜单里的「重命名」来自系统 Shell，
+/// 而自建菜单与行内编辑走这条命令，规则必须只有一份。
+#[tauri::command]
+async fn fs_rename(path: String, name: String) -> Result<String, String> {
+    let new_name = validate_entry_name(&name)?;
+    let source = PathBuf::from(&path);
+    if std::fs::symlink_metadata(&source).is_err() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| format!("不能重命名根目录: {path}"))?;
+    let target = parent.join(&new_name);
+    if target == source {
+        // 名字一模一样：不用碰磁盘，重画一次列表就够了
+        return Ok(path);
+    }
+    // 只改大小写时目标「看起来已存在」就是它自己，Windows 允许这种改名
+    if !same_path_ignoring_case(&target, &source) && std::fs::symlink_metadata(&target).is_ok() {
+        return Err(format!("已存在同名项: {new_name}"));
+    }
+    std::fs::rename(&source, &target).map_err(|err| format!("重命名失败: {err}"))?;
+    Ok(target.display().to_string())
+}
+
+/// 删除一项：交给系统 Shell 的删除（进回收站），不是 std 的永久删除。
+#[tauri::command]
+async fn fs_delete(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if std::fs::symlink_metadata(&target).is_err() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    // 盘符根、UNC 共享根没有上一级，删掉它们没有「回收站」可言
+    if target.parent().is_none() {
+        return Err(format!("不能删除根目录: {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || move_to_trash(&target))
+        .await
+        .map_err(|err| format!("删除线程失败: {err}"))?
+}
+
+/// 在 `dir` 下新建文件夹。重名时依次试 `新建文件夹 (2)`、`(3)`……
+/// `base` 由前端按界面语言给（中文「新建文件夹」、英文 "New folder"）。
+/// 返回新建出来的完整路径，前端据此立刻对那一行进入重命名。
+#[tauri::command]
+async fn fs_new_folder(dir: String, base: String) -> Result<String, String> {
+    let parent = PathBuf::from(&dir);
+    if !parent.is_dir() {
+        return Err(format!("不是目录: {dir}"));
+    }
+    let base = validate_entry_name(base.trim()).unwrap_or_else(|_| "新建文件夹".to_string());
+    for index in 1..=999 {
+        let name = if index == 1 {
+            base.clone()
+        } else {
+            format!("{base} ({index})")
+        };
+        let target = parent.join(&name);
+        if std::fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        match std::fs::create_dir(&target) {
+            Ok(()) => return Ok(target.display().to_string()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("新建文件夹失败: {err}")),
+        }
+    }
+    Err("同名文件夹太多，换个目录新建".into())
+}
+
+/// 校验一个「新名字」：只允许名字本身（不含路径），并且要是 Windows 认可的文件名。
+/// 规则集中在这里，前端只负责把输入原样传过来。
+fn validate_entry_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("名字不能为空".into());
+    }
+    if name == "." || name == ".." {
+        return Err("这个名字不可用".into());
+    }
+    if name.contains('\\') || name.contains('/') {
+        return Err("名字里不能带路径分隔符".into());
+    }
+    if name.chars().any(|ch| ch.is_control() || "<>:\"|?*".contains(ch)) {
+        return Err("名字里不能有 < > : \" | ? * 这些字符".into());
+    }
+    // Windows 会静默去掉结尾的点，改成别的名字后往往对不上，直接拒绝更明确
+    //（结尾空格在 trim 时已经去掉，不必再判）
+    if name.ends_with('.') {
+        return Err("名字不能以点结尾".into());
+    }
+    // 保留设备名：CON、PRN、AUX、NUL、COM1-9、LPT1-9（带扩展名同样无效）
+    let stem = name.split('.').next().unwrap_or(name);
+    let upper = stem.trim_end().to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && matches!(upper.as_bytes()[3], b'1'..=b'9'));
+    if reserved {
+        return Err("这是 Windows 的保留名字".into());
+    }
+    Ok(name.to_string())
+}
+
+/// 两条路径是否指向同一处（Windows 上大小写不敏感）。
+/// 只用于「只改大小写」的判断，不碰磁盘。
+fn same_path_ignoring_case(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// 删除到回收站。Shell 的删除要求 STA；调用线程上已经把 COM 初始化成别的套间时
+/// （COM 一个线程只能初始化一次）就沿用现状继续走，不因为这一步失败放弃删除。
+#[cfg(windows)]
+fn move_to_trash(target: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{
+        SHFileOperationW, SHFILEOPSTRUCTW, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
+        FOF_NOERRORUI, FOF_SILENT,
+    };
+
+    // SHFILEOPSTRUCTW 的路径列表用单个 NUL 分隔、两个 NUL 结束
+    let mut from: Vec<u16> = target.as_os_str().encode_wide().collect();
+    from.extend([0, 0]);
+
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let mut op = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: PCWSTR(from.as_ptr()),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
+        ..Default::default()
+    };
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if com.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    if code != 0 {
+        return Err(format!("移到回收站失败（{code}）: {}", target.display()));
+    }
+    if op.fAnyOperationsAborted.as_bool() {
+        return Err("删除已取消".into());
+    }
+    Ok(())
+}
+
+/// 非 Windows 没有「回收站」这个概念，明确报错而不是悄悄永久删除。
+#[cfg(not(windows))]
+fn move_to_trash(target: &Path) -> Result<(), String> {
+    Err(format!(
+        "删除目前只在 Windows 上支持: {}",
+        target.display()
+    ))
+}
+
 #[cfg(windows)]
 fn launch_shell(path: &str, reveal: bool) -> Result<(), String> {
     let target = Path::new(path);
@@ -3178,6 +3337,9 @@ fn main() {
             fs_open,
             fs_reveal,
             fs_context_menu,
+            fs_rename,
+            fs_delete,
+            fs_new_folder,
             rename_session,
             pty_resize,
             pty_freeze,
@@ -3254,6 +3416,43 @@ mod tests {
     fn encoded_command_is_utf16le_base64() {
         assert_eq!(powershell_encoded("A"), "QQA=");
         assert_eq!(powershell_encoded("AB"), "QQBCAA==");
+    }
+
+    // ---------- 文件面板：改名与新建的名字规则 ----------
+
+    use super::validate_entry_name;
+
+    #[test]
+    fn a_plain_name_passes_and_gets_trimmed() {
+        assert_eq!(validate_entry_name("  report.txt  ").unwrap(), "report.txt");
+        assert_eq!(validate_entry_name("新建文件夹").unwrap(), "新建文件夹");
+        assert_eq!(validate_entry_name("a b.c.md").unwrap(), "a b.c.md");
+    }
+
+    #[test]
+    fn names_with_paths_or_invalid_characters_are_rejected() {
+        for bad in [
+            "", "   ", ".", "..", "a/b", "a\\b", "a:b", "a?b", "a*b", "a\"b", "a<b", "a|b",
+            "a\u{0}b",
+        ] {
+            assert!(validate_entry_name(bad).is_err(), "应当拒绝 {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_dot_is_rejected() {
+        assert!(validate_entry_name("name.").is_err());
+    }
+
+    #[test]
+    fn reserved_device_names_are_rejected_even_with_extension() {
+        for bad in ["CON", "con.txt", "PRN", "AUX.log", "NUL", "COM1", "lpt9.txt"] {
+            assert!(validate_entry_name(bad).is_err(), "应当拒绝 {bad:?}");
+        }
+        // COM0 / LPT10 / 普通词不是保留设备名
+        assert!(validate_entry_name("COM0").is_ok());
+        assert!(validate_entry_name("LPT10").is_ok());
+        assert!(validate_entry_name("console.txt").is_ok());
     }
 
     // ---------- 项目落点与冻结解除 ----------

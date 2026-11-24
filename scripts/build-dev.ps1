@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Continue'
 $env:CARGO_HOME = 'F:\.toolchain\cargo'
 $env:RUSTUP_HOME = 'F:\.toolchain\rustup'
 $env:PATH = 'F:\.toolchain\cargo\bin;' + $env:PATH
-Set-Location 'f:\PinShell\src-tauri'
+# Build the src-tauri crate of the checkout this script lives in (worktree safe).
+Set-Location (Join-Path (Split-Path $PSScriptRoot -Parent) 'src-tauri')
 $sw = [Diagnostics.Stopwatch]::StartNew()
 & cargo build 2>&1 | Select-Object -Last 40
 $sw.Stop()
