@@ -96,6 +96,10 @@
   --sp-4: 10px;
   --sp-5: 12px;
   --sp-6: 16px;
+
+  /* 自绘标题栏高度。弹窗遮罩从这条线往下开始，标题栏在弹窗打开时仍露在外面，
+     可以拖动窗口、最小化/最大化/关闭（见下方 #titlebar 与各 overlay 的 z-index / top）。 */
+  --titlebar-height: 32px;
 }
 
 /* 深空蓝：靛蓝底 + 冷蓝主色。比暗黑更「夜」，整晚写固件不刺眼。
@@ -623,7 +627,12 @@ body {
   flex: none;
   display: flex;
   align-items: stretch;
-  height: 32px;
+  /* 高于所有弹窗遮罩（30/40）：设置、新建会话等二级界面打开时，标题栏不跟着被压暗，
+     拖动区和三个窗口按钮照样可用。各 overlay 的 top 也从这条线开始。 */
+  position: relative;
+  z-index: 60;
+  box-sizing: border-box;
+  height: var(--titlebar-height);
   background: var(--bg-chrome);
   border-bottom: 1px solid var(--border-subtle);
   font: var(--fs-sm)/1 var(--font-ui);
@@ -2075,7 +2084,10 @@ body.layout-dragging {
 /* ---------- 新建会话（终端 / 串口共用） ---------- */
 #session-overlay {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2089,7 +2101,7 @@ body.layout-dragging {
 
 #session-form {
   width: min(560px, calc(100vw - 32px));
-  max-height: calc(100vh - 40px);
+  max-height: calc(100vh - var(--titlebar-height) - 40px);
   overflow: auto;
   padding: 14px var(--sp-6) var(--sp-5);
   background: var(--bg-dialog);
@@ -2445,7 +2457,10 @@ body.layout-dragging {
 .session-settings-overlay[hidden] { display: none; }
 .session-settings-overlay {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 40;
   display: grid;
   place-items: center;
@@ -2455,7 +2470,7 @@ body.layout-dragging {
 }
 .session-settings-dialog {
   width: min(560px, 100%);
-  max-height: min(760px, 94vh);
+  max-height: min(760px, calc(100vh - var(--titlebar-height) - 32px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2693,7 +2708,7 @@ body.layout-dragging {
 
 /* 弹窗字体基准：和另外三个 overlay 一样显式声明，否则中文会掉回浏览器默认的宋体、
    字号也不是 scale 里的值（名称/命令框就是这么变得和界面格格不入的）。 */
-#shortcut-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: var(--sp-6); background: var(--overlay-strong); font: var(--fs-md)/1.5 var(--font-ui); }
+#shortcut-overlay { position: fixed; top: var(--titlebar-height); left: 0; right: 0; bottom: 0; z-index: 40; display: grid; place-items: center; padding: var(--sp-6); background: var(--overlay-strong); font: var(--fs-md)/1.5 var(--font-ui); }
 #shortcut-overlay[hidden] { display: none; }
 #shortcut-form { width: min(480px, 100%); display: grid; gap: var(--sp-5); padding: var(--sp-6); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-dialog); color: var(--text); box-shadow: 0 16px 48px var(--shadow-strong); }
 #shortcut-dialog-head, #shortcut-dialog-foot { display: flex; align-items: center; gap: var(--sp-3); }
@@ -3080,7 +3095,10 @@ body.layout-dragging {
 #settings-overlay[hidden] { display: none; }
 #settings-overlay {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 30;
   display: grid;
   place-items: center;
@@ -3089,7 +3107,7 @@ body.layout-dragging {
 }
 #settings-dialog {
   width: min(520px, 100%);
-  max-height: min(680px, 92vh);
+  max-height: min(680px, calc(100vh - var(--titlebar-height) - 40px));
   overflow: auto;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -3563,7 +3581,10 @@ body.pane-drag-active .pane-head {
 /* 项目设置浮层 */
 .project-overlay {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 40;
   display: flex;
   align-items: center;
