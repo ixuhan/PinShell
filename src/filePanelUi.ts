@@ -4,13 +4,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { setupFoldPanel } from "./panelFold";
 import { onLocaleChange, t } from "./i18n";
-import { closePopupMenu, isPopupMenuOpen, showPopupMenu } from "./popupMenu";
+import { closePopupMenu, isPopupMenuOpen, showPopupMenu, type PopupItem } from "./popupMenu";
 import {
   AUTO_REFRESH_MS,
   autoRefreshDelay,
   blankMenu,
   clampPanelWidth,
   DEFAULT_FILE_PANEL_HEIGHT,
+  formatFullTime,
   formatSize,
   formatTime,
   joinPath,
@@ -137,88 +138,254 @@ export function setupFilePanel(deps: FilePanelDeps) {
   let selected: HTMLElement | null = null;
   /// 重画后按名字恢复选中：自动刷新每秒重建一次列表，不能把用户点的那行弄丢
   let selectedName: string | null = null;
+  /// 每行对应的真实路径与类型。重命名、删除与键盘操作都从这一份取，
+  /// 不在 DOM 里再存一遍路径（名字里带引号、空格时不会出错）。
+  const rowInfo = new WeakMap<HTMLElement, { path: string; name: string; kind: RowKind }>();
+  /// 正在行内重命名：期间不重画列表（否则输入框会被每秒一次的自动刷新抹掉）
+  let renaming = false;
   /// 自动刷新的定时器与连续失败次数（失败要退避，别对断开的网络盘每秒重试）
   let autoTimer: number | undefined;
   let autoFailures = 0;
 
   // ---------- 右键菜单 ----------
-  // 原生菜单由 helper 进程弹（系统 Shell 的 IContextMenu）；它起不来时用这份自建
-  // 菜单兜底，所以两边都在。自建菜单走 `popupMenu`，与会话菜单共用一套字体与键盘操作。
+  // 右键先弹面板自己的菜单：打开 / 定位 / 复制 / 填入输入条 / 重命名 / 删除。
+  // 这几项不依赖 helper，装没装 shellmenu 都能用；而系统 Shell 的菜单
+  // （「打开方式」「发送到」、7-Zip / TortoiseGit 等扩展）放在末项里，点了再弹。
+  // 之所以不是直接弹原生菜单：原生菜单里的「重命名」要由 Shell 视图接管，
+  // 独立 helper 进程里没有视图，点了往往没反应；删除/重命名交给本面板更可靠。
   interface MenuTarget {
     path: string;
+    name: string;
     kind: RowKind;
   }
   /// 右键序号：期间又右键了别的行，先回来的那次就作废（不能弹两个菜单）
   let menuToken = 0;
 
-  function showFallbackMenu(x: number, y: number, target: MenuTarget) {
-    showPopupMenu(
-      { x, y },
-      rowMenu(target.kind).map((item) => ({
-        label: item.label,
-        run: () => void runMenuCommand(target, item.command)
-      })),
-      { minWidth: 180 }
-    );
+  /// 行的右键菜单。末项「系统菜单…」是原生 Shell 菜单的入口。
+  function showRowMenu(x: number, y: number, target: MenuTarget) {
+    const items: PopupItem[] = rowMenu(target.kind).map((item) => ({
+      label: item.label,
+      danger: item.danger,
+      run: () => void runMenuCommand(target, item.command, { x, y })
+    }));
+    items.push({
+      label: t("files.shellMenu"),
+      run: () => void openNativeMenu(target.path)
+    });
+    showPopupMenu({ x, y }, items, { minWidth: 190 });
   }
 
-  async function openContextMenu(x: number, y: number, target: MenuTarget) {
+  /// 列表空白处的菜单。末项是原生背景菜单（新建 / 粘贴 / 属性……）。
+  /// 这里的「打开」指用资源管理器打开当前目录，不是「进入」（人已经在这里）。
+  function showBlankMenu(x: number, y: number, path: string) {
+    const target: MenuTarget = { path, name: path, kind: "dir" };
+    const items: PopupItem[] = blankMenu().map((item) => ({
+      label: item.label,
+      run: () =>
+        void (item.command === "open"
+          ? openEntry(path)
+          : runMenuCommand(target, item.command, { x, y }))
+    }));
+    items.push({
+      label: t("files.shellMenuBlank"),
+      run: () => void openNativeBlankMenu(path)
+    });
+    showPopupMenu({ x, y }, items, { minWidth: 190 });
+  }
+
+  /// 系统 Shell 的菜单（helper 进程）。弹不出来就把原因写在页脚，不再回退——
+  /// 调用它的那份自建菜单刚刚才被点掉，再弹一次只会让人以为点错了。
+  async function openNativeMenu(path: string) {
     closePopupMenu();
     const mine = ++menuToken;
     try {
-      const outcome = await invoke<string>("fs_context_menu", { path: target.path });
+      const outcome = await invoke<string>("fs_context_menu", { path });
       if (mine !== menuToken) return;
-      if (outcome === "unavailable") showFallbackMenu(x, y, target);
-    } catch {
+      if (outcome === "unavailable") {
+        footEl.textContent = t("files.shellMenuMissing");
+      } else if (outcome === "handled") {
+        // Shell 直接改盘不会通知面板，补一次列目录，否则列表停在旧内容上
+        await reload();
+      }
+    } catch (err) {
       if (mine !== menuToken) return;
-      showFallbackMenu(x, y, target);
+      footEl.textContent = String(err);
     }
   }
 
   /// 空白处的原生菜单：目录自己的背景菜单（新建 / 粘贴 / 属性……），
   /// 与右键某个文件时的条目菜单不是同一份，所以单独走 `background`。
-  async function openBlankMenu(x: number, y: number, path: string) {
+  async function openNativeBlankMenu(path: string) {
     closePopupMenu();
     const mine = ++menuToken;
     try {
       const outcome = await invoke<string>("fs_context_menu", { path, background: true });
       if (mine !== menuToken) return;
-      if (outcome === "unavailable") showBlankFallback(x, y, path);
-    } catch {
+      if (outcome === "unavailable") {
+        footEl.textContent = t("files.shellMenuMissing");
+      } else if (outcome === "handled") {
+        await reload();
+      }
+    } catch (err) {
       if (mine !== menuToken) return;
-      showBlankFallback(x, y, path);
+      footEl.textContent = String(err);
     }
   }
 
-  function showBlankFallback(x: number, y: number, path: string) {
-    showPopupMenu(
-      { x, y },
-      blankMenu().map((item) => ({
-        label: item.label,
-        run: () => void runMenuCommand({ path, kind: "dir" }, item.command)
-      })),
-      { minWidth: 180 }
-    );
-  }
-
-  async function runMenuCommand(target: MenuTarget, command: MenuCommand) {
+  async function runMenuCommand(
+    target: MenuTarget,
+    command: MenuCommand,
+    anchor: { x: number; y: number }
+  ) {
     try {
       if (command === "open") {
         if (target.kind === "dir" || target.kind === "parent") {
           enter(target.path);
         } else {
-          await invoke("fs_open", { path: target.path });
+          await openEntry(target.path);
         }
       } else if (command === "reveal") {
         await invoke("fs_reveal", { path: target.path });
       } else if (command === "copy") {
         await navigator.clipboard.writeText(target.path);
         footEl.textContent = t("files.copied");
+      } else if (command === "rename") {
+        beginRename(target.path);
+      } else if (command === "delete") {
+        confirmDelete(target, anchor);
+      } else if (command === "newFolder") {
+        await createFolder(target.path);
       } else if (command === "refresh") {
         await reload();
       } else {
         deps.fillInput(target.path);
       }
+    } catch (err) {
+      footEl.textContent = String(err);
+    }
+  }
+
+  /// 用系统默认程序打开：文件交给关联程序，目录交给资源管理器。
+  /// 没有关联程序时后端会报错，把原因写在页脚，免得双击像没反应。
+  async function openEntry(path: string) {
+    try {
+      await invoke("fs_open", { path });
+    } catch (err) {
+      footEl.textContent = String(err);
+    }
+  }
+
+  /// 删除前再确认一次：菜单里已经有「删除」了，误点的代价是不可逆的。
+  function confirmDelete(target: MenuTarget, anchor: { x: number; y: number }) {
+    showPopupMenu(
+      anchor,
+      [
+        { label: t("files.deleteConfirm", { name: target.name }), disabled: true },
+        { label: t("files.delete"), danger: true, run: () => void removeEntry(target) },
+        { label: t("common.cancel") }
+      ],
+      { minWidth: 220 }
+    );
+  }
+
+  /// 删除（移到回收站，系统不支持时后端会报错而不是静默永久删除）。
+  async function removeEntry(target: MenuTarget) {
+    try {
+      await invoke("fs_delete", { path: target.path });
+      footEl.textContent = t("files.deleted", { name: target.name });
+      if (selectedName === target.name) selectedName = null;
+      await reload();
+    } catch (err) {
+      footEl.textContent = String(err);
+    }
+  }
+
+  /// 新建文件夹：重名规则在后端（新建文件夹 / 新建文件夹 (2)…），
+  /// 建成后立刻对新行进入重命名，和资源管理器「新建后直接改名」的习惯一致。
+  async function createFolder(dir: string) {
+    try {
+      const created = await invoke<string>("fs_new_folder", {
+        dir,
+        base: t("files.newFolderName")
+      });
+      await reload();
+      beginRename(created);
+    } catch (err) {
+      footEl.textContent = String(err);
+    }
+  }
+
+  /// 按路径找到那一行并进入重命名。找不到（被截断或被隐藏过滤）就什么都不做。
+  function beginRename(path: string) {
+    if (renaming) return;
+    for (const child of Array.from(listEl.children)) {
+      const row = child as HTMLElement;
+      const info = rowInfo.get(row);
+      if (info && info.path === path) {
+        startRename(row, info);
+        return;
+      }
+    }
+  }
+
+  /// 行内重命名：把名字换成输入框，回车提交、Esc 取消、失焦也算提交。
+  /// 新名字交给后端校验（不允许路径分隔符与非法字符），界面上不复制第二套规则。
+  function startRename(row: HTMLElement, info: { path: string; name: string; kind: RowKind }) {
+    const nameEl = row.querySelector<HTMLElement>(".f-name");
+    if (!nameEl) return;
+    const current = info.name;
+    const input = document.createElement("input");
+    input.className = "f-rename";
+    input.type = "text";
+    input.value = current;
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    renaming = true;
+    stopAuto();
+    nameEl.textContent = "";
+    nameEl.append(input);
+    input.focus();
+    // 和资源管理器一样只预选主文件名：扩展名留着，避免改个名字把类型弄丢
+    const dot = info.kind === "dir" ? -1 : current.lastIndexOf(".");
+    input.setSelectionRange(0, dot > 0 ? dot : current.length);
+
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      done = true;
+      renaming = false;
+      // 先还原成旧名字；提交成功时由 reload 换成新名字，失败时正好停在原地
+      nameEl.textContent = current;
+      scheduleAuto();
+      if (commit) void applyRename(info, input.value);
+    };
+    input.addEventListener("keydown", (event) => {
+      // 行内输入框里的按键不往外走：回车、Delete 都不该被列表或全局快捷键接手
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+    // 点输入框是在放光标，不该触发行的选中/进入
+    input.addEventListener("mousedown", (event) => event.stopPropagation());
+    input.addEventListener("dblclick", (event) => event.stopPropagation());
+  }
+
+  async function applyRename(info: { path: string; name: string; kind: RowKind }, raw: string) {
+    const next = raw.trim();
+    if (!next || next === info.name) return;
+    try {
+      const renamedPath = await invoke<string>("fs_rename", { path: info.path, name: next });
+      const name = renamedPath.slice(renamedPath.replace(/\//g, "\\").lastIndexOf("\\") + 1);
+      // 重画后按新名字恢复选中，用户能立刻接着操作这一行
+      selectedName = name;
+      footEl.textContent = t("files.renamed", { name });
+      await reload();
     } catch (err) {
       footEl.textContent = String(err);
     }
@@ -272,6 +439,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     selected = null;
     selectedName = null;
     upTarget = null;
+    renaming = false;
     autoFailures = 0;
     stopAuto();
     closePopupMenu();
@@ -308,7 +476,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
 
   /// 排序按钮上的文案：字段 + 方向箭头。
   function sortLabel(field: FileSortField, dir: FileSortDir): string {
-    const name = field === "name" ? t("files.sortName") : t("files.sortCreated");
+    const name = field === "name" ? t("files.sortName") : t("files.sortModified");
     return `${name} ${dir === "asc" ? "↑" : "↓"}`;
   }
 
@@ -429,6 +597,9 @@ export function setupFilePanel(deps: FilePanelDeps) {
   }
 
   function render(listing: FsListing) {
+    // 行内重命名期间绝不重建列表：输入框长在行里，重建一次就没了。
+    // 自动刷新在重命名期间已经停掉，这里再兜一道（手动刷新、面板重排都会走到 render）。
+    if (renaming) return;
     // 列表重建时菜单还开着，就会指向一行已经不存在的条目
     closePopupMenu();
     // 同一目录自动刷新时保住滚动位置与选中行；换了目录才从头开始
@@ -504,13 +675,18 @@ export function setupFilePanel(deps: FilePanelDeps) {
     name.textContent = PARENT_ROW_NAME;
 
     row.append(icon, name);
+    rowInfo.set(row, { path: parent, name: PARENT_ROW_NAME, kind: "parent" });
     row.addEventListener("mousedown", (event) => event.preventDefault());
     row.addEventListener("click", () => select(row, PARENT_ROW_NAME));
     row.addEventListener("dblclick", () => enter(parent));
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       select(row, PARENT_ROW_NAME);
-      void openContextMenu(event.clientX, event.clientY, { path: parent, kind: "parent" });
+      showRowMenu(event.clientX, event.clientY, {
+        path: parent,
+        name: PARENT_ROW_NAME,
+        kind: "parent"
+      });
     });
     return row;
   }
@@ -519,6 +695,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
     const row = document.createElement("div");
     row.className = "f-row" + (entry.kind === "dir" ? " dir" : "");
     row.title = entry.name + (entry.hidden ? t("files.hiddenMark") : "");
+    const path = joinPath(dir, entry.name);
 
     const icon = document.createElement("span");
     icon.className = "f-icon";
@@ -539,26 +716,32 @@ export function setupFilePanel(deps: FilePanelDeps) {
     size.className = "f-size";
     size.textContent = formatSize(entry);
 
+    // 时间是**修改时间**（列宽有限，当天只给时分；完整时间放悬停提示里）
     const time = document.createElement("span");
     time.className = "f-time";
     time.textContent = formatTime(entry.modified_ms);
+    const fullTime = formatFullTime(entry.modified_ms);
+    if (fullTime) time.title = t("files.timeModified", { time: fullTime });
 
     row.append(icon, name, size, time);
+    rowInfo.set(row, { path, name: entry.name, kind: entry.kind });
     // 点面板不该把焦点从终端或输入条抢走：按钮与行都在 mousedown 上阻止默认
     row.addEventListener("mousedown", (event) => event.preventDefault());
     row.addEventListener("click", () => select(row, entry.name));
     row.addEventListener("dblclick", () => {
+      // 双击目录进入，双击文件用默认程序打开（和资源管理器一致）
       if (entry.kind === "dir") {
-        enter(joinPath(dir, entry.name));
+        enter(path);
       } else {
-        deps.fillInput(joinPath(dir, entry.name));
+        void openEntry(path);
       }
     });
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       select(row, entry.name);
-      void openContextMenu(event.clientX, event.clientY, {
-        path: joinPath(dir, entry.name),
+      showRowMenu(event.clientX, event.clientY, {
+        path,
+        name: entry.name,
         kind: entry.kind
       });
     });
@@ -597,25 +780,45 @@ export function setupFilePanel(deps: FilePanelDeps) {
     selected = null;
     selectedName = null;
   });
-  // 空白处右键：目录自己的 Shell 背景菜单（新建 / 粘贴 / 属性……）
+  // 空白处右键：本面板的菜单（新建文件夹 / 打开 / 定位 / 复制 / 刷新）+ 系统背景菜单入口
   listEl.addEventListener("contextmenu", (event) => {
     const target = event.target as HTMLElement;
     if (target !== listEl && !target.classList.contains("f-empty")) return;
     event.preventDefault();
     listEl.focus();
     const path = lastListing?.path ?? currentPath ?? shownPath;
-    if (path) void openBlankMenu(event.clientX, event.clientY, path);
+    if (path) showBlankMenu(event.clientX, event.clientY, path);
   });
-  // 文件栏里按 F5 刷新：只在列表（空白处点过之后）有焦点时接管，
-  // 终端里的 F5 照常发给 Shell。
+  // 文件栏里的键盘操作：只在列表（空白处点过之后）有焦点时接管，
+  // 终端里的同名按键照常发给 Shell。
+  //   F5 刷新 · F2 重命名选中的行 · Delete 删除选中的行
   listEl.addEventListener("keydown", (event) => {
-    if (event.key !== "F5") return;
-    event.preventDefault();
-    event.stopPropagation();
-    void reload();
+    if (event.key === "F5") {
+      event.preventDefault();
+      event.stopPropagation();
+      void reload();
+      return;
+    }
+    if (event.key === "F2" || event.key === "Delete") {
+      const info = selected ? rowInfo.get(selected) : undefined;
+      // 「..」不是真实条目，重命名/删除对它没有意义
+      if (!selected || !info || info.kind === "parent") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "F2") {
+        startRename(selected, info);
+        return;
+      }
+      const rect = selected.getBoundingClientRect();
+      confirmDelete(
+        { path: info.path, name: info.name, kind: info.kind },
+        { x: rect.left + 24, y: rect.top + rect.height }
+      );
+    }
   });
 
-  /// 现在允许自动刷新吗：开关开着、面板展开、整栏没收起、有会话、窗口可见、且不在拖拽中。
+  /// 现在允许自动刷新吗：开关开着、面板展开、整栏没收起、有会话、窗口可见、
+  /// 不在拖拽中，也没有正在行内重命名（重画会把输入框抹掉）。
   /// 任一不满足就不排期，省掉白读盘，也不会在拖动面板时插进一次重绘。
   function canAuto(): boolean {
     return (
@@ -623,6 +826,7 @@ export function setupFilePanel(deps: FilePanelDeps) {
       expanded &&
       !collapsed &&
       !panel.hidden &&
+      !renaming &&
       deps.sessionId() !== "" &&
       document.visibilityState === "visible" &&
       !isPopupMenuOpen() &&
@@ -733,8 +937,8 @@ export function setupFilePanel(deps: FilePanelDeps) {
     const options: Array<{ field: FileSortField; dir: FileSortDir; label: string }> = [
       { field: "name", dir: "asc", label: t("files.sortNameAsc") },
       { field: "name", dir: "desc", label: t("files.sortNameDesc") },
-      { field: "created", dir: "asc", label: t("files.sortCreatedAsc") },
-      { field: "created", dir: "desc", label: t("files.sortCreatedDesc") }
+      { field: "modified", dir: "asc", label: t("files.sortModifiedAsc") },
+      { field: "modified", dir: "desc", label: t("files.sortModifiedDesc") }
     ];
     showPopupMenu(
       sortBtn,

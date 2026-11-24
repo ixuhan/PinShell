@@ -12,6 +12,7 @@ import {
   clampPanelWidth,
   formatSize,
   formatTime,
+  formatFullTime,
   joinPath,
   normalizePanelPrefs,
   normalizePanelStore,
@@ -88,6 +89,17 @@ describe("formatTime", () => {
   it("没有时间就显示空串", () => {
     expect(formatTime(null, now)).toBe("");
     expect(formatTime(Number.NaN, now)).toBe("");
+  });
+});
+
+describe("formatFullTime", () => {
+  it("把年月日时分秒补全（时间列太窄时会省略，悬停提示用完整值）", () => {
+    expect(formatFullTime(new Date(2026, 10, 17, 18, 5, 9).getTime())).toBe("2026-11-17 18:05:09");
+  });
+
+  it("没有时间就显示空串", () => {
+    expect(formatFullTime(null)).toBe("");
+    expect(formatFullTime(Number.NaN)).toBe("");
   });
 });
 
@@ -255,17 +267,19 @@ describe("sameListing", () => {
 });
 
 describe("排序字段与方向", () => {
-  it("方向缺省时名称正序、创建时间倒序（最新优先）", () => {
-    expect(parseSortField("created")).toBe("created");
+  it("方向缺省时名称正序、修改时间倒序（最新优先）", () => {
+    expect(parseSortField("modified")).toBe("modified");
     expect(parseSortField("name")).toBe("name");
     expect(parseSortField(null)).toBe("name");
     expect(parseSortField("size")).toBe("name");
+    // 旧版本把时间字段存成 created：升级后按修改时间继续排，不能悄悄退回名称排序
+    expect(parseSortField("created")).toBe("modified");
 
     expect(parseSortDir("asc")).toBe("asc");
     expect(parseSortDir("desc")).toBe("desc");
     expect(parseSortDir(null, "name")).toBe("asc");
-    expect(parseSortDir(null, "created")).toBe("desc");
-    expect(parseSortDir("sideways", "created")).toBe("desc");
+    expect(parseSortDir(null, "modified")).toBe("desc");
+    expect(parseSortDir("sideways", "modified")).toBe("desc");
   });
 
   it("名称正序按数字大小比较，倒序完全反过来", () => {
@@ -288,22 +302,22 @@ describe("排序字段与方向", () => {
     expect(entries[0].name).toBe("file10.txt");
   });
 
-  it("创建时间排序时目录始终在前，组内按方向排，缺失时间排在最后", () => {
+  it("修改时间排序时目录始终在前，组内按方向排，缺失时间排在最后", () => {
     const entries = [
-      entry({ name: "old.txt", created_ms: 100 }),
-      entry({ name: "new.txt", created_ms: 300 }),
-      entry({ name: "no-time.txt", created_ms: null }),
-      entry({ name: "dir-new", kind: "dir", created_ms: 200 }),
-      entry({ name: "dir-old", kind: "dir", created_ms: 50 })
+      entry({ name: "old.txt", modified_ms: 100 }),
+      entry({ name: "new.txt", modified_ms: 300 }),
+      entry({ name: "no-time.txt", modified_ms: null }),
+      entry({ name: "dir-new", kind: "dir", modified_ms: 200 }),
+      entry({ name: "dir-old", kind: "dir", modified_ms: 50 })
     ];
-    expect(sortEntries(entries, "created", "asc").map((item) => item.name)).toEqual([
+    expect(sortEntries(entries, "modified", "asc").map((item) => item.name)).toEqual([
       "dir-old",
       "dir-new",
       "old.txt",
       "new.txt",
       "no-time.txt"
     ]);
-    expect(sortEntries(entries, "created", "desc").map((item) => item.name)).toEqual([
+    expect(sortEntries(entries, "modified", "desc").map((item) => item.name)).toEqual([
       "dir-new",
       "dir-old",
       "new.txt",
@@ -312,13 +326,24 @@ describe("排序字段与方向", () => {
     ]);
   });
 
-  it("创建时间相同时按名称兜底，方向与当前方向一致", () => {
+  it("修改时间相同时按名称兜底，方向与当前方向一致", () => {
     const entries = [
-      entry({ name: "b.txt", created_ms: 100 }),
-      entry({ name: "a.txt", created_ms: 100 })
+      entry({ name: "b.txt", modified_ms: 100 }),
+      entry({ name: "a.txt", modified_ms: 100 })
     ];
-    expect(sortEntries(entries, "created", "asc").map((item) => item.name)).toEqual(["a.txt", "b.txt"]);
-    expect(sortEntries(entries, "created", "desc").map((item) => item.name)).toEqual(["b.txt", "a.txt"]);
+    expect(sortEntries(entries, "modified", "asc").map((item) => item.name)).toEqual(["a.txt", "b.txt"]);
+    expect(sortEntries(entries, "modified", "desc").map((item) => item.name)).toEqual(["b.txt", "a.txt"]);
+  });
+
+  it("创建时间不再参与排序：改了创建的旧文件仍按修改时间排在后面", () => {
+    const entries = [
+      entry({ name: "old-created-new-modified", created_ms: 1, modified_ms: 900 }),
+      entry({ name: "new-created-old-modified", created_ms: 900, modified_ms: 100 })
+    ];
+    expect(sortEntries(entries, "modified", "asc").map((item) => item.name)).toEqual([
+      "new-created-old-modified",
+      "old-created-new-modified"
+    ]);
   });
 });
 
@@ -338,36 +363,59 @@ describe("autoRefreshDelay", () => {
   });
 });
 
-describe("降级右键菜单", () => {
-  it("文件有四项：打开、定位、复制、填入输入条", () => {
+describe("右键菜单", () => {
+  it("文件有六项：打开、定位、复制、填入输入条、重命名、删除", () => {
     const items = rowMenu("file");
-    expect(items.map((item) => item.command)).toEqual(["open", "reveal", "copy", "fill"]);
+    expect(items.map((item) => item.command)).toEqual([
+      "open",
+      "reveal",
+      "copy",
+      "fill",
+      "rename",
+      "delete"
+    ]);
     expect(items[0].label).toBe("用默认程序打开");
+    expect(items.find((item) => item.command === "delete")?.danger).toBe(true);
   });
 
-  it("目录只有三项，且「打开」就是进入该目录", () => {
+  it("目录有五项：能打开、定位、复制、重命名与删除", () => {
     const items = rowMenu("dir");
-    expect(items.map((item) => item.command)).toEqual(["open", "reveal", "copy"]);
+    expect(items.map((item) => item.command)).toEqual([
+      "open",
+      "reveal",
+      "copy",
+      "rename",
+      "delete"
+    ]);
     expect(items[0].label).toBe("打开");
   });
 
-  it("「..」行没有填入输入条，标签点明是上级目录", () => {
+  it("「..」行不提供重命名/删除，标签点明是上级目录", () => {
     const items = rowMenu("parent");
     expect(items.map((item) => item.command)).toEqual(["open", "reveal", "copy"]);
     expect(items[1].label).toBe("在资源管理器中显示上级目录");
   });
 
-  it("未知类型按文件处理，仍可定位与复制", () => {
+  it("未知类型按文件处理，仍可定位、复制与删除", () => {
     expect(rowMenu("other").map((item) => item.command)).toEqual([
       "open",
       "reveal",
       "copy",
-      "fill"
+      "fill",
+      "rename",
+      "delete"
     ]);
   });
 
-  it("空白处的降级菜单：打开、定位、复制、刷新", () => {
-    expect(blankMenu().map((item) => item.command)).toEqual(["open", "reveal", "copy", "refresh"]);
+  it("空白处的菜单：新建文件夹、在资源管理器中打开、复制路径、刷新", () => {
+    expect(blankMenu().map((item) => item.command)).toEqual([
+      "newFolder",
+      "open",
+      "copy",
+      "refresh"
+    ]);
+    expect(blankMenu()[0].label).toBe("新建文件夹");
+    expect(blankMenu()[1].label).toBe("在资源管理器中打开");
     expect(blankMenu()[3].label).toBe("刷新");
   });
 });

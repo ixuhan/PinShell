@@ -161,14 +161,17 @@
 
 | 项 | 步骤 | 期望 |
 |---|---|---|
-| 原生菜单 | `npm run app:dev`，右键文件面板里的文件 | 弹出资源管理器菜单，「打开方式」「发送到」与第三方扩展（7-Zip、TortoiseGit 等）都在；选一项能真的执行 |
-| 空白处背景菜单 | 右键文件列表的空白处（或「（空目录）」提示） | 弹出该目录的背景菜单（新建 / 粘贴 / 属性等，与资源管理器右键空白处同源）；选「新建 → 文本文档」能在当前目录建出文件 |
+| 面板菜单 | `npm run app:dev`，右键文件面板里的文件 | 先出面板自己的菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条 / 重命名 / 删除），不依赖 helper；删除整行标红并二次确认 |
+| 系统菜单 | 面板菜单里点最后一项「系统菜单…」 | 接着弹出资源管理器菜单，「打开方式」「发送到」与第三方扩展（7-Zip、TortoiseGit 等）都在；选一项能真的执行，执行完列表自动刷新 |
+| 空白处背景菜单 | 右键文件列表的空白处（或「（空目录）」提示），点「系统背景菜单…」 | 先出（新建文件夹 / 打开 / 在资源管理器中显示 / 复制路径 / 刷新）；再点末项弹出该目录的背景菜单（新建 / 粘贴 / 属性等，与资源管理器右键空白处同源），选「新建 → 文本文档」能在当前目录建出文件 |
+| 重命名 / 删除 / 新建 | 右键一行选「重命名」改名字回车；选「删除」确认；空白处选「新建文件夹」 | 行内出现输入框（预选主文件名），回车后列表显示新名字且该行仍选中；删除进回收站、列表少一项；新建后新行直接进入改名 |
 | F5 刷新 | 单击文件列表空白处后按 `F5` | 列表立刻重读当前目录；焦点在终端时 `F5` 仍发给 Shell，不会刷新面板 |
+| 双击与键盘 | 双击文件；单击一行后按 `F2` 改名回车；按 `Delete` 并确认 | 双击文件用默认程序打开（不再填输入条）；`F2` 在行内编辑名字、回车生效；`Delete` 先弹确认，删除后进回收站 |
 | 路径栏 | 单击面包屑里的某一级名称；点 `✎` 或双击路径栏空白处输入 `C:\Windows` 回车 | 名称单击直接进入该级目录；编辑后回车跳转、`Esc` 取消；输入不存在的路径显示错误并可继续编辑 |
-| 取消 | 原生菜单或背景菜单打开时，点菜单外面或按 `Esc` | 菜单消失，会话、输入条、自动刷新都正常 |
-| 缺失降级 | 把 `src-tauri\target\debug\pinshell-shellmenu.exe` 改名后右键 | 出四项自建菜单（打开 / 在资源管理器中显示 / 复制路径 / 填入输入条），空白处出（打开 / 在资源管理器中显示 / 复制路径 / 刷新）；主进程不崩；改回名字并重启应用后恢复原生 |
-| 崩溃降级 | 用一个立刻退出的 exe 覆盖 helper（或启动应用前把 `PINSHELL_SHELLMENU` 指向它） | 同上降级，主进程存活，能继续切会话 |
-| 安装版 | 装 `src-tauri\target\release\bundle\nsis\PinShell_0.1.0_x64-setup.exe` 后右键 | 安装目录里有 `pinshell-shellmenu.exe`，右键仍出原生菜单；卸载后不残留 |
+| 取消 | 面板菜单或系统菜单打开时，点菜单外面或按 `Esc` | 菜单消失，会话、输入条、自动刷新都正常 |
+| 缺失 helper | 把 `src-tauri\target\debug\pinshell-shellmenu.exe` 改名后右键 | 面板自己的菜单照常出（重命名 / 删除 / 新建都能用）；点「系统菜单…」在页脚提示缺少 `pinshell-shellmenu.exe`；主进程不崩；改回名字并重启应用后系统菜单恢复 |
+| 崩溃 helper | 用一个立刻退出的 exe 覆盖 helper（或启动应用前把 `PINSHELL_SHELLMENU` 指向它） | 同上，面板菜单不受影响，主进程存活，能继续切会话 |
+| 安装版 | 装 `src-tauri\target\release\bundle\nsis\PinShell_0.1.0_x64-setup.exe` 后右键 | 安装目录里有 `pinshell-shellmenu.exe`，面板菜单与「系统菜单…」都正常；卸载后不残留 |
 
 打包这一项已自动核对：`npm run app:build` 产出的 MSI 与 NSIS 里各只有一份 `pinshell-shellmenu.exe`（生成的 `main.wxs` 与 `installer.nsi` 各一行），文件名与运行时查找的名字一致。
 
@@ -270,10 +273,11 @@
 | 卷轴行数上限 | `src/main.ts` 的 `SCROLLBACK_LINES` | 取 5000 行（约 2 MB）；`scripts/bench-scrollback.mjs` 实测稳态吞吐与上限无关（52–57 MB/s）、内存约 0.4 KB/行，数字见 `docs/bench-m0.md` |
 | 切会话 / 窗口缩放（手工回归） | `.probe/probe_switch_resize.ps1` | 侧栏行按无障碍文本定位再点（行高随 DPI 变，写死 y 会点到标题栏，结论是假的）；两个会话各留一条标记命令，切走再切回后磁盘快照里只有各自的标记（`MARK-A` 只出现在 423c、`MARK-B` 只出现在 c387），回放尾巴完整、无重影；窗口宽度 −300 px 后 Shell 里的 `$Host.UI.RawUI.WindowSize.Width` 由 172 变成 129（探针把它写进 `w_before.txt` / `w_after.txt` 核对），说明 resize 真下到了 PTY |
 | M4 文件面板（第一片） | `core-domain/src/fsview.rs`、`src-tauri/src/fsview.rs`、`src/filePanel.ts`、`src/filePanelUi.ts` | `fs_list` 只读列目录（`path` 为空时跟随会话 CWD，读盘在阻塞线程池）；排序/隐藏过滤/截断/路径归一化在 core-domain（9 个用例）；`std::fs` 填元数据（跟随链接判类型、Windows 隐藏属性）3 个用例；`session:cwd` 只在 CWD 真变更时推；面板显示格式与跟随/固定选择 13 个前端用例；折叠/展开不抢焦点，切换后终端重新 fit |
-| M4 文件面板（右键菜单） | `src-tauri/src/bin/shellmenu.rs`、`src-tauri/src/shellmenu.rs`、`src/filePanelUi.ts`、`src/filePanel.ts` | helper 独立进程走 `IContextMenu`（STA、光标定位、`TPM_RETURNCMD`）；条目菜单用 `GetUIObjectOf`，列表空白处的背景菜单用 `IShellFolder::CreateViewObject` 请求 `IContextMenu`（`--background`，probe 在 `F:\PinShell` 实测生成 10 项）；主进程最多等 10 分钟，缺失/崩溃/超时都返回 `unavailable` 并由前端画降级菜单；`fs_open` / `fs_reveal` 走系统关联；`rowMenu`、`blankMenu`、`clampMenuPosition`、`pathSegments` 由 13 个前端用例覆盖；helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出（不弹菜单）；helper 是普通 `[[bin]]`，`app:build` 随 crate 一起编译并打进 MSI/NSIS（tauri-cli 2.12 自动收录 bin；再声明 `externalBin` 会把同一个文件装两遍，WiX 以 ICE30 拒绝链接）；「没有 helper / 路径写错 / 启动失败」三条降级路径由 3 个 Rust 用例覆盖，崩溃与超时仍靠手工 |
+| M4 文件面板（右键菜单） | `src-tauri/src/bin/shellmenu.rs`、`src-tauri/src/shellmenu.rs`、`src/filePanelUi.ts`、`src/filePanel.ts` | 面板自己的菜单为主（`rowMenu` / `blankMenu`），末项「系统菜单…」才走原生：helper 独立进程走 `IContextMenu`（STA、光标定位、`TPM_RETURNCMD`）；条目菜单用 `GetUIObjectOf`，列表空白处的背景菜单用 `IShellFolder::CreateViewObject` 请求 `IContextMenu`（`--background`，probe 在 `F:\PinShell` 实测生成 10 项）；主进程最多等 10 分钟，缺失/崩溃/超时都返回 `unavailable`，前端只在页脚提示、面板菜单照常可用；`fs_open` / `fs_reveal` 走系统关联；`rowMenu`、`blankMenu`、`clampMenuPosition`、`pathSegments` 由 13 个前端用例覆盖；helper 的 `--probe` 只跑到 `QueryContextMenu` 就退出（不弹菜单）；helper 是普通 `[[bin]]`，`app:build` 随 crate 一起编译并打进 MSI/NSIS（tauri-cli 2.12 自动收录 bin；再声明 `externalBin` 会把同一个文件装两遍，WiX 以 ICE30 拒绝链接）；「没有 helper / 路径写错 / 启动失败」三条降级路径由 3 个 Rust 用例覆盖，崩溃与超时仍靠手工 |
 | M4 文件面板（第二片：自动刷新） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 逐项比较 5 个用例（任一字段或顺序变了才算变化）、刷新间隔与失败退避 2 个用例（大目录 10 秒、失败按 2 的幂退避）、宽度夹取 5 个：合计 12 个前端用例。DOM 行为用假 IPC 的浏览器验证台确认：内容不变时 1 秒一次只发 `fs_list`、零 DOM 变更；内容变化时重绘 200 行且 `scrollTop` 与选中行都还在；面板收起、无会话时不发请求；大目录（`total > 1000`）周期变 10 秒；一次读盘失败后下一次等到 2 秒 |
 | M4 文件面板（第三片：`..`、左栏调宽与收起） | `src/filePanelUi.ts`、`src/sidebar.ts`、`src/sidebarUi.ts`、`src/resize.ts`、`src/styles.css` | 两侧拖动共用同一套手势与 `body.layout-dragging`，拖动中只改 CSS、松手才 `layoutChanged`；左栏 150–360px，两栏各自量对方实时宽度定上限。两栏都能收起成 26px 竖条（左栏竖排「会话」展开按钮），折叠状态与宽度一起进 `localStorage`。前端用例 14 个（夹取 7、存储解析 5、序列化 2，坏数据回默认）。浏览器验证台确认：`..` 只在有父目录时出现、单击可选中、双击发出 `path=C:\`（转「固定」）、无父目录与空目录两种情况都对；左栏 196→297 拖动中零次重排、松手一次；拖到 +900px 被夹在 360；窗口缩到 700px 后两栏各自缩到 195/324、终端留住 180；点「‹」收起后宽度 27px、列表与手柄隐藏、展开按钮出现且 `layoutChanged` 一次，点展开恢复原宽度并再 `layoutChanged` 一次；收起状态重载页面后仍在（存的是 `{"width":195,"collapsed":true}`，展开回到 196） |
 | M4 文件面板（第四片：设置绑定会话） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src/filePanel.test.ts` | 「跟随 / 固定」「自动」「隐」改为**会话级**：存储形如 `{expanded, width, defaults, sessions: {id: {mode, auto, showHidden, path}}}`，切会话先回写上一个会话、再换上新会话的一套；旧版顶层全局配置迁移成 `defaults`，已有会话不被重置。前端用例 6 个（旧版迁移、两会话互不影响、跟随不保留固定路径、脏字段逐项回退、宽度坏值、空存储默认值）。假 IPC 验证台确认：s1 开「隐」+「自动」、s2 关「隐」并转「固定」后，来回切换分别恢复成 `跟随/隐开/自动开` 与 `固定/隐关/自动开`，重载页面后两套仍在，`localStorage` 里两个会话各一条记录 |
+| M4 文件面板（第五片：双击打开、修改时间、改名/删除/新建） | `src/filePanel.ts`、`src/filePanelUi.ts`、`src-tauri/src/main.rs` | 双击文件改走 `fs_open`（不再往输入条填路径），双击目录仍进入并转固定；时间列与排序字段都是**修改时间**（`modified_ms`，旧存储里的 `created` 读成 `modified`，不会悄悄退回名称排序）；`fs_rename` 只接受名字本身（路径分隔符、非法字符、结尾点、Windows 保留设备名都拒绝；只改大小写时放行），`fs_delete` 走 `SHFileOperationW` + `FOF_ALLOWUNDO` 进回收站而不是永久删除，`fs_new_folder` 自己处理重名（`(2)`、`(3)`…）；前端 `F2` 行内改名、`Delete` 二次确认、空白处新建后直接进入改名，改名期间自动刷新暂停且列表不重建。前端用例新增 3 个（`formatFullTime` 2、创建时间不再参与排序 1），Rust 新增 4 个名字校验用例 |
 | M5 串口规则（L0-10 / L0-12 / L0-13 的 I4） | `src-tauri/core-domain/src/serial.rs` | 14 个用例：HEX 分隔符/大小写/奇数位/非法字符位置/往返、CRLF-CR-LF 字节、行缓冲与直发组包、HEX 不追加结束符、8N1 默认值与端口/波特率校验、标题截断、能力位、端口比较不区分大小写、同一端口单热会话、日志转义与文件名安全化 |
 | M5 通道抽象与假 Transport | `src-tauri/src/transport.rs` | `Transport` trait 统一终端与串口；`PtyTransport` 收下 resize 去重；`SerialTransport` 读写/释放/重开/日志；`MemoryTransport` 回环（`PINSHELL_FAKE_SERIAL=1`）。10 个主 crate 用例：能力位、写读往返、释放后读端结束且写入报错、重开后能继续收发、回环横幅与回显、端口数字排序、日志方向与转义、枚举不 panic、HEX 预览、发送方式标签 |
 | M5 串口会话生命周期 | `spawn_serial_session` / `serial_connect` / `serial_disconnect` / `pty_set_paused` | 暂停即真释放（丢写句柄并 join 读线程）；重连先丢弃失败句柄再重开；失败后会话保持热；I4 由 `conflicting_session` 判定且在 `spawn_serial_session` 与 `connect_serial` 两处生效；串口读线程不喂 OSC、更新静默时间、写原始日志；冷会话按工作区配置重连 |
